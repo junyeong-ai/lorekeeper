@@ -1281,11 +1281,13 @@ mod tests {
     #[test]
     fn discovery_hydrates_only_matching_review_evidence_with_exact_capture_parity() {
         let (root, dirs) = discovery_review_fixture();
-        let queries = vec![vec![crate::DiscoveryQuery {
-            query: "Focus".into(),
-            phrase: false,
-            spacing: false,
-        }]];
+        let queries = [crate::DiscoveryRecipe::complete(vec![
+            crate::DiscoveryQuery {
+                query: "Focus".into(),
+                phrase: false,
+                spacing: false,
+            },
+        ])];
         REVIEW_READS.with(|reads| reads.set((0, 0)));
         let (actual, _) = crate::capture_discovery_batch_controlled(
             root.path(),
@@ -1320,11 +1322,13 @@ mod tests {
         let read = crate::ReadControl::new(cancelled.clone());
         CANCEL_ARCHIVE_READ.with(|flag| *flag.borrow_mut() = Some(cancelled));
         REVIEW_READS.with(|reads| reads.set((0, 0)));
-        let queries = vec![vec![crate::DiscoveryQuery {
-            query: "Focus".into(),
-            phrase: false,
-            spacing: false,
-        }]];
+        let queries = [crate::DiscoveryRecipe::complete(vec![
+            crate::DiscoveryQuery {
+                query: "Focus".into(),
+                phrase: false,
+                spacing: false,
+            },
+        ])];
         let result =
             crate::capture_discovery_batch_controlled(root.path(), &dirs, &queries, None, &read);
         assert!(matches!(result, Err(VaultError::Cancelled)));

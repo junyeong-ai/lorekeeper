@@ -1601,7 +1601,7 @@ fn selected_profile_budget_reaches_controller_and_worker_commands() {
         );
         assert_eq!(
             result["execution"]["work"],
-            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"max_parallel":1,"max_consecutive_calls":4,"extraction_context":"full-context"})
+            serde_json::json!({"max_input_bytes":16384,"max_result_bytes":2048,"max_calls":1,"max_parallel":1,"max_consecutive_calls":4,"max_query_candidates":50,"extraction_context":"full-context"})
         );
         assert!(
             result["stages"]
@@ -3536,7 +3536,7 @@ fn progressive_extraction_fixture(
         )
         .replace(
             "  default_profile: primary\n",
-            &format!("  default_profile: primary\n  work: {{max_input_bytes: {input_bytes}, max_result_bytes: {result_bytes}, max_calls: 64}}\n"),
+            &format!("  default_profile: primary\n  work: {{max_input_bytes: {input_bytes}, max_result_bytes: {result_bytes}, max_calls: 64, max_query_candidates: {}}}\n", candidates.max(1)),
         );
     std::fs::write(&fixture.config, config).unwrap();
     let root = fixture.root().join("vault");
@@ -3836,8 +3836,24 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
             .find(|cost| cost["query"]["query"] == "Candidate 000")
             .unwrap();
         assert_eq!(broad["matched_candidates"], 32);
+        assert_eq!(broad["rostered_candidates"], 32);
         assert_eq!(broad["exclusive_candidates"], 31);
         assert_eq!(narrow["matched_candidates"], 1);
+        let complete = std::fs::read_to_string(&fixture.config).unwrap();
+        std::fs::write(
+            &fixture.config,
+            complete.replace("max_query_candidates: 32", "max_query_candidates: 20"),
+        )
+        .unwrap();
+        let ranked = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
+        assert_eq!(ranked["cost"]["candidates"], 20, "{ranked}");
+        let ranked = ranked["cost"]["queries"].as_array().unwrap();
+        assert_eq!(ranked[0]["query"]["query"], "Candidate 000");
+        assert_eq!(ranked[0]["matched_candidates"], 1);
+        assert_eq!(ranked[0]["rostered_candidates"], 1);
+        assert_eq!(ranked[1]["matched_candidates"], 32);
+        assert_eq!(ranked[1]["rostered_candidates"], 20);
+        std::fs::write(&fixture.config, complete).unwrap();
         let context = execution_json(&fixture, &["work", "context", "--task-id", &task.task_id]);
         assert_eq!(context["status"], "needs-admission");
         let root = fixture.root().join("vault");

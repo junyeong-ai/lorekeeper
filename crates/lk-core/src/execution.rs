@@ -162,6 +162,8 @@ pub struct SemanticWorkConfig {
     pub max_consecutive_calls: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_screening_batches: Option<NonZeroUsize>,
+    /// Ranked discovery candidates each query contributes besides its identity matches.
+    pub max_query_candidates: NonZeroUsize,
     pub extraction_context: ExtractionContext,
 }
 
@@ -174,6 +176,7 @@ pub struct SemanticWorkOverrides {
     pub max_parallel: Option<usize>,
     pub max_consecutive_calls: Option<usize>,
     pub max_screening_batches: Option<NonZeroUsize>,
+    pub max_query_candidates: Option<NonZeroUsize>,
     pub extraction_context: Option<ExtractionContext>,
 }
 
@@ -190,6 +193,9 @@ impl SemanticWorkOverrides {
             max_screening_batches: self
                 .max_screening_batches
                 .or(defaults.max_screening_batches),
+            max_query_candidates: self
+                .max_query_candidates
+                .unwrap_or(defaults.max_query_candidates),
             extraction_context: self
                 .extraction_context
                 .unwrap_or(defaults.extraction_context),
@@ -223,6 +229,7 @@ impl Default for SemanticWorkConfig {
             max_parallel: 1,
             max_consecutive_calls: 4,
             max_screening_batches: None,
+            max_query_candidates: NonZeroUsize::new(50).expect("positive candidate bound"),
             extraction_context: ExtractionContext::Progressive,
         }
     }
@@ -680,6 +687,7 @@ mod tests {
             assert_eq!(config.work.max_result_bytes, 32_768);
             assert_eq!(config.work.max_calls, 64);
             assert_eq!(config.work.max_consecutive_calls, 4);
+            assert_eq!(config.work.max_query_candidates.get(), 50);
             assert_eq!(
                 config.work.extraction_context,
                 ExtractionContext::Progressive
@@ -733,6 +741,8 @@ mod tests {
             "work: {max_parallel: true}",
             "work: {max_consecutive_calls: -1}",
             "work: {max_consecutive_calls: true}",
+            "work: {max_query_candidates: 0}",
+            "work: {max_query_candidates: many}",
             "work: {max_input_bytes: true}",
             "work: {max_result_bytes: many}",
             "work: {extraction_context: automatic}",
@@ -837,6 +847,7 @@ mod tests {
             config.effective_work().unwrap(),
             SemanticWorkConfig {
                 max_screening_batches: None,
+                max_query_candidates: NonZeroUsize::new(50).unwrap(),
                 max_input_bytes: 16384,
                 max_result_bytes: 4096,
                 max_calls: 2,

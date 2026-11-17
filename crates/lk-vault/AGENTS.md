@@ -179,6 +179,14 @@ including resolved spellings and the knowledge-text policy. Card capture returns
 preferred public-address selection. These local identities do not alter legacy
 capture serialization or replace full candidate-byte publication guards.
 
+A capture recipe states its roster. `Complete` keeps every match; `Ranked` keeps each
+query's best matches in the shared search order plus every identity match. The recipe's
+subject owner is never a candidate and takes no place. Rank decides membership only:
+it enters no card, revision or key. A rostered owner lists every query it matched, so
+its card depends only on that page and the recipe. Per-query matched/rostered counts
+disclose what a ranked roster left unexamined. Cards and guard bytes exist only for
+roster members; `discover_queries` stays complete.
+
 ## Navigation (`search_index.rs`, `navigation.rs`)
 
 - `prepare_search` atomically commits a reconstructible FTS5 snapshot; failed reads

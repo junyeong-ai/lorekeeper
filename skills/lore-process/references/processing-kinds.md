@@ -297,7 +297,7 @@ Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
 Before drafting, choose retrieval recipes through [extraction discovery](discovery.md)
 and require `lore work context --task-id TASK` to report `status: ready`. The default
-progressive scope first examines the complete candidate-card inventory, then reads
+progressive scope first examines the ranked candidate-card roster, then reads
 selected bodies and their required reviews/evidence in full. `not-selected` certifies
 no whole-body negative judgment; unresolved `defer` blocks completion. `full-context`
 instead reads every retrieved body. Both read the complete retained source and guard

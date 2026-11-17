@@ -224,16 +224,21 @@ Optional positive `max_screening_batches` limits the complete candidate-card
 selection's packet count. Omission is unlimited; exceeding it preserves the full
 scope and paid decisions, defers that task before invocation and permits independent
 work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
+Positive `max_query_candidates` defaults to 50. Each extraction discovery query
+contributes the pages it names by identity plus that many best other matches in search
+order; `lore work cost` reports per query how many pages matched and how many are
+rostered. Unrostered matches are not examined. Audit discovery keeps every match.
 The same scope limit covers fresh audit discovery; `lore wiki audit-candidates SUBJECT`
 reports its current packet, progress and admission without writes. Existing legacy
 audit recipes retain full-context reading, and completed screening needs no new calls.
-For new Work and extraction candidate selections, call/parallel/consecutive-call/screening-packet limits and
-profile timeouts can change between workflows without discarding paid observations.
+For new Work and extraction candidate selections, call/parallel/consecutive-call/screening-packet limits,
+the per-query candidate bound and profile timeouts can change between workflows without
+discarding paid observations.
 Every configuration byte is still pinned during execution. Model/effort, input/result
 limits and semantic policies remain identity inputs. Legacy byte-bound work requires
 its exact original configuration; changing operational settings does not migrate it.
 `execution.work.extraction_context` defaults to `progressive`: examine bounded cards
-for the complete candidate inventory, then read selected bodies and their required
+for the ranked candidate roster, then read selected bodies and their required
 reviews/evidence. Card-only exclusions do not establish whole-body findings; deferred
 decisions block completion. `full-context` reads every retrieved candidate body.
 Both retain complete source reads and exact candidate/review guards. See

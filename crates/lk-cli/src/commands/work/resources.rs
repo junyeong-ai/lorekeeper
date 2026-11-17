@@ -504,6 +504,26 @@ pub(super) fn selection_inventory(
     )
 }
 
+/// The ranked candidate roster one extraction task screens: each query contributes its
+/// identity matches and the configured number of best other pages, never the target.
+pub(super) fn extraction_recipe(
+    config: &Config,
+    task: &lk_queue::QueueTask,
+    queries: Vec<lk_core::discovery::DiscoveryQuery>,
+) -> miette::Result<lk_vault::DiscoveryRecipe> {
+    Ok(lk_vault::DiscoveryRecipe {
+        queries,
+        roster: lk_vault::DiscoveryRoster::Ranked(
+            config
+                .execution
+                .effective_work()
+                .into_diagnostic()?
+                .max_query_candidates,
+        ),
+        subject: Some(PathBuf::from(&task.target.vault_path)),
+    })
+}
+
 pub(super) fn selection_inventory_controlled(
     root: &Path,
     config: &Config,
@@ -512,12 +532,18 @@ pub(super) fn selection_inventory_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectionInventory> {
     read.check().into_diagnostic()?;
+    let task = super::super::queue::select_task_controlled(
+        root,
+        task_id,
+        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
+        read,
+    )?;
     let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
         .into_diagnostic()?;
     let (mut captures, _) = lk_vault::capture_discovery_batch_with_inventory(
         root,
         &config.vault.dirs,
-        &[queries.to_vec()],
+        &[extraction_recipe(config, &task, queries.to_vec())?],
         &mut reviews,
         read,
     )
@@ -531,7 +557,7 @@ pub(super) fn selection_inventory_with_capture(
     root: &Path,
     config: &Config,
     task_id: &str,
-    mut capture: lk_vault::DiscoveryCapture,
+    capture: lk_vault::DiscoveryCapture,
     reviews: &mut lk_vault::ReviewInventory,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectionInventory> {
@@ -559,9 +585,15 @@ pub(super) fn selection_inventory_with_capture(
         }
     };
     let target_owner = lk_vault::resolve_page_owner(root, Path::new(&target)).into_diagnostic()?;
-    capture
+    if capture
         .candidates
-        .retain(|candidate| Path::new(&candidate.owner) != target_owner.as_path());
+        .iter()
+        .any(|candidate| Path::new(&candidate.owner) == target_owner.as_path())
+    {
+        return Err(miette::miette!(
+            "extraction capture lists its own target as a candidate"
+        ));
+    }
     let target_raw = source
         .pages
         .get(&target_owner)

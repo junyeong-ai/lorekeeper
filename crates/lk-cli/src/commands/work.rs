@@ -790,7 +790,7 @@ pub(super) fn task_context(
                 if let Some(reason) = screening.selection.admission_reason(config, &root)? {
                     return Ok(json!({"status":"needs-admission", "context_revision":null,
                         "requires_screening":true,"resources":null,"reason":reason,
-                        "cost":screening.selection.cost(&root)?,
+                        "cost":screening.selection.cost(&root, &screening.inventory.capture)?,
                         "cost_command":["lore","work","cost","--task-id",task_id]}));
                 }
                 let planned = screening.selection.is_planned(&root)?;
@@ -804,7 +804,7 @@ pub(super) fn task_context(
                         "requires_screening":true,"requires_source_work":false,"resources":null,
                         "candidate_count":screening.inventory.capture.candidates.len(),
                         "selection_id":screening.selection.id,"planned":planned,
-                        "cost":screening.selection.cost(&root)?,
+                        "cost":screening.selection.cost(&root, &screening.inventory.capture)?,
                         "plan_command":["lore","work","select","--task-id",task_id],
                         "authority":"Complete retrieval is not a semantic assessment. Read and record each assigned candidate-card decision; unresolved applicability remains deferred. Selected bodies still require full evidence inspection before publication."}));
                 }
@@ -1418,10 +1418,7 @@ impl Screening {
 
 struct ScreeningCapture {
     reviews: lk_vault::ReviewInventory,
-    captures: std::collections::BTreeMap<
-        Vec<lk_core::discovery::DiscoveryQuery>,
-        lk_vault::DiscoveryCapture,
-    >,
+    captures: std::collections::BTreeMap<lk_vault::DiscoveryRecipe, lk_vault::DiscoveryCapture>,
     metrics: lk_vault::DiscoveryCaptureMetrics,
     duration_ms: u64,
 }
@@ -1430,7 +1427,7 @@ impl ScreeningCapture {
     fn load(
         root: &Path,
         config: &lk_core::config::Config,
-        queries: &[Vec<lk_core::discovery::DiscoveryQuery>],
+        recipes: &[lk_vault::DiscoveryRecipe],
         read: &lk_vault::ReadControl,
     ) -> miette::Result<Self> {
         let started = std::time::Instant::now();
@@ -1440,24 +1437,25 @@ impl ScreeningCapture {
         let (captures, metrics) = lk_vault::capture_discovery_batch_with_inventory(
             root,
             &config.vault.dirs,
-            queries,
+            recipes,
             &mut reviews,
             read,
         )
         .into_diagnostic()?;
         Ok(Self {
             reviews,
-            captures: queries.iter().cloned().zip(captures).collect(),
+            captures: recipes.iter().cloned().zip(captures).collect(),
             metrics,
             duration_ms: started.elapsed().as_millis() as u64,
         })
     }
 }
 
-fn current_screening_queries(
+fn current_screening_recipes(
     root: &Path,
+    config: &lk_core::config::Config,
     task_ids: &[&str],
-) -> miette::Result<Vec<Vec<lk_core::discovery::DiscoveryQuery>>> {
+) -> miette::Result<Vec<lk_vault::DiscoveryRecipe>> {
     task_ids
         .iter()
         .map(|task_id| {
@@ -1466,9 +1464,10 @@ fn current_screening_queries(
                 task_id,
                 super::queue::TaskSelection::CurrentOrDoneExtraction,
             )?;
-            discovery::current(root, &task)?.ok_or_else(|| {
+            let queries = discovery::current(root, &task)?.ok_or_else(|| {
                 miette::miette!("candidate screening requires current explicit discovery")
-            })
+            })?;
+            resources::extraction_recipe(config, &task, queries)
         })
         .collect()
 }
@@ -1484,20 +1483,20 @@ fn map_current_screenings<T>(
 ) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
     read.check().into_diagnostic()?;
     let started_at = std::time::Instant::now();
-    let queries = current_screening_queries(root, task_ids)?;
+    let recipes = current_screening_recipes(root, config, task_ids)?;
     let query_duration_ms = started_at.elapsed().as_millis() as u64;
     let mut local;
     let capture = match capture {
         Some(capture) => capture,
         None => {
-            local = ScreeningCapture::load(root, config, &queries, read)?;
+            local = ScreeningCapture::load(root, config, &recipes, read)?;
             &mut local
         }
     };
-    let captures = queries
+    let captures = recipes
         .iter()
-        .map(|queries| {
-            capture.captures.get(queries).cloned().ok_or_else(|| {
+        .map(|recipe| {
+            capture.captures.get(recipe).cloned().ok_or_else(|| {
                 miette::miette!("discovery queries changed within the recording checkpoint")
             })
         })
@@ -1708,8 +1707,8 @@ pub(super) fn record_read_wave(
     let started = std::time::Instant::now();
     let captured = (|| {
         let tasks = screenings.iter().map(|(task, _)| *task).collect::<Vec<_>>();
-        let mut queries = current_screening_queries(session.root(), &tasks)?;
-        let inspection_queries = inspections
+        let mut recipes = current_screening_recipes(session.root(), config, &tasks)?;
+        let inspection_recipes = inspections
             .iter()
             .filter(|reply| {
                 reply.request["context"]["purpose"]["extraction_scope"]["policy"]
@@ -1723,15 +1722,15 @@ pub(super) fn record_read_wave(
                     })
             })
             .collect::<miette::Result<Vec<_>>>()
-            .and_then(|tasks| current_screening_queries(session.root(), &tasks));
-        if let Ok(inspection_queries) = &inspection_queries {
-            queries.extend(inspection_queries.iter().cloned());
+            .and_then(|tasks| current_screening_recipes(session.root(), config, &tasks));
+        if let Ok(inspection_recipes) = &inspection_recipes {
+            recipes.extend(inspection_recipes.iter().cloned());
         }
-        let mut capture = ScreeningCapture::load(session.root(), config, &queries, read)?;
+        let mut capture = ScreeningCapture::load(session.root(), config, &recipes, read)?;
         capture.duration_ms = started.elapsed().as_millis() as u64;
-        Ok::<_, miette::Report>((capture, inspection_queries.map(|_| ())))
+        Ok::<_, miette::Report>((capture, inspection_recipes.map(|_| ())))
     })();
-    let (mut capture, inspection_queries) = match captured {
+    let (mut capture, inspection_recipes) = match captured {
         Ok(captured) => captured,
         Err(error) => {
             return ReadWaveRecords {
@@ -1768,7 +1767,7 @@ pub(super) fn record_read_wave(
     } else if let Err(error) = validate_context() {
         InspectionRecording::Invalidated(error)
     } else {
-        InspectionRecording::Recorded(inspection_queries.and_then(|()| {
+        InspectionRecording::Recorded(inspection_recipes.and_then(|()| {
             record_inspections_with_capture(
                 session,
                 config,
@@ -2262,7 +2261,7 @@ pub(super) fn prepare_tasks_with_audit(
                 && let Some(queries) = discovery::current(root, task)?
             {
                 positions.push(index);
-                recipes.push(queries);
+                recipes.push(resources::extraction_recipe(config, task, queries)?);
             }
         }
     }
@@ -4589,9 +4588,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 ScreeningPreparation::Candidates(screening) => {
                     let reason = screening.selection.admission_reason(&config, &root)?;
                     json!({"status":if reason.is_some() {"needs-admission"} else {"admitted"},
-                    "cost":screening.selection.cost(&root)?,"reason":reason,
+                    "cost":screening.selection.cost(&root, &screening.inventory.capture)?,"reason":reason,
                     "max_screening_batches":config.execution.effective_work().into_diagnostic()?.max_screening_batches,
-                    "authority":"Compact UTF-8 JSON bytes and exact packet counts, not tokens, billed cost, latency or semantic relevance. Deferred and unknown candidates remain incomplete."})
+                    "authority":"Compact UTF-8 JSON bytes and exact packet counts, not tokens, billed cost, latency or semantic relevance. Each query lists the pages it matched and how many the ranked roster carries; unrostered matches were not examined. Deferred and unknown candidates remain incomplete."})
                 }
             }
         }

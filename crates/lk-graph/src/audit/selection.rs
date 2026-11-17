@@ -704,7 +704,9 @@ fn capture_cards(
     let (mut captures, _) = lk_vault::capture_discovery_batch_with_inventory(
         root,
         dirs,
-        std::slice::from_ref(&discovery.queries),
+        &[lk_vault::DiscoveryRecipe::complete(
+            discovery.queries.clone(),
+        )],
         &mut inventory,
         read,
     )

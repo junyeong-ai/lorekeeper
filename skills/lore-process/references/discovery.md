@@ -6,9 +6,9 @@
 - [Progressive examination](#progressive-examination)
 - [Draft from admitted evidence](#draft-from-admitted-evidence)
 
-Use before concept extraction needs related-knowledge context. Discovery finds complete
-lexical candidates; screening chooses which bodies to inspect. Neither establishes
-identity, support, contradiction or a completed source read.
+Use before concept extraction needs related-knowledge context. Discovery gathers a
+ranked roster of lexical candidates; screening chooses which bodies to inspect. Neither
+establishes identity, support, contradiction or a completed source read.
 
 In a native selection, discovery precedes `work context`. Ordinary small-source screening
 can finish within the selected session. When a phase needs bounded native execution,
@@ -21,8 +21,11 @@ Read the exact selected task-ID array, then `lore queue status --json`. Process 
 its current `extract-concepts` tasks. Capture each target's `target_revision` before
 reading its outline and bounded relevant sections with `wiki read --revision`.
 Inspect source-written subjects, definitions and scope. Use those to choose up to
-16 lexical queries, including declared names or distinguishing claim terms. These
-retrieve complete candidates; a match does not establish identity or contradiction.
+16 lexical queries, including declared names or distinguishing claim terms. Each
+query rosters the pages it names by identity and its
+`execution.work.max_query_candidates` (default 50) best other matches in search order;
+a match does not establish identity or contradiction, and an unrostered match was not
+examined. Prefer specific queries over broad ones.
 Do not load the full concept registry or copy a large corpus into the prompt.
 
 Record one strict JSON file per selected task:
@@ -74,8 +77,8 @@ target dependencies. **Do not run `work finish` for this phase:** its observatio
 prepare screening; they are not an extraction result. Preserve attributed source
 questions and processing blockers through later examination and finalization.
 `work cost --task-id ID` is read-only: it reports exact candidate and packet counts,
-query-specific matches, compact JSON bytes, recorded packets and deferred/unknown
-decisions. Remaining request bytes cover unrecorded packets; they exclude future
+per-query matched and rostered pages, compact JSON bytes, recorded packets and
+deferred/unknown decisions. Remaining request bytes cover unrecorded packets; they exclude future
 reassessment of deferred decisions, prompts, host envelopes, tokens and billed cost.
 Packet cost remains unknown until oversized source observations are complete.
 An optional `execution.work.max_screening_batches` bounds the complete selection's

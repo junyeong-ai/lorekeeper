@@ -863,14 +863,14 @@ impl ConceptVocabulary {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum SearchRank {
+pub(super) enum SearchRank {
     Title(String, PathBuf),
     Created(Reverse<Option<jiff::civil::Date>>, PathBuf),
     Relevance(u8, MatchField, Reverse<u64>, String, PathBuf),
 }
 
 impl SearchRank {
-    fn build(
+    pub(super) fn build(
         page: &Page,
         options: &SearchOptions<'_>,
         matched: MatchField,
@@ -2379,7 +2379,13 @@ mod tests {
         assert!(matches!(result, Err(VaultError::Cancelled)));
         assert_eq!(visited, [documents_dir(&dirs).join("a.md")]);
         assert!(matches!(
-            crate::capture_discovery_batch_controlled(root.path(), &dirs, &[vec![]], None, &read),
+            crate::capture_discovery_batch_controlled(
+                root.path(),
+                &dirs,
+                &[crate::DiscoveryRecipe::complete(Vec::new())],
+                None,
+                &read
+            ),
             Err(VaultError::Cancelled)
         ));
         assert!(matches!(

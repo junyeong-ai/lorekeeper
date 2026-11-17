@@ -12,6 +12,12 @@ paths:
 
 ## Progressive extraction and work cost
 
+- Each discovery query contributes its identity matches and at most
+  `execution.work.max_query_candidates` other pages in search order; the task's target
+  is never its own candidate. That ranked roster is the screened and guarded inventory.
+  Ranks never enter cards, revisions or keys. `work cost` discloses per query how many
+  pages matched and how many are rostered; unrostered matches are unexamined, not judged.
+  `full-context` extraction keeps the complete match set.
 - Progressive extraction separates complete source observations, bounded candidate-card
   screening and admitted full-body evidence. All candidate and scoped-review guards
   remain pinned; unknown or deferred decisions block completion, and card-only rejection

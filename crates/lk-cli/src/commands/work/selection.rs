@@ -168,10 +168,13 @@ pub(super) struct ScreeningCost {
     pub queries: Vec<QueryCost>,
 }
 
+/// `matched_candidates` counts every page the query reached; the roster carries
+/// `rostered_candidates` of them, `exclusive_candidates` through this query alone.
 #[derive(Debug, Serialize)]
 pub(super) struct QueryCost {
     pub query: lk_core::discovery::DiscoveryQuery,
     pub matched_candidates: usize,
+    pub rostered_candidates: usize,
     pub exclusive_candidates: usize,
 }
 
@@ -324,7 +327,14 @@ impl Selection {
         Ok(())
     }
 
-    pub fn cost(&self, root: &Path) -> miette::Result<ScreeningCost> {
+    pub fn cost(
+        &self,
+        root: &Path,
+        capture: &lk_vault::DiscoveryCapture,
+    ) -> miette::Result<ScreeningCost> {
+        if capture.queries != self.manifest.discovery {
+            return Err(fail("screening cost requires this selection's capture"));
+        }
         let progress = if self.is_planned(root)? {
             Some(self.ledger(root)?.progress)
         } else {
@@ -367,12 +377,8 @@ impl Selection {
                 .enumerate()
                 .map(|(index, query)| QueryCost {
                     query: query.clone(),
-                    matched_candidates: self
-                        .manifest
-                        .candidates
-                        .iter()
-                        .filter(|candidate| candidate.query_indexes.contains(&index))
-                        .count(),
+                    matched_candidates: capture.coverage[index].matched,
+                    rostered_candidates: capture.coverage[index].rostered,
                     exclusive_candidates: self
                         .manifest
                         .candidates
@@ -1772,11 +1778,13 @@ mod tests {
     fn screening_cost_counts_complete_scope_and_only_unrecorded_request_bytes() {
         let fixture = Fixture::new(7);
         let selection = fixture.selection(4500, 4096);
-        let before = selection.cost(&fixture.root).unwrap();
+        let capture = fixture.capture();
+        let before = selection.cost(&fixture.root, &capture).unwrap();
         assert_eq!(before.candidates, 7);
         assert_eq!(before.completed_batches, 0);
         assert_eq!(before.remaining_unrecorded_batches, before.batches);
         assert_eq!(before.queries[0].matched_candidates, 7);
+        assert_eq!(before.queries[0].rostered_candidates, 7);
         assert_eq!(before.queries[0].exclusive_candidates, 7);
         assert!(!fixture.root.join(".lorekeeper").exists());
         fixture.create(&selection);
@@ -1786,7 +1794,7 @@ mod tests {
         fixture
             .record(&selection, answer(&request, ScreeningDecision::Defer), None)
             .unwrap();
-        let after = selection.cost(&fixture.root).unwrap();
+        let after = selection.cost(&fixture.root, &capture).unwrap();
         assert_eq!(after.completed_batches, 1);
         assert_eq!(after.remaining_unrecorded_batches + 1, before.batches);
         assert_eq!(

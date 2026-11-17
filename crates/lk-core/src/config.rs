@@ -566,6 +566,7 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
                 "max_parallel",
                 "max_screening_batches",
                 "max_consecutive_calls",
+                "max_query_candidates",
             ] {
                 work.remove(key);
             }
@@ -1828,7 +1829,7 @@ mod tests {
             .replace("timeout_seconds: 30", "timeout_seconds: 60")
             .replace(
                 "work: {max_calls:",
-                "work: {max_screening_batches: 2, max_calls:",
+                "work: {max_screening_batches: 2, max_query_candidates: 20, max_calls:",
             );
         std::fs::write(&path, &operational).unwrap();
         let (changed, changed_bytes) = Config::load_with_revision(&path).unwrap();
@@ -1925,7 +1926,7 @@ mod tests {
             for (before, after) in [
                 (
                     "null",
-                    "{max_calls: 9, max_parallel: 2, max_screening_batches: 1, max_consecutive_calls: 8}",
+                    "{max_calls: 9, max_parallel: 2, max_screening_batches: 1, max_consecutive_calls: 8, max_query_candidates: 20}",
                 ),
                 ("{}", "{max_calls: 9}"),
                 ("{max_calls: 9}", "null"),
