@@ -53,8 +53,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   share mutual exclusion through `workflow.lock` without the admission guarantee.
 - The lease lasts only while a participating process retains the descriptor. Detached
   programs or programs closing inherited descriptors are outside that guarantee. No
-  PID/TTL cleanup, env-bool bypass, or reentrancy guess. Windows is explicitly
-  unsupported. Ordinary short CLI writers do not reacquire the lease; they retain their
+  PID/TTL cleanup, env-bool bypass, or reentrancy guess. The lease has no Windows
+  implementation. Ordinary short CLI writers do not reacquire the lease; they retain their
   own locks/revision guards. Workflow does not recover journals.
 - `self snapshot` holds existing exclusive installation claims, including the binary,
   and the selected physical vault's workflow, mutation and queue claims through a

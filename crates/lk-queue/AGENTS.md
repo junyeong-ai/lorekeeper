@@ -91,7 +91,7 @@ lives in `lk-vault`/`lk-pipeline`.
   roster's revision (`inventory_revision`) and the revision of that roster's decisions.
   `independent-screening-v1` is the policy results are drafted under.
   `progressive-evidence-v1` stays a recognized value so a retained result decodes and
-  application refuses it with a typed request to regenerate instead of misreading it.
+  CLI application can refuse it (cli-extraction.md) instead of misreading it.
   Absence keeps the full-context contract; never infer selection or relabel an old
   result. This result binding does not change retained request serialization, generation
   policies or cache identities. Omit absent selection during serialization so

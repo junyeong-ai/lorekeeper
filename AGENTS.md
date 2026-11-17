@@ -64,20 +64,15 @@ one source to infer that distinction.
   core/vault/queue RSS contracts before changing these paths.
 - **Cooperating writers use `MutationSession`.** Recover pending journals before
   deriving writes; journal complete guarded plans before mutation. External editors
-  are outside that lock. Read-only queries never publish or recover vault data. Publication
-  previews never publish or recover; missing-address validation uses disposable
-  private directory probes in the destination filesystem, without page payloads.
-  Derived document projections use separate per-identity cache claims before
-  publication; they are disposable computation, never canonical evidence. Inspection
-  and dry runs may reuse them read-only without renewing retention.
+  are outside that lock. Read-only queries and publication previews never publish or
+  recover vault data. Derived document projection caches are disposable computation,
+  never canonical evidence. Owners: `crates/lk-vault/AGENTS.md` (journal, previews),
+  `crates/lk-source/AGENTS.md` (projection caches).
 - **Long workflows use a separate cooperative lease.** `lore workflow -- COMMAND`
-  owns the canonical vault's Unix `workflow.lock` across evidence reading and
-  publication; short mutation/queue locks remain inside commands, never across an
-  LLM session. Default contention refuses; waiting is explicit. Closing inherited
-  descriptors/detaching work breaks the guarantee. No PID/TTL bypass or Windows support.
-  Workflow children pin the selected configuration path, byte revision and physical
-  vault. Changed selection invalidates the session rather than redirecting remaining
-  work. This validation context never grants lease ownership or reentrancy.
+  holds the canonical vault's `workflow.lock` across evidence reading and publication;
+  short mutation/queue locks stay inside commands, never across an LLM session.
+  Workflow leases and native jobs are Unix-only; the Windows CLI ships without them.
+  Contract: `crates/lk-cli/AGENTS.md`.
 - **Preserve observations.** Dates use configured vault timezone. Future events do
   not materialize. Each adapter decides ownership from its structured identity rules, not
   free-text mentions. Optional `personal` gates personal pages, not weekly knowledge
@@ -87,15 +82,12 @@ one source to infer that distinction.
   page/request publication succeeds; exact regeneration uses retained input,
   not a potentially changed refetch. Credentials are reported, never scrubbed from
   source text; rotation at the issuer is the repair.
-- **Installation and scheduling are explicit.** Unix CLI dispatch holds shared
-  installation claims; deploy/update/uninstall acquire exclusive claims on changed
-  resources. Native runs and foreground workflow children retain protection across
-  collection and inference. Coordination files are persistent operational state,
-  separate from canonical or derived knowledge; never unlink held lock files.
-  `lk-dist` owns embedded artifact
-  coherence. Native jobs compose guarded CLI stages and never auto-commit user edits.
-  Full-source ingest alone rewrites the cross-source work-log; filtered ingest
-  cannot replace it with a subset. Navigation refresh updates SQLite discovery and a small entry guide.
+- **Installation and scheduling are explicit.** Unix command dispatch holds shared
+  installation claims; installers take exclusive claims on what they change
+  (`cli-installation.md`; `lk-dist` owns embedded artifact coherence). Coordination
+  files are persistent operational state, separate from canonical or derived knowledge;
+  never unlink held lock files.
+  Native jobs compose guarded CLI stages and never auto-commit user edits.
 
 ## Naming
 
@@ -108,5 +100,6 @@ one source to infer that distinction.
 - `*Result` is a domain outcome. Add `*Report` only when presentation adds structure;
   do not wrap an already display-ready result. Wire enum names use kebab-case.
 
-Config discovery is `./config.yaml` then `${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml`;
-relative `vault.root` is relative to that config file, not the working directory.
+Config selection is `--config`/`LORE_CONFIG`, then `./config.yaml`, then
+`${XDG_CONFIG_HOME:-$HOME/.config}/lorekeeper/config.yaml`; relative `vault.root` is
+relative to that config file, not the working directory.

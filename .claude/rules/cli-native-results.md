@@ -39,8 +39,8 @@ paths:
   confirmed timeout/numeric exit after completed process-group cleanup. Their
   latest per-parent attempts stay separate from semantic actions and paid decisions;
   unchanged input holds survive instruction-contract changes. Only semantic needs-action
-  earns action progress; an all-failed invocation wave ends this run without an operation
-  pause. Queue pruning retains pending task/cache attempts; maintenance removes audit
+  earns action progress; an all-failed invocation wave ends the run as cli-native-runs.md
+  states. Queue pruning retains pending task/cache attempts; maintenance removes audit
   attempts only for absent subjects under workflow coordination.
   `work retry-preparation` requires its stage, task/path selector and exact reported input
   revision. It removes only that retained attempt under current task/subject guards;
@@ -93,8 +93,8 @@ paths:
   semantic hold for that exact request revision; confirmed numeric nonzero exits and
   unusable tool-free replies journal an operational hold (cli-extraction.md owns
   `rejections.json`). Reasons obey compact UTF-8 JSON string bytes, including
-  quotes/escapes, not character count. Failures earn no semantic progress.
-  Signal/cleanup errors and failed fresh scope validation stay fatal.
+  quotes/escapes, not character count. Signal/cleanup errors and failed fresh scope
+  validation stay fatal.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
   contract. Screened extraction admits only its explicit selected owners, possibly none;

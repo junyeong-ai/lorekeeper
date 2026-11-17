@@ -118,10 +118,10 @@ paths:
   observations and semantic actions through the mutation journal; they are not retained
   semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
   tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
-  Preserve valid wave peers; a wave with only invocation failures ends the current run
-  without pausing the scheduled operation or counting semantic progress. A confirmed
-  timeout or numeric nonzero exit of a tool-enabled finalizer, after completed
-  process-group cleanup, holds only its exact request and ends the run the same way: each
+  Preserve valid wave peers; a wave with only invocation failures, in any native role,
+  ends the current run without pausing the scheduled operation or counting semantic
+  progress. A confirmed timeout or numeric nonzero exit of a tool-enabled finalizer,
+  after completed process-group cleanup, holds only its exact request and ends the run the same way: each
   queue task's input in its native generation receipt, each audit subject's context as an
   audit-assessment preparation attempt. Inputs the host changed before failing are not
   held; they are prepared afresh. Signal exits, process cleanup failure, local I/O,
