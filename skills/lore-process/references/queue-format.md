@@ -7,14 +7,10 @@
 - [Task schema](#queue-task-schema)
 - [Extraction read scope](#extraction-read-scope)
 - [Completion keys](#completion-keys)
-- [Lost extraction recovery](#recovering-a-lost-extraction-task)
 - [Synthesis results](#synthesis-result)
 - [Section results](#single-section-result)
 - [Policy and regeneration](#generation-policy-provenance-and-explicit-regeneration)
 - [Evidence packets](#read-only-evidence-packets)
-
-Result contract reference for `/lore-process`. The skill body carries the processing
-protocol; this file carries the format details you consult only when needed.
 
 ## Queue file lifecycle
 
@@ -27,14 +23,10 @@ processed/<batch>.jsonl  ← fully answered batch, retained for configured histo
 Page edits and newly admitted requests share one recoverable mutation journal.
 Only root-level `.jsonl` files are pending work; names are generated batch addresses,
 not task identity. Default processed-history retention is 90 days.
-Older standalone queue flushes may leave `.jsonl.tmp` files. Ingest sweeps those older
-than 1 hour under the vault writer lock; maintenance preserves temporary files.
-Cooperating queue producers hold the vault lock first. External writers and older
-binaries must not share an active writer directory.
 After failure, inspect retained tasks and input before retrying. Refetching the same date
-can observe changed remote content; it is not exact historical replay. Use
-`lore queue regenerate --task-id ID --dry-run` when the original task is retained and its
-target still matches. Missing input must be reported, not reconstructed from generated prose.
+can observe changed remote content; it is not exact historical replay. Regenerate a
+retained task through [exact retained-input regeneration](recovery.md#exact-retained-input-regeneration);
+missing input must be reported, not reconstructed from generated prose.
 
 If several extraction result files carry the same task/input identity, apply folds
 identical typed values once and retires every matching file only after publication.
@@ -50,17 +42,11 @@ and exact proposal file revisions. Rejected groups include their current validat
 scope and receipt. `fatal` reports a failure whose ownership or safety could not be
 established; partial publications remain real.
 
-Native jobs can continue independent work only after known scoped rejections.
-`.lorekeeper/queue/rejections/` binds their exact request, proposals, current scope
-and validation policy. These records are not completion or semantic approval.
-Native planning revalidates changed attempts before another host call; deterministic
-apply is retried even when the previous rejection is unchanged. Do not delete these
-records to bypass a refusal. Preserve rejected answers separately before explicitly
-replacing an active proposal with a newly reviewed result; never relabel its guards.
-When its task becomes `done`, `stale` or `missing-target`, the rejection no longer
-blocks semantic admission. Deterministic apply still owns reapplication or retirement;
-classification alone approves no answer and completes no replacement request.
-Unknown or unreadable state remains fatal.
+Native jobs record known scoped rejections under `.lorekeeper/queue/rejections/` and
+continue independent work. These records are not completion or semantic approval; do
+not delete them to bypass a refusal. Preserve rejected answers separately before
+explicitly replacing an active proposal with a newly reviewed result; never relabel its
+guards. Unknown or unreadable state remains fatal.
 
 The native job stays incomplete/nonzero while work remains. Corrupt records,
 unmatched result identities, storage failures and unknown state stop further work.
@@ -115,17 +101,12 @@ section). One set of source revisions is what both sections answer to, so one ta
 `synthesis_done` answers for the pair. It is payload rather than cache identity: a heading
 says where an answer lands, not what the answer would be.
 
-`cache_hash` is BLAKE3-128 (32 hex chars) of the cache-identity subset of `input` — the
-fields that decide whether the output would differ, which is narrower than the payload. It
-excludes the routing field `source_type`, and it includes
-`locale` for the kinds writing a section that is re-derived from its input (a summary, a
-week's themes) while excluding it for the two that write onto a concept page, whose authored
-body a locale switch deliberately leaves standing. It equals the value the pipeline wrote
-into `target.vault_path`'s `llm_inputs.<key>` frontmatter at queue time. The skill MUST
-consult `queue status` before generating a result. Normal status/apply reconstruct the typed
-request and recompute its identity; invalid or mismatched inputs are `unreadable` and remain
-pending even when page markers say done. Never repair a hash merely to make an old answer
-applicable. See the stale-task guard in the skill body.
+`cache_hash` identifies the input fields that decide the output and equals the value the
+pipeline wrote into `target.vault_path`'s `llm_inputs.<key>` frontmatter at queue time.
+Copy it verbatim into results and consult `queue status` before generating one: status and
+apply reconstruct the typed request and recompute its identity, and invalid or mismatched
+inputs are `unreadable` and remain pending even when page markers say done. Never repair
+a hash merely to make an old answer applicable.
 
 Extraction carries `input.concept_policy` (`existing-only` or `supported-new`) in
 its cache identity and result. A policy change requires a fresh extraction. Missing
@@ -137,22 +118,17 @@ the vault root. `queue status` checks revisions against current source pages; an
 pending work `stale`, and an unreadable source leaves it `unreadable` until repaired.
 
 New bound RSS extraction uses `concept-extraction-rss-v3` with a typed
-`input.rss_original` manifest. Read selected originals from that inventory; return a
-nonempty `rss_evidence: [{"event_id":"...","revision":"<payload revision>"}]` on every
-reported concept after verifying that the selected articles support it. A result with
-no concepts is valid; omitting a concept never retracts its prior selections. Legacy/page-only tasks keep
-their original schema and policy; never invent an RSS binding from a title, URL or date.
+`input.rss_original` manifest and returns `rss_evidence` pairs on every reported concept;
+[extraction](processing-kinds.md#kind-extract-concepts) states the selection rules.
+Legacy/page-only tasks keep their original schema and policy.
 
 `concept-synthesis-rss-v2` may mix old page citations with event citations:
 `{"path":"<origin daily>","revision":"<64-hex payload revision>","rss_event":{"schema":"rss-event-evidence-v1","event_id":"..."}}`.
 The optional selector is absent from legacy JSON and its hash remains unchanged.
-Event revisions identify immutable collected observations, not the daily interpretation.
-Use packet `event_evidence[].selected_event_command` and follow text pagination.
-`wiki original ORIGIN --evidence-concept CONCEPT` discovers declared pairs with bounded
-pagination; selecting `--event ID --revision PAYLOAD_REV` reads that exact historical
-selection even when the current collection manifest has moved. The inventory revision
-pins inventory pagination; it is not the selected payload revision. Validate current task
-status and target bytes normally. Do not replace a stale answer's guards.
+Event revisions identify immutable collected observations, not the daily interpretation;
+[synthesis](processing-kinds.md#kind-synthesize-concept) and the
+[query reference](../../lore-wiki/references/query.md#evidence-lifecycle-and-originals)
+describe how to read the selected articles.
 
 ## Extraction read scope
 
@@ -195,17 +171,6 @@ for that input; a filled body alone does not.
 | `weekly-review-narrative`, `monthly-review-narrative` | `narrative` | `narrative_done` |
 | `quarterly-review-narrative`, `annual-review-narrative` | `narrative` | `narrative_done` |
 
-## Recovering a lost extraction task
-
-Publication requires the original retained, validated task and the read scope captured
-before drafting. A current source page cannot establish a lost request's original input
-or candidate/review context. Restore the exact retained request from pending/processed
-history or a backup and validate it before generating a new result. If that input is no
-longer available, collect the preserved original as a new valid task; do not reconstruct
-raw evidence from generated prose or relabel the old answer. Rejected orphan results and
-their reasons are preserved in `results/orphaned/`. Unparseable pending lines require repair
-before absence of a matching task can be established.
-
 ## Synthesis result
 
 Write `.lorekeeper/queue/results/<task_id>.synthesis.json` atomically (write a temporary
@@ -242,14 +207,15 @@ external editors do not participate, so avoid editing the target during publicat
 
 ## Single-section result
 
-Existing queued tasks need no migration. For `summarize`, `identify-themes`, and
-`refine-events`, write `.lorekeeper/queue/results/<task_id>.section.json` atomically:
+For `summarize`, `identify-themes`, and `refine-events`, write
+`.lorekeeper/queue/results/<task_id>.section.json` atomically:
 
 ```json
 {
   "task_id": "<task.task_id>",
   "cache_hash": "<task.cache_hash>",
   "target_revision": "<queue status target_revision captured before reading>",
+  "context_revision": "<work context revision captured before drafting>",
   "body": "Replacement section body without the target heading; empty is valid"
 }
 ```
@@ -263,10 +229,6 @@ Before drafting, capture `lore work context --task-id TASK` and copy its
 revalidates that binding. `source_context_revision` identifies retained source Work,
 not the current finalizer's review scope. Existing results without a context binding
 retain the legacy contract. Never invent, replace or remove a revision on old prose.
-Native processing archives and withdraws an otherwise valid stale scoped proposal
-once per current task/input/context, then drafts against fresh reviews. It preserves
-paid observations and prior completion bytes. Conflicts, invalid bodies, legacy plans
-and semantic holds require explicit resolution.
 Refinement may change bodies but must preserve the original sequence of `###` event
 headings. Section bodies must remain beneath their H2: no root H1/H2 headings
 (including Setext) or HTML/code blocks consuming the next section. Valid HTML and
@@ -290,26 +252,12 @@ citation payload remains blocked for repair rather than being retired as stale.
 ## Generation policy provenance and explicit regeneration
 
 New task inputs include `generation_policy` (`summary-v1`, `event-refinement-v1`,
-`themes-v1`, `concept-extraction-v2`, or `concept-synthesis-v1`). These identifiers
-change only when generation semantics change, independently of binary release numbers.
-They are not part of `cache_hash`; old tasks without them remain valid legacy inputs.
-Apply reads generation policy from the matching retained task and writes
-`llm_inputs.<key>_policy_done` (or `legacy` when no policy was recorded).
-
-`queue regenerate --task-id <exact-retained-id>` selects one pending/processed task,
-validates its complete original payload through the request's existing cache identity,
-and requires the current page input marker and all task headings to match. Concept
-synthesis also revalidates every source revision. Ambiguous IDs, missing raw inputs,
-and stale sources are refused without remote fetching. Regeneration selects the current
-policy; a historical retained policy does not change the verified data input. Processing
-an unknown requested policy is refused.
-
-Regeneration journals completion invalidation before fresh task publication while
-holding vault then queue claims. Bodies are preserved. The new task records
-`regenerated_from`. An explicit `<key>_policy_requested` plus
-`<key>_policy_requested_input` excludes old-policy work only for that selected input;
-apply clears these request fields when it publishes the answer. Absent provenance
-never schedules a whole-vault regeneration.
+`themes-v1`, `concept-extraction-v2`, or `concept-synthesis-v1`), a per-kind semantic
+policy identifier outside `cache_hash`; tasks without one remain valid legacy inputs.
+Apply reads the policy from the matching retained task and writes
+`llm_inputs.<key>_policy_done` (or `legacy` when none was recorded). Explicit
+regeneration under the current policy follows
+[exact retained-input regeneration](recovery.md#exact-retained-input-regeneration).
 
 ## Read-only evidence packets
 
@@ -346,6 +294,6 @@ mutation journal or changed input is refused; export neither recovers the journa
 locks an immutable snapshot. Validate revisions again before reuse. If evidence changes,
 the coordinator runs backlinks-sync and status, reissues affected tasks, and exports a
 new packet; workers reread the changed context and regenerate affected drafts instead
-of retagging old prose. For an explicit policy rewrite of **unchanged retained input**,
-preview `lore queue regenerate --task-id <retained-id> --dry-run`, then omit
-`--dry-run`; process its new task normally. Neither path remotely re-fetches sources.
+of retagging old prose. An explicit policy rewrite of **unchanged retained input** uses
+[exact retained-input regeneration](recovery.md#exact-retained-input-regeneration);
+neither path remotely re-fetches sources.

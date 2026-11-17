@@ -95,7 +95,7 @@ only on that card and the source, never on the other cards, their order or how m
 are assigned. Never load all candidate bodies to perform screening.
 
 For standalone `select-record`, return one strict output covering every candidate in
-that request exactly once:
+that request exactly once, with unique object fields at every level:
 
 ```json
 {

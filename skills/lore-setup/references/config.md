@@ -238,8 +238,8 @@ The same scope limit covers fresh audit discovery; `lore wiki audit-candidates S
 reports its current packet, progress and admission without writes. Existing legacy
 audit recipes retain full-context reading, and completed screening needs no new calls.
 For new Work and extraction screening decisions, call/parallel/consecutive-call/screening-packet limits,
-the per-query candidate bound and profile timeouts can change between workflows without
-discarding paid observations or decisions.
+the per-query candidate bound, `execution.automation` and profile timeouts can change
+between workflows without discarding paid observations or decisions.
 Every configuration byte is still pinned during execution. Model/effort, input/result
 limits and semantic policies remain identity inputs of Work. A screening decision is
 kept while its card, its source and the screening profile's engine, model and effort

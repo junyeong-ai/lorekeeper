@@ -338,8 +338,9 @@ Neither outcome certifies truth or a read of every external original.
 For an explicitly bounded queue-only drain, use
 `lore run process --profile NAME --batches N --json` from the coordinating shell. It resumes verified retained progress
 at exhausted call-budget checkpoints, with a fresh lease for each batch. It performs
-no collection or audit assessment; see the process skill's bounded-work reference for
-stop and completion conditions. Do not treat its queue progress as corpus audit coverage.
+no collection or audit assessment; see the process skill's
+[batch campaign contract](../../lore-process/references/run-report.md#batch-campaigns)
+for its stop and completion conditions. Do not treat its queue progress as corpus audit coverage.
 
 Measure a small run before selecting a campaign size or schedule. `audit_progress`
 reports before/after coverage counts; `semantic_calls` counts agent invocation attempts.

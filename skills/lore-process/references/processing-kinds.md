@@ -12,9 +12,9 @@
 - [Target formatting](#per-kind-target-formatting)
 - [Section result contract](#single-section-results)
 
-How to produce the content for each task kind. The SKILL.md protocol decides
-WHETHER a task runs (stale-task guard) and WHERE the output lands
-(`target.anchor`); this reference defines WHAT good output looks like per kind.
+How to produce the content for each task kind. SKILL.md § Publication boundaries
+decides WHETHER a task runs and WHERE the output lands (`target.anchor`); this
+reference defines WHAT good output looks like per kind.
 
 ## Relevance focus (all kinds)
 
@@ -196,16 +196,11 @@ page authored-revision contract. Mixed page/event citations require both kinds o
 
    For a material disagreement, search existing exploration pages and run `lore wiki reviews`.
    The coordinator (or the sole processor in a serial run) creates or updates one
-   durable review using AGENTS.md's Knowledge reviews contract, recording
-   both claims, their scope and time, direct source links, and what could settle the question.
-   Record direct evidence, never the review itself as its own supporting source.
-   Derived reviews and summaries are interpretations; follow their original sources rather
-   than treating them as independent corroboration. Before reassessing, archive the existing review with `lore wiki evidence --archive` and
-   retain its archive path in the dated reassessment. After actually rereading changed evidence,
-   archive those sources and explicitly replace `review.evidence` with the revisions supporting
-   the current judgment. Do not retain superseded revisions of the same path in that current
-   evidence set or use the archived review as independent evidence. Mark resolved only with a
-   stated reason supported by evidence; otherwise keep open. A concept's synthesis contains
+   durable review under AGENTS.md § Knowledge reviews, which governs its metadata,
+   evidence archiving, reassessment and resolution. Record both claims, their scope and
+   time, direct source links, and what could settle the question. Cite direct evidence:
+   the review itself, derived reviews and summaries are interpretations, so follow their
+   original sources rather than treating them as independent corroboration. A concept's synthesis contains
    a concise `> [!conflict] <what differs>` with a link to the open review. A resolved review
    remains as the explanation; rewriting a synthesis must never erase its record.
    Parallel workers return proposals containing these claims, evidence revisions, and
@@ -284,7 +279,7 @@ Read its current content alongside the task input. If the target changes before 
 read it again and regenerate the extraction; never copy a new revision onto an old answer.
 The applier also requires a matching retained task, target and date. A lost request
 must be restored from retained history or backup before processing, or its preserved
-original must be collected into a new task as described in `queue-format.md`.
+original must be collected into a new task as described in [recovery](recovery.md).
 
 `input.concept_policy` controls admission. `existing-only` permits links to subjects
 already owned by a concept: resolve every name, read its scope, and omit unsupported
@@ -375,9 +370,8 @@ refuses new-owner admission; reuse may omit it.
 
 **`name` and `aliases` follow § Concept convergence in the vault's `AGENTS.md`**
 (`lore config schema-path`), which states what a name may be, which form is the name where the
-text writes several, and what belongs in `aliases` instead. It is stated there and not here:
-a second copy is how the two come to disagree, and step 1 has you read it before this one.
-Read its rule about the vault's language against `input.locale`, which this payload carries:
+text writes several, and what belongs in `aliases` instead. Read its rule about the
+vault's language against `input.locale`, which this payload carries:
 the contract names the language it was RENDERED with, so between a `vault.locale` switch and
 the `lore schema` that follows it, the task in your hand is the current answer and the file is
 not.
@@ -411,14 +405,10 @@ what counts as a concept (per-type scoping: see
 [source-types.md](source-types.md)). Never invent it from the path.
 
 **Concept dedup** follows the **Concept convergence** section of the vault's
-`AGENTS.md`: `lore resolve` for EVERY form the text writes, read the lexical owner's
-complete scope before reuse (an owned homonym can name a different subject), track newly
-proposed subjects without automatically merging them, and use `lore wiki search` on distinguishing
-terms of each form for the equivalences no rule about spelling can see. The queue task carries
-no concept registry of its own. Reuse the resolved canonical title in `name` and keep the
-source's equivalent spelling in `aliases`; a spelling difference alone does not justify a
-new page. If the written forms resolve to different owners, resolve that semantic ambiguity
-before submitting an extraction. Search matches are candidates, not identity decisions.
+`AGENTS.md`; the queue task carries no concept registry of its own. Reuse the resolved
+canonical title in `name` and keep the source's equivalent spelling in `aliases`. If the
+written forms resolve to different owners, resolve that semantic ambiguity before
+submitting an extraction.
 
 **Category assignment.** Hard constraint: the `category` value MUST be one of
 the IDs in `input.categories` (verbatim string match) or the field MUST be

@@ -6,11 +6,14 @@
 - [Publication and coordination](#publication-and-coordination)
 - [Citation correction](#citation-correction)
 - [Current-evidence resynthesis](#current-evidence-resynthesis)
+- [Superseded staged results](#superseded-staged-results)
 - [Exact retained-input regeneration](#exact-retained-input-regeneration)
+- [Lost requests](#lost-requests)
 
 ## Retry and queue retirement
 
-Only `lore queue prune` retires queue files after classification. It removes stale
+Only `lore queue prune` (also run by `lore maintenance --prune-queue`) retires queue
+files after classification. It removes stale
 and missing-target tasks, archives a run whose remaining tasks are done, and
 preserves unfinished or blocked work.
 
@@ -41,11 +44,8 @@ pages: preserve workflow coordination and exact revision guards during a worker 
 
 ## Citation correction
 
-For a new bound RSS task, explicitly attribute each selected article using the typed
-`rss_evidence` pairs described in `queue-format.md`; never infer an event from its title
-or position. Page-only legacy tasks keep their existing guards. Event-aware synthesis
-uses the packet's exact selected-original commands and treats the daily as interpretation.
-Normal omission is not retraction: a reviewed event pair can be removed with
+Omitting an RSS article from a new extraction is not retraction: a reviewed event pair
+can be removed with
 `graph retract-citation ORIGIN CONCEPT --revision ORIGIN_FILE_REVISION
 --concept-revision CONCEPT_FILE_REVISION --event EVENT_ID
 --event-revision PAYLOAD_REVISION` after the same pending-work and evidence checks.
@@ -92,18 +92,20 @@ requiring explicit inspection before resumption. Retirement is not synthesis com
 ## Exact retained-input regeneration
 
 Use `lore queue regenerate --task-id <retained-task-id> --dry-run` to preview, then
-omit `--dry-run` to request that one task again. The task must exist exactly once in
-pending or processed queue files. Its complete original typed input, input hash,
-target kind and headings must still agree; synthesis source revisions must remain
-current. Missing retained input is a refusal, not permission to remotely re-fetch an
-expired source or reconstruct raw events from refined prose.
+omit `--dry-run` to request that one task again under the current generation policy.
+The task must exist exactly once in pending or processed queue files. Its complete
+original typed input, input hash, current page input marker, target kind and headings
+must still agree; synthesis source revisions must remain current. Missing retained
+input is a refusal, not permission to remotely re-fetch an expired source or
+reconstruct raw events from refined prose.
 
 The command preserves authored bodies, clears only completion/provenance for that
 section, and publishes a replacement through the mutation journal. A selected pending
 request moves to processed history with its exact bytes; sibling pending lines remain
 unchanged. Retirement, completion invalidation and replacement share that journal.
-Malformed retained queue lines require repair before regeneration. Process the replacement
-normally; never manually clear a marker and re-ingest as a substitute for this operation.
+The new task records `regenerated_from`. Malformed retained queue lines require repair
+before regeneration. Process the replacement normally; never manually clear a marker
+and re-ingest as a substitute for this operation.
 Equivalent pending work must finish and be pruned before another historical request;
 selecting that pending task itself remains an explicit replacement. Processed history
 permits later regeneration.
@@ -115,8 +117,13 @@ Unknown requested policy versions require a compatible processor. Policy provena
 is separate from the unchanged data cache hash. Explicit regeneration records a
 policy request for this input so an old legacy task cannot satisfy the new request.
 
+## Lost requests
+
 A staged extraction without its retained request cannot establish the original input
-or read scope and is refused, regardless of source size. Restore the exact request from
-retained history or backup, or collect the preserved original into a new valid task.
-Never fabricate a request/context revision from the current interpretation to publish
-an old result. Rejected bytes and their diagnostic remain available for investigation.
+or read scope and is refused, regardless of source size; a current source page cannot
+stand in for it. Restore the exact request from pending/processed history or a backup
+and validate it before generating a new result, or collect the preserved original into
+a new valid task. Never reconstruct raw evidence from generated prose or fabricate a
+request/context revision to publish an old result. Rejected orphan results and their
+reasons remain in `results/orphaned/`. Unparseable pending lines require repair before
+the absence of a matching task can be established.

@@ -82,13 +82,9 @@ claim and qualifications have been read. This does not restart paid inspections,
 prove an event identity or approve a claim. Missing source facts remain unknown;
 an owner outside the captured scope requires explicit typed discovery recovery.
 
-`rss_evidence_bindings` maps each bound original article to its inspected resource
-index and exact `event_id`/`revision` selector. Choose only articles supporting the
-reported concept; copy their selectors rather than reconstructing identities from
-URLs, titles or payload filenames. Rust supplies these bindings from the retained
-manifest after matching its revision and event guards to this Work. The bindings
-establish article identity, not semantic support. An empty list supplies no bound
-original authority and cannot upgrade legacy page-only evidence.
+`rss_evidence_bindings` selectors follow the request's instructions: copy only those
+of articles supporting a reported concept; a binding establishes article identity, not
+semantic support.
 
 ## Complete observation coverage
 

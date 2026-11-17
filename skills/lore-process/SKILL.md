@@ -65,8 +65,9 @@ schema generation replaces that file wholesale.
   `synthesize-concept` also returns a typed result for guarded publication.
 - Never author a concept's sources-section body or `source_count`.
   `lore graph backlinks-sync` derives both from forward links.
-- Only `lore queue prune` retires classified queue files. Never edit request lines,
-  move files manually, or stamp completion based on your own record of work.
+- Only `lore queue prune` (also run by `lore maintenance --prune-queue`) retires
+  classified queue files. Never edit request lines, move files manually, or stamp
+  completion based on your own record of work.
 
 ## Process selected current work
 
@@ -170,4 +171,6 @@ what was published, what is retained and what it needs.
 Report completed tasks, publication/check outcomes and any retained failures.
 Distinguish selected-call completion from complete native-job success. For exact
 retained-input regeneration, current-citation resynthesis or reviewed retraction,
-read [recovery](references/recovery.md); a refetch is not historical replay.
+read [recovery](references/recovery.md); a refetch is not historical replay. To
+interpret a `lore run --json` report or a `--batches` campaign outcome, read
+[run report](references/run-report.md).
