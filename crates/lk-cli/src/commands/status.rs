@@ -198,8 +198,13 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
             env!("CARGO_PKG_VERSION"),
             vault_root.display()
         );
+        let name_width = subsystems
+            .iter()
+            .map(|subsystem| unicode_width::UnicodeWidthStr::width(subsystem.name))
+            .max()
+            .unwrap_or_default();
         for subsystem in &subsystems {
-            line(subsystem);
+            eprintln!("{}", line(subsystem, name_width));
         }
     }
     Ok(())
@@ -318,21 +323,21 @@ fn review_state(health: &lk_vault::ReviewHealth) -> String {
     .join(" · ")
 }
 
-/// The gap before the command is added rather than padded into, so a state long enough to fill
-/// the column never runs into the command name.
-fn line(subsystem: &Subsystem) {
+/// Gaps are added after padding rather than padded into, so a name or state that fills its
+/// column never runs into the next one.
+fn line(subsystem: &Subsystem, name_width: usize) -> String {
     let mark = if subsystem.ok { '·' } else { '!' };
-    eprintln!(
-        "  {mark} {}{}  {}",
-        super::pad(subsystem.name, 9),
+    format!(
+        "  {mark} {}  {}  {}",
+        super::pad(subsystem.name, name_width),
         super::pad(&subsystem.state, 42),
         subsystem.next
-    );
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{queue_row, review_state};
+    use super::{Subsystem, line, queue_row, review_state};
     use crate::commands::queue::check::QueueSettlement;
 
     fn settled() -> QueueSettlement {
@@ -401,5 +406,21 @@ mod tests {
             review_state(&health),
             "1 need reassessment · 2 open · 5 resolved"
         );
+    }
+
+    #[test]
+    fn the_widest_name_keeps_a_gap_before_its_state() {
+        let rows =
+            [("install", "current"), ("automation", "494 reservations")].map(|(name, state)| {
+                Subsystem {
+                    name,
+                    ok: true,
+                    state: state.into(),
+                    next: "lore schedule",
+                }
+            });
+        let lines = rows.each_ref().map(|row| line(row, "automation".len()));
+        assert_eq!(lines[0].find("current"), lines[1].find("494"));
+        assert!(lines[1].contains("automation  494 reservations"));
     }
 }
