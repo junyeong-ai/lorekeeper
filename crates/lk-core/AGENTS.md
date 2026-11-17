@@ -151,7 +151,7 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   length and digest. Streaming publication verifies both before exposing a destination.
   Dry runs may own scratch files but leave neither scratch nor retained evidence.
 - Acquisition budgets are configuration, not immutable evidence validation rules.
-  New manual-bundle-v2 manifests use the fixed512 MiB storage envelope; existing v1
+  New manual-bundle-v2 manifests use the fixed 512 MiB storage envelope; existing v1
   manifests keep their original digest domain and 32/64/256 MiB bounds.
 - `content.rs` separates native decoding, visual engine configuration and explicit
   PDF scope. With vision configured, an omitted PDF policy selects all physical

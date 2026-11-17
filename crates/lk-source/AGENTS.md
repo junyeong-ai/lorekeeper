@@ -24,7 +24,7 @@ uses validated params and context; do not add per-adapter output pipelines.
   Refresh identity responses rather than reusing an in-memory principal cache.
   Only a declared unavailable identity (`Ok(None)`) permits unbound collection;
   identity errors refuse without retrying acquisition/authentication. Calendar's
-  metadata endpoint may declare unavailable on HTTP403 for events-only credentials,
+  metadata endpoint may declare unavailable on HTTP 403 for events-only credentials,
   with a warning; token refresh failures remain errors. A failed or changed final
   check refuses the source. Unbound and legacy observations cannot
   establish automatic recovery coverage. Never substitute configured names, token
@@ -80,7 +80,7 @@ uses validated params and context; do not add per-adapter output pipelines.
   External identity preserves the supplied version; unavailable version/body makes
   the observation partial. `only_my_edits` requires a known current editor identity;
   exclude a known other editor before validating content needed only for selected pages.
-- `gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
+- `google/gmail.rs`: epoch bounds and parenthesized OR terms; queries are required/nonblank.
   An unread-only filter is an explicit user choice, not an implicit default.
   MIME plain text is literal prose; only declared HTML is converted as markup.
 - `slack/`: form-encode API calls. Cursor pagination is authoritative, not
@@ -90,7 +90,7 @@ uses validated params and context; do not add per-adapter output pipelines.
   The mrkdwn renderer emits typed formatting; ordinary text, decoded entities and
   labels stay literal. Code isolates token/emoji interpretation. Only explicit
   absolute Slack angle URLs introduce links; ordered markers retain their values.
-- `calendar.rs`: construct URL path segments safely. All-day civil dates use the
+- `google/calendar.rs`: construct URL path segments safely. All-day civil dates use the
   vault timezone; skip invalid timestamps diagnostically. Optional Drive notes
   require a supported textual Content-Type and share Drive's 16 MiB strict-decoding
   reader on export and media paths. Unsupported attachments remain unexpanded;
@@ -98,9 +98,9 @@ uses validated params and context; do not add per-adapter output pipelines.
   Resolve each note's Markdown before joining it to the event; shared fragment
   rendering uses its exact Drive file ID for footnote scope. Reference definitions
   and EOF code/HTML from one attachment must not change another attachment.
-- `drive.rs`: select direct children by explicit `folder_id`, never a folder name.
-  Query the actual modified-time day window: `lookback_days` defaults to1 prior civil
-  day plus the target day; explicit0 selects only the target day. Query and reported
+- `google/drive.rs`: select direct children by explicit `folder_id`, never a folder name.
+  Query the actual modified-time day window: `lookback_days` defaults to 1 prior civil
+  day plus the target day; explicit 0 selects only the target day. Query and reported
   observation bounds agree, including historical targets. This overlap does not
   establish automatic outage recovery or revision-history coverage. `name_prefix` uses Drive's literal
   prefix matching, not a date template, glob or arbitrary substring. Files use
@@ -207,10 +207,10 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   bundle to resolve; remote reference authority does not apply. Use the core only while it
   references nothing the page does not, otherwise convert the whole page.
 - `ingest.originals` defaults to 32 MiB entry, 64 MiB member and 256 MiB per source;
-  configured entry/member budgets fit the source budget, at most512 MiB. Keep the
-  2 MiB manifest, depth32/2048 bundle members, at most2048 new/retry admissions per batch,
+  configured entry/member budgets fit the source budget, at most 512 MiB. Keep the
+  2 MiB manifest, depth 32/2048 bundle members, at most 2048 new/retry admissions per batch,
   8192 aggregate member records/256 MiB derived documents and CLI aggregate capture
-  cap512 MiB. Closure overflow is an explicit error,
+  cap 512 MiB. Closure overflow is an explicit error,
   not silently solved by splitting top-level entries. Binary attachments stay bytes;
   text entry conversion requires supported decoding.
 - `CapturedFile` owns private temporary acquisition files, hashes while streaming,
@@ -234,7 +234,7 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   The CLI journals receipts with actual page/request publication. Render meaning
   belongs to the pipeline; source processing identity excludes admission budgets.
   Native collection uses `capture_manual_batch`. The complete-source inspection
-  helper `capture_manual` still refuses more than2048 selected entries; never make
+  helper `capture_manual` still refuses more than 2048 selected entries; never make
   that helper return an apparently complete clipped batch.
 
 ## Document projection (`content.rs`, `content/`)
