@@ -1536,12 +1536,13 @@ pub(super) struct ScreeningTurns {
 }
 
 pub(super) fn prepare_screenings(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_ids: &[&str],
     read: &lk_vault::ReadControl,
 ) -> miette::Result<ScreeningTurns> {
+    let root = session.root();
     let (turns, discovery_io, _) = map_current_screenings(
         root,
         config,
@@ -2639,21 +2640,21 @@ pub(super) fn prepare_audit_controlled(
 }
 
 pub(super) fn audit_needs_work_controlled(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let prepared = resources::audit_candidate_controlled(&root, config, candidate, read)?;
-    let work = expected(&root, &prepared, config, config_revision)?;
-    if work.plan.parts.len() > 1 || work.is_planned(&root)? {
+    let root = session.root();
+    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = expected(root, &prepared, config, config_revision)?;
+    if work.plan.parts.len() > 1 || work.is_planned(root)? {
         return Ok(true);
     }
     #[cfg(unix)]
     {
-        let subject = audit::capture_prepared(&root, config_revision, candidate, prepared)?;
+        let subject = audit::capture_prepared(root, config_revision, candidate, prepared)?;
         let request = audit::whole_request(config, &[subject]);
         match request {
             Ok(request) => {
@@ -2829,16 +2830,16 @@ pub(super) enum NativeStep {
 
 #[cfg(unix)]
 pub(super) fn prepare_native_step(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<NativeStep> {
     let started_at = std::time::Instant::now();
-    let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
-    let (progress, request) = work.prepare_inspection(&root, &prepared.resources)?;
+    let root = session.root();
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
+    let (progress, request) = work.prepare_inspection(root, &prepared.resources)?;
     let preparation_duration_ms = started_at.elapsed().as_millis() as u64;
     read.check().into_diagnostic()?;
     if !progress.complete {
@@ -2849,7 +2850,7 @@ pub(super) fn prepare_native_step(
         });
     }
     let mut checkpoint = prepare_native_finalization_from_capture(
-        &root,
+        root,
         config,
         config_revision,
         &work,
@@ -3045,7 +3046,7 @@ pub(super) struct PreparedInspections {
 
 #[cfg(unix)]
 pub(super) fn prepare_inspections_batch(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     demands: &[(String, usize)],
@@ -3061,9 +3062,9 @@ pub(super) fn prepare_inspections_batch(
             "inspection demands require unique work and positive limits"
         ));
     }
-    let root = root.canonicalize().into_diagnostic()?;
+    let root = session.root();
     let mut loaded = load_inspection_works(
-        &root,
+        root,
         config,
         config_revision,
         &ids.into_iter().collect::<Vec<_>>(),
@@ -3075,7 +3076,7 @@ pub(super) fn prepare_inspections_batch(
         .map(|(id, limit)| {
             read.check().into_diagnostic()?;
             let (work, prepared) = loaded.works.remove(id).expect("selected work")?;
-            work.prepare_inspections(&root, &prepared.resources, *limit)
+            work.prepare_inspections(root, &prepared.resources, *limit)
         })
         .collect();
     Ok(PreparedInspections {
@@ -3490,7 +3491,7 @@ pub(super) struct FinalizationCheckpoint {
 
 #[cfg(unix)]
 pub(super) fn prepare_native_finalization(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     id: &str,
@@ -3498,11 +3499,11 @@ pub(super) fn prepare_native_finalization(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<FinalizationCheckpoint> {
     let started_at = std::time::Instant::now();
-    let root = root.canonicalize().into_diagnostic()?;
-    let (work, prepared) = load_controlled(&root, config, config_revision, id, read)?;
+    let root = session.root();
+    let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     let capture_duration_ms = started_at.elapsed().as_millis() as u64;
     let mut checkpoint = prepare_native_finalization_from_capture(
-        &root,
+        root,
         config,
         config_revision,
         &work,
@@ -6096,7 +6097,7 @@ mod tests {
         #[cfg(unix)]
         assert!(matches!(
             prepare_native_step(
-                &root,
+                &MutationSession::acquire(&root).unwrap(),
                 &config,
                 &config_revision,
                 &work.plan.id,
@@ -6120,7 +6121,7 @@ mod tests {
         #[cfg(unix)]
         assert!(matches!(
             prepare_native_step(
-                &root,
+                &MutationSession::acquire(&root).unwrap(),
                 &config,
                 &config_revision,
                 &work.plan.id,
@@ -6149,7 +6150,7 @@ mod tests {
         #[cfg(unix)]
         assert!(
             prepare_native_step(
-                &root,
+                &MutationSession::acquire(&root).unwrap(),
                 &config,
                 &config_revision,
                 &work.plan.id,
@@ -6175,7 +6176,7 @@ mod tests {
         #[cfg(unix)]
         assert!(
             prepare_native_step(
-                &root,
+                &MutationSession::acquire(&root).unwrap(),
                 &config,
                 &config_revision,
                 &work.plan.id,
@@ -6215,13 +6216,29 @@ mod tests {
             std::sync::atomic::AtomicBool::new(true),
         ));
         assert!(
-            prepare_native_finalization(&root, &config, &revision, &work.plan.id, false, &read)
-                .is_err()
+            prepare_native_finalization(
+                &MutationSession::acquire(&root).unwrap(),
+                &config,
+                &revision,
+                &work.plan.id,
+                false,
+                &read
+            )
+            .is_err()
         );
-        assert!(prepare_native_step(&root, &config, &revision, &work.plan.id, &read).is_err());
+        assert!(
+            prepare_native_step(
+                &MutationSession::acquire(&root).unwrap(),
+                &config,
+                &revision,
+                &work.plan.id,
+                &read
+            )
+            .is_err()
+        );
         assert!(
             prepare_inspections_batch(
-                &root,
+                &MutationSession::acquire(&root).unwrap(),
                 &config,
                 &revision,
                 &[(work.plan.id.clone(), 2)],
@@ -6270,7 +6287,7 @@ mod tests {
             let NativeStep::Inspection {
                 progress, request, ..
             } = prepare_native_step(
-                &root,
+                &session,
                 &config,
                 &revision,
                 &work.plan.id,
@@ -6884,7 +6901,7 @@ mod tests {
                 .unwrap();
         }
         let turn = prepare_screenings(
-            &root,
+            &MutationSession::acquire(&root).unwrap(),
             &config,
             &config_revision,
             &[&task.task_id],

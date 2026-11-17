@@ -487,11 +487,12 @@ mod tests {
                 assert_eq!(recovery.proposal_raw, raw);
                 assert!(recovery.completions.is_empty());
                 let crate::commands::work::section::Preparation::Ready(section) =
-                    crate::commands::work::section::prepare(
-                        &root,
+                    crate::commands::work::section::prepare_controlled(
+                        &session,
                         &config,
                         &revision,
                         &task.task_id,
+                        &lk_vault::ReadControl::default(),
                     )
                     .unwrap()
                 else {

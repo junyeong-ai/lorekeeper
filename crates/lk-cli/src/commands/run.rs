@@ -2063,6 +2063,21 @@ mod native {
             true
         }
 
+        /// Discards queue planning captures after the controller waited for another writer:
+        /// that writer may have changed the inputs they were derived from.
+        fn refresh_queue_inputs(&mut self) {
+            self.queue_admitted.clear();
+            self.queue_replan = QueueReplan::Invalidate;
+            self.record(
+                "queue input refresh",
+                StageState::Skipped,
+                Some(
+                    "writer access became available; preparing current inputs before invocation"
+                        .into(),
+                ),
+            );
+        }
+
         async fn reserve_queue_turn(&mut self) -> bool {
             if !self.configuration_is_current() {
                 return false;
@@ -2074,9 +2089,7 @@ mod native {
                 return false;
             };
             if waited {
-                self.queue_admitted.clear();
-                self.queue_replan = QueueReplan::Invalidate;
-                self.record("queue input refresh", StageState::Skipped, Some("writer access became available; preparing current inputs before invocation".into()));
+                self.refresh_queue_inputs();
                 return false;
             }
             let continuation = turn.binding.as_ref().is_some_and(|binding| {
@@ -2141,8 +2154,12 @@ mod native {
                 planned_targets.push(target.clone());
             }
             let demands = request_counts.into_iter().collect::<Vec<_>>();
+            // Audit Work is revalidated against current inputs here, so a wait needs no replan.
+            let Some((session, _)) = self.mutation_session("bounded work progress").await else {
+                return Some(false);
+            };
             let captured = match crate::commands::work::prepare_inspections_batch(
-                &self.root,
+                &session,
                 &self.config,
                 &self.config_revision,
                 &demands,
@@ -2188,7 +2205,7 @@ mod native {
                 let Some(request) = work.requests.pop_front() else {
                     break;
                 };
-                match crate::commands::work::inspection_action(&self.root, id, &request) {
+                match crate::commands::work::inspection_action(session.root(), id, &request) {
                     Ok(Some(reason)) => {
                         self.inspection_deferred.insert(id.clone(), reason.clone());
                         self.deferred("bounded work action", reason);
@@ -2224,6 +2241,7 @@ mod native {
                     metrics,
                 });
             }
+            drop(session);
             if turns.is_empty() {
                 return if self.inspection_deferred.contains_key(&jobs[selected]) {
                     Some(true)
@@ -3109,14 +3127,23 @@ mod native {
 
         async fn whole_section_step(&mut self, task: &lk_queue::QueueTask) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
+            let Some((session, waited)) = self.mutation_session("whole-section preparation").await
+            else {
+                return WorkStep::Failed;
+            };
+            if waited {
+                self.refresh_queue_inputs();
+                return WorkStep::Failed;
+            }
             let started = Instant::now();
             let prepared = crate::commands::work::section::prepare_controlled(
-                &self.root,
+                &session,
                 &self.config,
                 &self.config_revision,
                 &task.task_id,
                 self.supervisor.read_control(),
             );
+            drop(session);
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
             let section = match prepared {
                 Ok(crate::commands::work::section::Preparation::Ready(section)) => section,
@@ -3366,14 +3393,24 @@ mod native {
         async fn bounded_step(&mut self, id: &str, stage: ExecutionStage) -> WorkStep {
             let mut metrics = WorkStepMetrics::new(WorkRole::Evidence);
             metrics.work_id = Some(id.into());
+            let Some((session, waited)) = self.mutation_session("bounded work progress").await
+            else {
+                return WorkStep::Failed;
+            };
+            // Audit Work is revalidated against current inputs here; queue planning is not.
+            if waited && stage != ExecutionStage::Audit {
+                self.refresh_queue_inputs();
+                return WorkStep::Failed;
+            }
             let started_at = Instant::now();
             let prepared = crate::commands::work::prepare_native_step(
-                &self.root,
+                &session,
                 &self.config,
                 &self.config_revision,
                 id,
                 self.supervisor.read_control(),
             );
+            drop(session);
             let step = match prepared {
                 Ok(step) => step,
                 Err(error) => {
@@ -3435,15 +3472,25 @@ mod native {
             mut metrics: WorkStepMetrics,
             frontier: bool,
         ) -> WorkStep {
+            let Some((session, waited)) = self.mutation_session("bounded work completion").await
+            else {
+                return WorkStep::Failed;
+            };
+            if waited {
+                self.refresh_queue_inputs();
+                return WorkStep::Failed;
+            }
             let started_at = Instant::now();
-            let checkpoint = match crate::commands::work::prepare_native_finalization(
-                &self.root,
+            let prepared = crate::commands::work::prepare_native_finalization(
+                &session,
                 &self.config,
                 &self.config_revision,
                 id,
                 frontier,
                 self.supervisor.read_control(),
-            ) {
+            );
+            drop(session);
+            let checkpoint = match prepared {
                 Ok(checkpoint) => checkpoint,
                 Err(error) => {
                     *metrics
@@ -3560,6 +3607,7 @@ mod native {
 
         fn prepare_queue_screenings(
             &mut self,
+            session: &lk_vault::MutationSession,
             targets: &[String],
             jobs: &mut std::collections::BTreeMap<String, QueueDispatch>,
         ) -> miette::Result<Option<Vec<ScreeningAttempt>>> {
@@ -3593,7 +3641,7 @@ mod native {
                     .collect::<Vec<_>>()
             } else {
                 let captured = crate::commands::work::prepare_screenings(
-                    &self.root,
+                    session,
                     &self.config,
                     &self.config_revision,
                     &task_ids,
@@ -3761,7 +3809,15 @@ mod native {
                 .filter(|target| matches!(jobs[*target], QueueDispatch::Screening { .. }))
                 .cloned()
                 .collect::<Vec<_>>();
-            let screenings = match self.prepare_queue_screenings(&screen_targets, jobs) {
+            let Some((session, waited)) = self.mutation_session("queue read preparation").await
+            else {
+                return false;
+            };
+            if waited {
+                self.refresh_queue_inputs();
+                return true;
+            }
+            let screenings = match self.prepare_queue_screenings(&session, &screen_targets, jobs) {
                 Ok(Some(turns)) => turns,
                 Ok(None) => {
                     self.queue_admitted.clear();
@@ -3778,7 +3834,7 @@ mod native {
             let mut preparation_duration_ms = None;
             if !demands.is_empty() {
                 let captured = match crate::commands::work::prepare_inspections_batch(
-                    &self.root,
+                    &session,
                     &self.config,
                     &self.config_revision,
                     &demands,
@@ -3863,7 +3919,8 @@ mod native {
                         let Some(request) = work.requests.pop_front() else {
                             continue;
                         };
-                        match crate::commands::work::inspection_action(&self.root, id, &request) {
+                        match crate::commands::work::inspection_action(session.root(), id, &request)
+                        {
                             Ok(Some(reason)) => {
                                 self.inspection_deferred.insert(id.clone(), reason.clone());
                                 self.deferred("bounded work action", reason);
@@ -3898,6 +3955,7 @@ mod native {
                 };
                 turns.push((target, turn));
             }
+            drop(session);
             if turns.is_empty() {
                 return true;
             }
@@ -3948,9 +4006,7 @@ mod native {
                     return false;
                 };
                 if waited {
-                    self.queue_admitted.clear();
-                    self.queue_replan = QueueReplan::Invalidate;
-                    self.record("queue input refresh",StageState::Skipped,Some("writer access became available; preparing current inputs before invocation".into()));
+                    self.refresh_queue_inputs();
                     self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                     return true;
                 }
@@ -4724,7 +4780,7 @@ mod native {
                         {
                             flush(&mut batch, &mut jobs);
                             match crate::commands::work::section::prepare_controlled(
-                                session.root(),
+                                &session,
                                 &self.config,
                                 &self.config_revision,
                                 &task.task_id,
@@ -6268,9 +6324,13 @@ mod native {
                 return;
             }
             let mut bounded = plan.input.ensure_ready().is_err();
+            // Both routes below capture each subject again, so a wait needs no replan here.
+            let Some((session, _)) = self.mutation_session("audit request planning").await else {
+                return;
+            };
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work_controlled(
-                    &self.root,
+                    &session,
                     &self.config,
                     &self.config_revision,
                     candidate,
@@ -6283,6 +6343,7 @@ mod native {
                     }
                 }
             }
+            drop(session);
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
                 let bindings = plan

@@ -63,7 +63,7 @@ pub(in crate::commands) fn prepare(
     task_id: &str,
 ) -> miette::Result<Preparation> {
     prepare_controlled(
-        root,
+        &lk_vault::MutationSession::acquire(root).into_diagnostic()?,
         config,
         config_revision,
         task_id,
@@ -72,25 +72,25 @@ pub(in crate::commands) fn prepare(
 }
 
 pub(in crate::commands) fn prepare_controlled(
-    root: &Path,
+    session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Preparation> {
-    let root = root.canonicalize().into_diagnostic()?;
-    let task = crate::commands::queue::current_task_controlled(&root, task_id, read)?;
+    let root = session.root();
+    let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
     if !crate::commands::execution::finalization::supports(task.kind) {
         return Err(miette::miette!("task requires interactive processing"));
     }
-    let original = super::resources::task_controlled(&root, config, task_id, read)?;
-    let work = super::expected(&root, &original, config, config_revision)?;
-    if work.plan.parts.len() != 1 || work.is_planned(&root)? {
+    let original = super::resources::task_controlled(root, config, task_id, read)?;
+    let work = super::expected(root, &original, config, config_revision)?;
+    if work.plan.parts.len() != 1 || work.is_planned(root)? {
         return Err(miette::miette!(
             "existing or partitioned work requires its guarded Work protocol"
         ));
     }
-    let prepared = super::resources::section_task_controlled(&root, config, task_id, read)?;
+    let prepared = super::resources::section_task_controlled(root, config, task_id, read)?;
     let result = lk_queue::SectionResult {
         task_id: task.task_id.clone(),
         cache_hash: task.cache_hash.clone(),
@@ -113,7 +113,7 @@ pub(in crate::commands) fn prepare_controlled(
         })
         .ok_or_else(|| miette::miette!("section result identity exceeds max_result_bytes"))?;
     let events = (task.kind == lk_queue::TaskKind::RefineEvents)
-        .then(|| super::refinement_events(&root, &prepared, &task))
+        .then(|| super::refinement_events(root, &prepared, &task))
         .transpose()?;
     let input = json!({"context":{"subject":prepared.subject,"purpose":prepared.context["purpose"]},
         "context_revision":prepared.revision(config_revision)?,"resources":prepared.resources});
@@ -129,7 +129,7 @@ pub(in crate::commands) fn prepare_controlled(
             max_input_bytes: bounds.max_input_bytes,
         });
     }
-    if let Some((_, action)) = read_action(&root, task_id, &task.cache_hash)?
+    if let Some((_, action)) = read_action(root, task_id, &task.cache_hash)?
         && action.request_revision == digest(&request)?
     {
         if action.context_revision != prepared.revision(config_revision)? {
@@ -150,7 +150,7 @@ pub(in crate::commands) fn prepare_controlled(
         &request,
         &crate::commands::execution::finalization::schema(),
     )?;
-    if let Some(reason) = binding.held(&root)? {
+    if let Some(reason) = binding.held(root)? {
         return Ok(Preparation::NeedsAction(reason));
     }
     Ok(Preparation::Ready(Box::new(Section {
@@ -171,7 +171,7 @@ pub(in crate::commands) fn hold(
 ) -> miette::Result<String> {
     let read = section.prepared.read_control().clone();
     let Preparation::Ready(current) = prepare_controlled(
-        session.root(),
+        session,
         config,
         config_revision,
         &section.result.task_id,
@@ -218,7 +218,7 @@ pub(in crate::commands) fn finish(
     let root = session.root();
     let read = section.prepared.read_control().clone();
     let current = prepare_controlled(
-        root,
+        session,
         config,
         config_revision,
         &section.result.task_id,

@@ -160,11 +160,19 @@ impl Runner<'_> {
                 }
             };
             let mut bounded = selected.input.ensure_ready().is_err();
+            let Some((session, waited)) = self.mutation_session("audit request planning").await
+            else {
+                return;
+            };
+            if waited {
+                // Another writer ran; the subjects captured above may be stale.
+                continue;
+            }
             let required = subjects
                 .iter()
                 .map(|subject| {
                     crate::commands::work::audit_needs_work_controlled(
-                        &self.root,
+                        &session,
                         &self.config,
                         &self.config_revision,
                         &subject.candidate,
@@ -172,6 +180,7 @@ impl Runner<'_> {
                     )
                 })
                 .collect::<miette::Result<Vec<_>>>();
+            drop(session);
             let required = match required {
                 Ok(required) => required,
                 Err(error) => {

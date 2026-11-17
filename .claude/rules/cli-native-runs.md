@@ -132,6 +132,10 @@ paths:
 - Native writer waiting is cancellable, retries only typed contention and validates the
   same-read config pin before recovery. A pre-host cursor wait discards prepared
   requests and replans before invocation; post-host recording reloads fresh inputs.
+  The controller derives Work state for native preparation only under its own writer
+  claim, so a cooperating writer's pending journal is awaited and recovered first; a wait
+  there discards queue planning captures and replans, and the claim ends before any host
+  call. Standalone read-only Work queries still refuse pending journals.
   Native discovery reads also check the supervised signal flag between enumeration,
   header lines and body chunks. Cancellation discards incomplete captures; it does not
   interrupt an active kernel I/O call or abandon a journal transition.

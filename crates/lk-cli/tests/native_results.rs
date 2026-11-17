@@ -808,6 +808,54 @@ fn tool_enabled_host_exits_hold_only_their_exact_input_until_guarded_retry() {
 }
 
 #[test]
+fn scheduled_controller_recovers_a_cooperating_writers_journal_before_preparing_its_request() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "execution:\n",
+        "execution:\n  automation: {process_schedule: '0 * * * *', max_calls_per_day: 8, max_run_seconds: 60}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, false);
+    let vault = fixture.root().join("vault");
+    let before = std::fs::read_to_string(vault.join(&task.target.vault_path)).unwrap();
+    let after = format!("{before}\nRecovered cooperating edit.\n");
+    let mut plan = lk_vault::MutationPlan::default();
+    plan.edit(&task.target.vault_path, before, after.clone());
+    let journal = vault.join(".lorekeeper/mutation/pending.json");
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    std::fs::write(
+        &journal,
+        serde_json::to_vec(&json!({"version":1,"plan":plan})).unwrap(),
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .args(["run", "process", "--scheduled", "--json"])
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)));
+    assert_eq!(report["runs"][0]["halted"], false, "{report}");
+    let usage: Value = serde_json::from_slice(
+        &std::fs::read(vault.join(".lorekeeper/automation-usage.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(usage["paused"].as_object().unwrap().is_empty(), "{usage}");
+    assert!(!journal.exists());
+    assert!(
+        std::fs::read_to_string(vault.join(&task.target.vault_path))
+            .unwrap()
+            .contains("Recovered cooperating edit.")
+    );
+    let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+    assert!(
+        calls.contains("Recovered cooperating edit."),
+        "the prepared request reads the recovered page: {calls}"
+    );
+    assert!(fixture.done(&task), "{report}");
+}
+
+#[test]
 fn generation_batches_split_only_when_resolved_profiles_differ() {
     for routed in [false, true] {
         let fixture = Fixture::new("codex");
