@@ -1059,6 +1059,15 @@ mod native {
             if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                 return false;
             }
+            if let Some(control) = &mut self.automation {
+                match control.preflight(&self.root) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return self.configuration_is_current() && self.record_automation_stop();
+                    }
+                    Err(error) => return self.failure("automation preflight", error),
+                }
+            }
             let wait_deadline = if let Some(control) = &mut self.automation {
                 match control.wait_deadline() {
                     Ok(Some(deadline)) => Some(deadline),

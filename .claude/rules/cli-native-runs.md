@@ -94,6 +94,9 @@ paths:
   not use that allowance. Neither allowance renews across batches. Duration limits stop
   new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation;
   explicit `--resume` clears its pause without clearing usage or semantic holds.
+  Before workflow waiting, a read-only ledger preflight may refuse a proven operation
+  pause under a validated physical-root pin. It neither reserves calls nor clears pauses;
+  absence is not admission. Resume and authoritative admission still require the lease.
   Confirmed tool-free Inspect/Reduce session timeouts retain one automatic retry per
   exact request/contract, then hold only that node. Persist counts separately from
   observations and semantic actions through the mutation journal; they are not retained

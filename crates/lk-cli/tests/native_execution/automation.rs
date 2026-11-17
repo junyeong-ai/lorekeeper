@@ -323,6 +323,65 @@ fn corrupt_automation_usage_stops_without_model_calls_or_replacement() {
 }
 
 #[test]
+fn a_paused_scheduled_operation_reports_without_waiting_for_an_owned_workflow() {
+    use std::io::{BufRead, Write};
+    let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+    configure(&fixture, Some(4), 1);
+    let path = fixture
+        .root()
+        .join("vault/.lorekeeper/automation-usage.json");
+    let raw = serde_json::to_vec(&serde_json::json!({
+        "schema":"automation-usage-v1",
+        "utc_date":jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC).date(),
+        "reserved_calls":3,
+        "paused":{"knowledge":"2026-11-16T23:28:26Z"}
+    }))
+    .unwrap();
+    std::fs::write(&path, &raw).unwrap();
+    let mut holder = fixture
+        .command()
+        .args([
+            "workflow",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf 'ready\\n'; read task_release",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(holder.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let output = fixture
+        .command()
+        .args(["run", "knowledge", "--scheduled", "--wait", "--json"])
+        .output()
+        .unwrap();
+    holder
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    assert!(holder.wait().unwrap().success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["stop_reason"], "blocked", "{report}");
+    assert_eq!(
+        report["runs"][0]["automation"]["stop"], "paused",
+        "{report}"
+    );
+    assert_eq!(report["runs"][0]["automation"]["workflow_wait_ms"], 0);
+    assert!(report["runs"][0]["workflow_id"].is_null());
+    assert_eq!(calls(&report), 0);
+    assert_eq!(std::fs::read(path).unwrap(), raw);
+    assert!(!fixture.root().join("bounded-calls.jsonl").exists());
+}
+
+#[test]
 fn scheduled_workflow_wait_is_bounded_without_starting_a_model() {
     use std::io::{BufRead, Write};
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);

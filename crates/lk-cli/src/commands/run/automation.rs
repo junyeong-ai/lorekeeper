@@ -185,6 +185,21 @@ impl Control {
         })
     }
 
+    pub fn preflight(&mut self, root: &Path) -> miette::Result<bool> {
+        if self.resume || !root.try_exists().into_diagnostic()? {
+            return Ok(true);
+        }
+        let pin = crate::commands::workflow::VaultRootPin::capture(root, root)?;
+        let usage = Usage::load(pin.root(), today())?;
+        pin.validate()?;
+        if usage.paused.contains_key(&self.operation) {
+            self.refresh(&usage);
+            self.report.stop = Some(Stop::Paused);
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     pub fn wait_deadline(&mut self) -> miette::Result<Option<Instant>> {
         if !self.check_duration() {
             return Ok(None);
