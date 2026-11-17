@@ -170,7 +170,7 @@ Unknown or explicitly deferred candidates prevent completion. See [candidate scr
 
 `process --batches N` and `knowledge --batches N` are explicit batch ceilings.
 `process` continues after call-budget exhaustion with newly retained progress.
-`knowledge` continues after verified audit completion; intermediate observations alone do not ensure continuation.
+Verified audits or newly retained progress can advance `knowledge`; intermediate progress does not establish audit completion.
 Fatal or unknown errors, cancellation and holds without qualifying progress stop the campaign.
 Some publication can succeed while the overall job remains incomplete. Check results and remaining state;
 do not repeat an unchanged hold without diagnosing it or adopt an old answer by replacing its revisions.
@@ -184,7 +184,7 @@ With `execution.automation`, queue draining gets its own schedule; collection an
 Tool-free Inspect/Reduce timeouts receive one automatic retry per exact request. Repeated timeouts, confirmed nonzero exits and unusable replies hold that input; independent successful results remain saved. After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then clear its operational hold with `lore work retry WORK NODE`. Use `lore work hold WORK NODE --reason "..."` to suspend a known failed input without calling the host. Usage, paid observations and semantic holds remain intact.
 Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
 Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.
-An execution admitted while waiting with `--wait` gets the lease after the current batch, ahead of a new batch.
+Scheduled `process` and `knowledge` yield at a retained-work checkpoint when another workflow waits. Reacquisition renews neither calls, time nor replan allowances.
 
 Use `lore self update` to update and `lore self status` to check installation coherence.
 Back up the entire vault, including hidden state. Paid observations, queues and review history are not caches.

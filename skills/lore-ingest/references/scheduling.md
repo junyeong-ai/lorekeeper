@@ -35,12 +35,16 @@ daily ingest's separate publication lease, or short writer-lock waits. Duration
 limits stop new agent calls; returned results remain recordable.
 The selected profile's `execution.work.max_calls` also caps the complete scheduled
 invocation across those batches; a batch boundary cannot renew that allowance.
+When workflow admission is contended, process/knowledge settle every launched call,
+yield the lease and continue with fresh preparation. `runs[].yield_reason` identifies
+these incomplete checkpoints; final success still requires normal completion checks.
+Calls, execution/wait time and original-subject replan allowances remain cumulative.
 Optional `automation.knowledge_schedule` overrides the knowledge job's timing;
 omission retains `graph.audit.schedule`. It emits one stable job, not another audit
 writer. Batch size, readiness and holds still use the existing graph audit policy.
 Keep automatic timing changes in this policy to preserve new-policy Work identities.
 Stagger process and knowledge opportunities when both need progress; shared usage
-does not reserve an operation's share. Every batch releases
+does not reserve an operation's share. Every batch or yielded checkpoint releases
 the workflow lease. All scheduled jobs share `max_calls_per_day` in the physical
 vault's UTC-day usage ledger. This required field accepts a positive integer or YAML
 null for no daily cap. Unlimited daily usage still observes per-run calls, duration
@@ -53,8 +57,9 @@ tokens or billing. Separate waiting and execution limits bound acquisition and n
 not completion of an active host, source collection or paid-result recording.
 Unknown/corrupt accounting refuses semantic execution. Fatal inference failures pause
 that operation's semantic phase across restarts and day rollover. Daily source
-collection still runs before this pause check. After repairing the reported cause,
-explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
+collection still runs before this pause check.
+Process and knowledge report a known pause before waiting for the workflow lease.
+After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
 it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
 spend no calls, including exhausted per-node timeout allowances. Tool-free Inspect/Reduce
 session timeouts receive one automatic retry per exact request and native contract;
@@ -106,11 +111,12 @@ draining unrelated queue work. The selected subject's actual evidence, context a
 review inputs must have completed owned semantic work; unfinished scoped tasks or
 unpublished results defer it. Unknown targets in malformed queue data remain a
 blocker. `audit_deferred` reports encountered blockers. The runner verifies selected
-assessments after final global reconciliation; completed audits do not turn an
+assessments before releasing their workflow. Final completion also requires global
+reconciliation and checks; completed audits do not turn an
 unfinished global queue into a successful job.
 
 The native runner holds the cooperative Unix workflow lease through semantic
-reading and publication. Native daily jobs collect first, then fence publication
+reading and publication within each retained unit. Native daily jobs collect first, then fence publication
 with a separate workflow lease before starting semantic processing. `--wait` waits
 at that boundary; without it, busy publication refuses. Source cursor/admission
 claims and network acquisition remain outside the publication lease. Standalone

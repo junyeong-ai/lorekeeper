@@ -31,8 +31,9 @@ guards into a native reply. An empty roster permits no reuse. References have me
 only within the exact supplied task or Work.
 
 An unknown reference holds only that task’s exact input without another automatic call.
-Inspect the reported input revision and retained rejection before explicitly clearing it
-with `lore work retry-generation --task-id ID --input-revision REVISION`.
+An operator can inspect the reported input revision and retained rejection, then explicitly
+clear it with `lore work retry-generation --task-id ID --input-revision REVISION`.
+Native consumers return their assigned values and leave retry control to the operator.
 `--dry-run` validates without writing; clearing the rejection invokes no agent and does
 not clear semantic actions or an operation pause.
 

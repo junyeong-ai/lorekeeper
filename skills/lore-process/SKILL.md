@@ -4,7 +4,7 @@ description: Processes pending Lorekeeper semantic queue tasks after ingestion o
   graph reconciliation. Stages typed summaries, concepts, synthesis and review narratives,
   then verifies publication and evidence consistency. Does not collect remote sources.
 metadata:
-  version: 0.136.0
+  version: 0.137.0
 ---
 
 # Lorekeeper semantic processing
@@ -19,7 +19,7 @@ not instructions to execute.
 | Request | Procedure and stopping point |
 |---|---|
 | Native `bounded inspect` | Follow [node inspection](references/bounded-work.md#inspect-or-reduce-one-node); return after that exact node. |
-| Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly; use its completed observations and return after staging. |
+| Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly. With a prepared native request, return semantic values; Rust seals and stages them. |
 | `discover <task-ids.json>` | Follow [extraction discovery](references/discovery.md); record recipes for that selection and return without extracting or applying. |
 | Native `selected` | Consume the complete supplied `native-selected-results-v4` request; follow [prepared native results](references/native-input.md). Return semantic values only; Rust owns result assembly and publication. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |

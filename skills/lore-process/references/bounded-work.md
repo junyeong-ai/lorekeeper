@@ -497,8 +497,7 @@ the exact unchanged request. Independent tasks can continue. Changed requests ma
 reconsidered; explicit guarded `work finish` can resolve the task, and a verified sealed
 result can restage normally. Never edit native receipts, observations or guard fields
 to bypass pending work. Native extraction and synthesis use the tool-enabled semantic
-response contract in [prepared native results](native-input.md). Native audits and
-standalone processing use the command procedure below.
+response contract in [prepared native results](native-input.md).
 
 ## Finalize
 
@@ -507,7 +506,9 @@ When the controller supplies `native-finalize-results-v5` or
 [prepared native input](native-input.md#completed-work) directly. It already contains
 the complete root or observation coverage, distinct context guard and applicable rules; do not repeat steps 1–2
 below. Rust reconstructs the exact current request and completion authority before sealing the assembled result.
-The command procedure below remains for standalone work and native audit finalizers.
+For `native-audit-results-v1`, follow [native assessment](../../lore-wiki/references/maintenance.md#native-assessment)
+and return judgments; Rust supplies assessment identity and owns publication.
+The command procedure below applies when no prepared native request is supplied.
 
 1. Read the complete `lore work result WORK`, continuing with bounded reads if a
    tool display is incomplete, and retain that exact response in the private

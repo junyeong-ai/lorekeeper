@@ -6,6 +6,7 @@ paths:
   - "crates/lk-cli/src/commands/work/native.rs"
   - "crates/lk-cli/src/commands/work/section.rs"
   - "crates/lk-cli/src/commands/work/generation.rs"
+  - "crates/lk-cli/src/commands/work/generation/**"
   - "crates/lk-cli/src/commands/work/audit.rs"
   - "crates/lk-cli/src/commands/work/preparation.rs"
   - "crates/lk-cli/src/commands/execution/observation.rs"
