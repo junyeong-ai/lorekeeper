@@ -100,31 +100,20 @@ deliberately or use smaller self-contained input batches. They do not cap total 
 memory, native decoder allocations, or provider usage.
 
 Semantic maintenance is optional and separate from weekly synthesis and retention.
-Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
-`batch_size` changed/first-time subjects. `graph.audit.subjects` lists the kinds
+Enable `graph.audit.schedule` deliberately: each run uses the LLM, through the configured
+execution profile, to review at most `batch_size` changed/first-time subjects; structural
+lint alone cannot perform the semantic read. `graph.audit.subjects` lists the kinds
 automatic plans include: `[concept]` by default, `[concept, document]` to add declared
 source documents. Coverage is `reviewed_current` of `total` over those kinds, shown by
 `lore status` and `lore wiki audit-plan`; other kinds appear only as `excluded_by_kind`
 counts and stay auditable through explicit `audit-plan --path`. Subjects are planned by
 typed risk, so lower-risk pages can wait: coverage is reported, not promised.
-`lore run knowledge` uses the configured
-execution profile; structural lint alone cannot perform the semantic read.
-For an explicitly requested initial campaign, `lore run knowledge --batches N`
-repeats bounded batches, releasing the lease between them and resuming from current
-receipts. Verified selected-audit progress can advance the campaign despite unrelated
-scoped queue rejections; the overall outcome remains incomplete/nonzero. Fatal or unknown
-failures, cancellation, or no verified audit progress stop it. See the
+`max_input_bytes` bounds one subject's distinct source bytes, including scoped reviews,
+their evidence and available prior archives, not accumulated model usage. Oversized
+subjects stay selected with their actual footprint diagnostic and are read through
+bounded work. `lore run knowledge --batches N` campaigns follow the
 [campaign and measurement contract](../../lore-wiki/references/maintenance.md#operating-budget-and-measurement).
-`batch-limit` is a completed execution budget, not full-corpus semantic completion.
-`max_input_bytes` includes scoped reviews, their evidence and available prior archives;
-it measures distinct source bytes rather than accumulated model usage. Oversized subjects
-remain selected with their actual footprint diagnostic. Native execution partitions
-their evidence, uses fresh inspection/reduction sessions, then verifies the complete
-work before accepting a final assessment. `execution.work` independently bounds
-serialized request/result bytes and agent sessions per run; exhaustion retains pending
-work and reports failure. Explicit `audit-plan --path` preserves the requested selection.
-Run JSON's `review_health` reports global attention separately from the selected
-batch's completion. Execution budgets are configured below.
+Execution budgets are configured below.
 
 ## Initial setup
 
@@ -218,14 +207,11 @@ exhaustion preserves verified work and reports incompletion.
 `execution.work.max_parallel` defaults to 1. Raising it permits concurrent ready
 evidence inspection/reduction and distinct-target screening requests, bounded by
 the remaining call budget. Interactive sessions, finalization and publication remain
-serial. Screening shares one fresh complete candidate capture after the hosts return;
-each receipt still checks its exact task scope, page bytes and ledger.
-Recording reloads current inputs after the observers return; changed inputs refuse
-old observations. Parallelism does not increase `max_calls` or guarantee a speedup.
+serial; recording rechecks current inputs, so changed inputs refuse old observations.
+Parallelism does not increase `max_calls` or guarantee a speedup.
 Positive `max_consecutive_calls` defaults to 4. An admitted exact queue Work or
-screening phase can use this many fresh attempts before another fair turn. It uses
-the same total call budget; publication, deferral, changed phases and writer-wait
-replanning end that admission. Restart/cancellation keeps the durable next target.
+screening phase can use this many fresh attempts before another fair turn, within
+the same total call budget.
 Optional positive `max_screening_batches` limits the packets a task's undecided
 candidate cards still need. Omission is unlimited; exceeding it keeps every candidate
 and paid decision, defers that task before invocation and permits independent
@@ -313,9 +299,8 @@ normalization preserves semantic-policy identities, but legacy byte-bound Work s
 requires its exact original configuration. Every configuration edit invalidates an
 active workflow, including a semantically empty edit.
 
-These model settings are opt-in examples, not measured quality or throughput results.
-Terra with `model_reasoning_effort: medium` is another configurable reader candidate;
-evaluate it on the same evidence before changing production policy. See official
+These model settings are opt-in examples, not measured quality or throughput results;
+evaluate a candidate on the same evidence before changing production policy. See official
 [OpenAI model selection](https://developers.openai.com/api/docs/guides/model-selection)
 and [Haiku effort guidance](https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-haiku-5-5).
 
@@ -331,8 +316,8 @@ the installer does not build native dependencies from source. A failed installat
 retains its incomplete directory for inspection and never overwrites existing data.
 
 The native runtime uses pinned Xberg for DOCX/PDF and openpyxl for XLSX. The pinned
-Xberg release provides macOS/Linux wheels; Windows native-runtime installation is
-currently unavailable. Literal PDF OCR renders each physical page through pypdfium2
+Xberg release provides macOS and Linux wheels only, so the native runtime does not
+install on Windows. Literal PDF OCR renders each physical page through pypdfium2
 before image recognition; native text stays separate from failed OCR results.
 After a CLI upgrade, run `lore input check`. If dependency versions differ,
 install into a new directory and update `ingest.documents.python` from its printed
@@ -417,13 +402,12 @@ representative input before raising both budgets. Metadata readers can allocate
 codec buffers before pending-unit preflight, including WebP's canvas. These bounds
 do not cap the decoder/model process's total memory.
 
-Real ingestion checkpoints validated native components and completed visual units in
-the private, derived `.lorekeeper/cache/projections/` store. Exact source bytes,
-decoder/worker policy, dependency and model identity govern reuse; current output
-and unit limits still apply. Cached units skip rendering and recognition. Inspection and dry
-runs read caches without writing or renewing retention. Successful read/write reuse
-renews last use; maintenance prunes expired derived entries, preserving active claims
-and malformed data. Cache removal does not remove originals or completed knowledge.
+Real ingestion checkpoints completed units in the private, derived
+`.lorekeeper/cache/projections/` store: a unit with unchanged source bytes, decoder
+policy, dependency and model identity skips rendering and recognition when ingested
+again, within current output and unit limits. Inspection and dry runs read the cache
+without writing it or renewing its retention. Maintenance prunes expired entries;
+removing the cache never removes originals or completed knowledge.
 
 Original acquisition defaults are 32 MiB per entry, 64 MiB per referenced member and
 256 MiB per manual source. Raise `ingest.originals` budgets explicitly for larger
@@ -525,12 +509,8 @@ actual source compatibility without vault or queue writes. `doctor` audits page 
 `health` reads collection history, and `self status` checks Lore's installation; none
 certifies the currently selected nodex executable.
 
-Collection uses nodex's verified metadata, canonical body and outgoing relations.
-`source_record.observation_revision` identifies that public response with an explicit
-`nodex-query-node-v2:sha256` scheme; body reference locations count lines from the
-start of the source file, including frontmatter. Retained v1 observations keep their
-body-relative locations and original revision; they are not relabeled. The digest
-is not the raw Markdown file's SHA. Formatting that nodex canonicalizes
-can yield the same observation after rebuilding. Earlier `revision` and
-`content_revision` evidence keeps its original meaning. Refreshing a source creates
-new semantic inputs and may require reassessing reviews that cite its old revision.
+Collection uses nodex's verified metadata, canonical body and outgoing relations;
+body reference locations count lines from the start of the source file, including
+frontmatter. `source_record.observation_revision` identifies that response, not the raw
+Markdown file. Refreshing a source creates new semantic inputs and may require
+reassessing reviews that cite its old revision.
