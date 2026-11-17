@@ -1206,7 +1206,7 @@ fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() 
     for name in ["a", "b"] {
         write_audit_concept(&fixture, name);
     }
-    write_review_attention(&fixture, "wiki/documents/reviewed.md", false);
+    write_review_attention_at(&fixture, "daily/reviewed.md", false, "daily/reviewed.md");
     let output = fixture
         .command()
         .args(["run", "knowledge", "--batches", "2", "--json"])

@@ -90,19 +90,25 @@ and CLI discovery, not a second graph authority.
   first-discovery order. Reuse prepared lexical discovery only after verifying its
   complete live knowledge inventory and exact file bytes. Missing or stale captures
   use the same complete live matcher without preparing or mutating navigation.
-- Preserve pending first-discovery order and rotate changed/first-time work. A bounded
-  weekly batch must not starve old work or grow into an unbounded full-corpus audit.
+- Rotate changed and first-time work. Inside each class `AuditPriority` plans by typed
+  risk, compared in this order: the most severe unsettled scoped review (missing,
+  invalid, needs-reassessment, open), a receipt that recorded a follow-up, distinct
+  citing pages from the backlink authority, then discovery recorded for the exact
+  subject revision. Pending first-discovery order only breaks ties. Text, titles and
+  name patterns never enter the order, and a priority ranks work, not truth.
+  A bounded batch never grows into a full-corpus audit; lower-risk subjects can wait
+  indefinitely, so plans report coverage instead of promising it.
   Native admission journals pending order before external discovery or assessment,
   under the writer claim with exact selected-input and readiness guards. It creates
   no assessment receipt and does not advance a class turn; planning stays read-only.
   Native admission can defer unavailable subjects through a readiness callback;
   preserve complete coverage counts and pending order, and do not consume a class
   turn or create a receipt merely because a subject is deferred.
-  Evaluate admission readiness only along the fair pending prefix needed to fill
+  Evaluate admission readiness only along the planned prefix needed to fill
   the batch. Read-only availability plans retain their complete checked scope.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
-  them fairly and preserves the measured oversized status. Recording requires exact
+  them in planned order and preserves the measured oversized status. Recording requires exact
   completed-work proof for each exempted subject in the same guarded publication plan;
   ordinary subjects retain their combined whole-input bound. Final verification reads
   canonical assessments against current semantic dependencies, independent of disposable

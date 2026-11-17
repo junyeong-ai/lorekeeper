@@ -98,11 +98,7 @@ pub(super) fn build_adoption(
     if discovery.selection.is_some() {
         return Ok((MutationPlan::default(), adoption));
     }
-    if receipts
-        .entries
-        .get(&candidate.path)
-        .is_some_and(|receipt| super::super::receipt_is_current(receipt, &candidate))
-    {
+    if candidate.reason == super::super::AuditReason::Current {
         return Err(error(
             "current assessments do not require discovery adoption",
         ));

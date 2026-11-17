@@ -90,8 +90,9 @@ paths:
   immediately before execution, including every member of a whole-input batch.
   `.lorekeeper/execution-cursor.json` stores the next queue/audit target under a guarded
   short mutation, preserving turns across budget-limited runs. Reserve before external
-  execution, never infer priority or semantic quality from size/progress/citation
-  counts.
+  execution. Cursor turns are round-robin: never infer their priority or semantic
+  quality from size, progress or citation counts. Which audit subjects enter a batch
+  is decided earlier by `lk-graph` planning, which orders each class by typed risk.
 
 ## Queue processing (`commands/queue/`, `commands/synthesis.rs`)
 

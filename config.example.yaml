@@ -506,7 +506,7 @@ concepts:
 # graph:
 #   audit:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
-#     batch_size: 5                # rotate changed and first-time concepts/documents fairly (1..100)
+#     batch_size: 5                # changed and first-time subjects rotate; each class plans by typed risk (1..100)
 #     max_input_bytes: 262144      # whole distinct audit footprint; oversized subjects require completed bounded work
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:

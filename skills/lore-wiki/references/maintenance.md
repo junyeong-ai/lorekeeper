@@ -122,8 +122,12 @@ The final audit reads every admitted body; screening creates no citation or comp
 1. Run `lore wiki audit-plan --ready` once. When the caller supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
-   `graph.audit.batch_size` bounds subject count (1..100). Selection preserves fair
-   pending order, including oversized subjects. Do not expand the batch to reduce
+   `graph.audit.batch_size` bounds subject count (1..100). Selection rotates changed
+   and first-time subjects and orders each class by the candidate's typed `priority`:
+   the most severe unsettled scoped review, a receipt that recorded a follow-up,
+   distinct citing pages, then discovery already recorded for the current revision.
+   Equal priorities keep pending order, including oversized subjects. A priority ranks
+   work, not truth, and lower-risk subjects can wait. Do not expand the batch to reduce
    the whole backlog to zero. An empty candidate list reports current coverage;
    it is not a guarantee that all statements are true.
    Candidates identify `kind: concept` or `kind: document`; document subjects are
@@ -241,8 +245,8 @@ failed step must be reported, never recorded as a successful read.
 
 Receipts in `.lorekeeper/knowledge-audit.json` track the latest completed inputs and
 pending order, not truth or confidence. Changed subjects, evidence, related context,
-or scoped reviews and their evidence reopen work. Changed and first-time work rotate;
-unchanged inputs are skipped without an age-based reread. Unchanged open findings
+or scoped reviews and their evidence reopen work. Changed and first-time work rotate,
+each ordered by typed risk; unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
 
 Finish by reconciling backlinks and completing any queued repairs through the

@@ -166,7 +166,7 @@ paths:
   before external audit discovery or assessment, preserving it across failed or
   budget-limited runs without recording completion or consuming deferred class turns.
   During automatic admission, check exact current Work holds only along the available
-  pending prefix needed to fill the configured batch. Preserve held order and paid
+  planned prefix needed to fill the configured batch. Preserve held order and paid
   bytes; all-held is deferred, while corrupt or unreadable state is fatal. No Work-ID
   shortcut, persistent hold index or capture reuse across a host/wait boundary. Recheck
   readiness under those claims before recording, and verify selected receipts after

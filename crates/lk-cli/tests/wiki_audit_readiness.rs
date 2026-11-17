@@ -126,6 +126,11 @@ fn automatic_readiness_skips_blocked_inputs_without_reserving_or_changing_defaul
     let ordinary = fixture.plan(&["wiki", "audit-plan"]);
     assert!(ordinary.get("readiness").is_none());
     assert_eq!(ordinary["candidates"][0]["path"], "wiki/documents/a.md");
+    assert_eq!(ordinary["candidates"][0]["reason"], "unreviewed");
+    assert_eq!(
+        ordinary["candidates"][0]["priority"],
+        json!({"review": null, "follow_up": false, "evidence_pages": 0, "discovery": false})
+    );
     let ready = fixture.plan(&["wiki", "audit-plan", "--ready"]);
     assert_eq!(ready["candidates"][0]["path"], "wiki/documents/b.md");
     assert_eq!(ready["readiness"]["scope"], "encountered");

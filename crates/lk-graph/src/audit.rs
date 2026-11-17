@@ -1,4 +1,5 @@
 //! Incremental semantic-review receipts. They track work, never establish factual truth.
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 
@@ -535,11 +536,7 @@ pub fn verify_batch_with_readiness_controlled(
             None => {
                 let available = ready(candidate);
                 read.check().map_err(GraphError::from)?;
-                let current = available?
-                    && receipts
-                        .entries
-                        .get(&candidate.path)
-                        .is_some_and(|receipt| receipt_is_current(receipt, candidate));
+                let current = available? && candidate.reason == AuditReason::Current;
                 currentness.insert(candidate.path.clone(), current);
                 current
             }
@@ -560,10 +557,7 @@ pub fn verify_batch_with_readiness_controlled(
     Ok(AuditVerification {
         completed: verified,
         pending: pending.into_iter().collect(),
-        coverage: AuditCoverage::build(
-            counts(candidates.values(), &receipts),
-            AuditCoverageScope::Corpus,
-        ),
+        coverage: AuditCoverage::build(counts(candidates.values()), AuditCoverageScope::Corpus),
     })
 }
 
@@ -575,7 +569,8 @@ enum AuditClass {
     Unreviewed,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// Declared from the most to the least severe obligation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuditReviewState {
     Missing,
@@ -662,7 +657,45 @@ pub struct AuditCandidate {
     pub related_pages: Vec<Citation>,
     pub reviews: Vec<AuditReviewDependency>,
     pub discovery: Option<AuditDiscovery>,
-    pub reason: &'static str,
+    pub reason: AuditReason,
+    pub priority: AuditPriority,
+}
+
+/// A subject's standing against its latest assessment receipt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditReason {
+    Unreviewed,
+    Changed,
+    Current,
+}
+
+/// Typed signals that order pending subjects inside their class, compared in field
+/// order. Text, titles and names never enter it; equal priorities keep pending
+/// first-discovery order. It ranks work, never the truth of a subject.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct AuditPriority {
+    /// The most severe scoped review that is not resolved.
+    pub review: Option<AuditReviewState>,
+    /// The latest receipt recorded a follow-up.
+    pub follow_up: bool,
+    /// Distinct pages citing the subject through the backlink authority.
+    pub evidence_pages: usize,
+    /// Discovery is recorded for the exact subject revision.
+    pub discovery: bool,
+}
+
+impl AuditPriority {
+    /// Ascending order plans first.
+    fn order(&self) -> impl Ord + use<> {
+        (
+            self.review.is_none(),
+            self.review,
+            Reverse(self.follow_up),
+            Reverse(self.evidence_pages),
+            Reverse(self.discovery),
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1816,9 +1849,33 @@ fn inputs_selected_controlled(
             ))
             .map_err(error)?,
         );
+        let path = page_address(&page.path);
+        let receipt = receipts.entries.get(&path);
+        let reason = match receipt {
+            Some(receipt) if receipt_is_current(receipt, &input_revision, &scoped_reviews) => {
+                AuditReason::Current
+            }
+            Some(_) => AuditReason::Changed,
+            None => AuditReason::Unreviewed,
+        };
+        let priority = AuditPriority {
+            review: scoped_reviews
+                .iter()
+                .map(|review| review.state)
+                .filter(|state| *state != AuditReviewState::Resolved)
+                .min(),
+            follow_up: receipt
+                .is_some_and(|receipt| receipt.disposition == AuditDisposition::FollowUp),
+            evidence_pages: citations
+                .iter()
+                .map(|citation| citation.path.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            discovery: discovery.is_some(),
+        };
         result.push(AuditCandidate {
             kind,
-            path: page_address(&page.path),
+            path,
             title: page.title.clone(),
             file_revision: file_revision(&raw),
             input_revision,
@@ -1827,7 +1884,8 @@ fn inputs_selected_controlled(
             related_pages,
             reviews: scoped_reviews,
             discovery,
-            reason: "unreviewed",
+            reason,
+            priority,
         });
     }
     result.sort_by(|a, b| a.path.cmp(&b.path));
@@ -1874,7 +1932,7 @@ pub fn load_selected_inputs_controlled(
     read.check().map_err(GraphError::from)?;
     let (_, receipts) = load_controlled(root, read)?;
     let candidates = inputs_selected_controlled(root, dirs, pages, &receipts, Some(&unique), read)?;
-    let selected = select_candidates(&candidates, selection, &receipts)?;
+    let selected = select_candidates(&candidates, selection)?;
     measure_inputs_controlled(root, &selected, u64::MAX, read)?;
     Ok(selected)
 }
@@ -1882,7 +1940,6 @@ pub fn load_selected_inputs_controlled(
 fn select_candidates(
     candidates: &[AuditCandidate],
     selection: &[String],
-    receipts: &Receipts,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
     if selection.is_empty() {
         return Ok(Vec::new());
@@ -1894,37 +1951,28 @@ fn select_candidates(
     selection
         .iter()
         .map(|path| {
-            let mut candidate = by_path
+            by_path
                 .get(path.as_str())
                 .copied()
                 .cloned()
-                .ok_or_else(|| {
-                    error("audit selection is not an exact concept or document address")
-                })?;
-            candidate.reason = match receipts.entries.get(path) {
-                Some(receipt) if receipt_is_current(receipt, &candidate) => "current",
-                Some(_) => "changed",
-                None => "unreviewed",
-            };
-            Ok(candidate)
+                .ok_or_else(|| error("audit selection is not an exact concept or document address"))
         })
         .collect()
 }
 
-fn receipt_is_current(receipt: &AuditAssessment, candidate: &AuditCandidate) -> bool {
-    receipt.input_revision == candidate.input_revision
-        && candidate
-            .reviews
-            .iter()
-            .all(|review| review.state.is_current())
+fn receipt_is_current(
+    receipt: &AuditAssessment,
+    input_revision: &str,
+    reviews: &[AuditReviewDependency],
+) -> bool {
+    receipt.input_revision == input_revision
+        && reviews.iter().all(|review| review.state.is_current())
         && (receipt.disposition != AuditDisposition::FollowUp
-            || candidate
-                .reviews
+            || reviews
                 .iter()
                 .any(|review| review.state == AuditReviewState::Open))
         && receipt.reviews.iter().all(|path| {
-            candidate
-                .reviews
+            reviews
                 .iter()
                 .any(|review| review.path == *path && review.state.is_current())
         })
@@ -1932,7 +1980,6 @@ fn receipt_is_current(receipt: &AuditAssessment, candidate: &AuditCandidate) -> 
 
 fn counts<'a>(
     candidates: impl IntoIterator<Item = &'a AuditCandidate>,
-    receipts: &Receipts,
 ) -> BTreeMap<AuditSubjectKind, AuditCounts> {
     let mut counts = BTreeMap::from([
         (AuditSubjectKind::Concept, AuditCounts::default()),
@@ -1943,15 +1990,13 @@ fn counts<'a>(
             .get_mut(&candidate.kind)
             .expect("enumerated subject kind");
         count.total += 1;
-        match receipts.entries.get(&candidate.path) {
-            Some(receipt) if receipt_is_current(receipt, candidate) => {
+        match candidate.reason {
+            AuditReason::Current => {
                 count.reviewed_current += 1;
-                if receipt.disposition == AuditDisposition::FollowUp {
-                    count.follow_up_current += 1;
-                }
+                count.follow_up_current += usize::from(candidate.priority.follow_up);
             }
-            Some(_) => count.changed += 1,
-            None => count.unreviewed += 1,
+            AuditReason::Changed => count.changed += 1,
+            AuditReason::Unreviewed => count.unreviewed += 1,
         }
     }
     counts
@@ -1961,16 +2006,12 @@ fn pending(
     candidates: Vec<AuditCandidate>,
     receipts: &Receipts,
 ) -> (Vec<AuditCandidate>, BTreeMap<AuditSubjectKind, AuditCounts>) {
-    let counts = counts(&candidates, receipts);
-    let mut remaining = BTreeMap::new();
-    for mut candidate in candidates {
-        match receipts.entries.get(&candidate.path) {
-            Some(receipt) if receipt_is_current(receipt, &candidate) => continue,
-            Some(_) => candidate.reason = "changed",
-            None => candidate.reason = "unreviewed",
-        }
-        remaining.insert(candidate.path.clone(), candidate);
-    }
+    let counts = counts(&candidates);
+    let mut remaining = candidates
+        .into_iter()
+        .filter(|candidate| candidate.reason != AuditReason::Current)
+        .map(|candidate| (candidate.path.clone(), candidate))
+        .collect::<BTreeMap<_, _>>();
     let mut work = Vec::new();
     for path in &receipts.pending {
         if let Some(candidate) = remaining.remove(path) {
@@ -1981,7 +2022,8 @@ fn pending(
     (work, counts)
 }
 
-/// Rotate changed and never-reviewed work, retaining first-discovery order in each class.
+/// Rotate changed and never-reviewed work; each class plans by `AuditPriority`, then
+/// first-discovery order.
 /// Report oversized inputs as pending blockers while selecting later fitting work.
 /// Unchanged inputs skip repeated reads; missing or stale finding reviews reopen work.
 pub fn plan(
@@ -2286,7 +2328,7 @@ fn plan_selected_inner(
         }
     }
     let total = candidates.len();
-    let selected = select_candidates(&candidates, selection, &receipts)?;
+    let selected = select_candidates(&candidates, selection)?;
     let (pending, counts_by_kind) = pending(candidates, &receipts);
     receipts.pending = pending
         .iter()
@@ -2300,11 +2342,16 @@ fn plan_selected_inner(
         .values()
         .map(|counts| counts.follow_up_current)
         .sum();
-    let (mut changed, mut unreviewed): (VecDeque<_>, VecDeque<_>) = pending
+    let (mut changed, mut unreviewed): (Vec<_>, Vec<_>) = pending
         .into_iter()
-        .partition(|candidate| candidate.reason == "changed");
+        .partition(|candidate| candidate.reason == AuditReason::Changed);
     let changed_count = changed.len();
     let unreviewed_count = unreviewed.len();
+    // A stable sort keeps pending first-discovery order among equal priorities.
+    for class in [&mut changed, &mut unreviewed] {
+        class.sort_by_key(|candidate| candidate.priority.order());
+    }
+    let (mut changed, mut unreviewed) = (VecDeque::from(changed), VecDeque::from(unreviewed));
     let mut candidates = selected
         .into_iter()
         .filter(|candidate| !unavailable.contains(&candidate.path))
@@ -2347,7 +2394,7 @@ fn plan_selected_inner(
         prospective.include_candidate(root, &candidate)?;
         let combined = prospective.bound(max_input_bytes)?;
         if !matches!(planning, Planning::WholeInput) || combined.status == AuditInputStatus::Ready {
-            next_class = if candidate.reason == "changed" {
+            next_class = if candidate.reason == AuditReason::Changed {
                 AuditClass::Unreviewed
             } else {
                 AuditClass::Changed
@@ -3081,11 +3128,13 @@ mod tests {
             serde_json::to_vec(&expected).unwrap()
         );
         assert_eq!(
-            actual
-                .iter()
-                .map(|candidate| candidate.reason)
-                .collect::<Vec<_>>(),
-            ["unreviewed", "changed", "current"]
+            json!(
+                actual
+                    .iter()
+                    .map(|candidate| candidate.reason)
+                    .collect::<Vec<_>>()
+            ),
+            json!(["unreviewed", "changed", "current"])
         );
         assert_eq!(actual[2].evidence.len(), 1);
         assert_eq!(actual[2].reviews.len(), 1);
@@ -4120,7 +4169,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        assert_eq!(current.candidates[0].reason, "current");
+        assert_eq!(current.candidates[0].reason, AuditReason::Current);
         assert_eq!(
             current.counts_by_kind[&AuditSubjectKind::Document].reviewed_current,
             1
@@ -4141,7 +4190,7 @@ mod tests {
                 u64::MAX,
             )
             .unwrap();
-            assert_eq!(stale.candidates[0].reason, "changed");
+            assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
             assert_ne!(stale.candidates[0].input_revision, candidate.input_revision);
             assert!(
                 record(
@@ -4172,7 +4221,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        assert_eq!(unchanged.candidates[0].reason, "current");
+        assert_eq!(unchanged.candidates[0].reason, AuditReason::Current);
         assert_eq!(
             unchanged.candidates[0].input_revision,
             candidate.input_revision
@@ -4270,7 +4319,7 @@ mod tests {
         )
         .unwrap();
         let candidate = &stale.candidates[0];
-        assert_eq!(candidate.reason, "changed");
+        assert_eq!(candidate.reason, AuditReason::Changed);
         assert_eq!(
             candidate.reviews[0].state,
             AuditReviewState::NeedsReassessment
@@ -4410,7 +4459,7 @@ mod tests {
         );
         assert_eq!(current.candidates.len(), 1);
         assert_eq!(current.candidates[0].kind, AuditSubjectKind::Document);
-        assert_eq!(current.candidates[0].reason, "unreviewed");
+        assert_eq!(current.candidates[0].reason, AuditReason::Unreviewed);
     }
 
     #[test]
@@ -5405,7 +5454,7 @@ mod tests {
             write(root.path(), path, &changed);
             let stale = plan(root.path(), &dirs, &scan(root.path()), 1, 262_144).unwrap();
             assert_eq!(stale.changed, 1);
-            assert_eq!(stale.candidates[0].reason, "changed");
+            assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
             assert_eq!(stale.candidates[0].path, "wiki/concepts/a.md");
             let before = std::fs::read(root.path().join(STATE)).unwrap();
             assert!(
@@ -5426,7 +5475,133 @@ mod tests {
     }
 
     #[test]
-    fn pending_work_is_fair_under_continuous_changes_and_new_prefixes() {
+    fn each_class_plans_typed_risk_before_first_discovery_order() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = |name: &str| format!("wiki/concepts/{name}.md");
+        let body = |claim: &str| format!("---\ntype: concept\n---\n## Synthesis\n{claim}\n");
+        for name in ["a", "hub", "m", "n", "z"] {
+            write(root.path(), &concept(name), &body("A scoped claim."));
+        }
+        let source = |links: &[&str]| {
+            let links = links
+                .iter()
+                .map(|name| format!("- [{name}](../concepts/{name}.md)\n"))
+                .collect::<String>();
+            format!("---\ntype: document\n---\n## Related Concepts\n{links}")
+        };
+        let first_source = source(&["hub", "m", "n"]);
+        write(root.path(), "wiki/documents/s1.md", &first_source);
+        write(root.path(), "wiki/documents/s2.md", &source(&["hub"]));
+        let review = "wiki/explorations/z-review.md";
+        let metadata = json!({
+            "status": "open", "subjects": [concept("z")],
+            "evidence": [{"path": "wiki/documents/s1.md", "revision": source_revision(&lk_vault::parse_page(&first_source).unwrap())}],
+            "resolution": null,
+        });
+        write(
+            root.path(),
+            review,
+            &format!("---\ntype: exploration\nreview: {metadata}\n---\nThe claim is unsettled.\n"),
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        record_discovery(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            AuditDiscoveryRequest {
+                path: concept("n"),
+                file_revision: file_revision(&body("A scoped claim.")),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "unrelated retention".into(),
+                    phrase: false,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let order = |plan: &AuditPlan| {
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>()
+        };
+        let unreviewed = plan(root.path(), &dirs, &scan(root.path()), 100, u64::MAX).unwrap();
+        assert_eq!(
+            order(&unreviewed),
+            [
+                concept("z"),
+                concept("hub"),
+                concept("n"),
+                concept("m"),
+                concept("a"),
+                "wiki/documents/s1.md".into(),
+                "wiki/documents/s2.md".into(),
+            ],
+            "open review, citing pages, started discovery, then first-discovery order"
+        );
+        assert_eq!(
+            json!(unreviewed.candidates[0].priority),
+            json!({"review": "open", "follow_up": false, "evidence_pages": 0, "discovery": false})
+        );
+        assert_eq!(
+            json!(unreviewed.candidates[2].priority),
+            json!({"review": null, "follow_up": false, "evidence_pages": 1, "discovery": true})
+        );
+
+        let mut assessments = ["z", "hub", "m"].map(|name| {
+            assessment(
+                unreviewed
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.path == concept(name))
+                    .unwrap(),
+            )
+        });
+        assessments[0].disposition = AuditDisposition::FollowUp;
+        record(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            AuditResults {
+                assessments: assessments.into(),
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        let mut resolved = metadata;
+        resolved["status"] = json!("resolved");
+        resolved["resolution"] = json!("The source settles the claim.");
+        write(
+            root.path(),
+            review,
+            &format!("---\ntype: exploration\nreview: {resolved}\n---\nThe claim is settled.\n"),
+        );
+        for name in ["hub", "m"] {
+            write(root.path(), &concept(name), &body("A changed claim."));
+        }
+        let rotated = plan(root.path(), &dirs, &scan(root.path()), 100, u64::MAX).unwrap();
+        assert_eq!(
+            order(&rotated),
+            [
+                concept("z"),
+                concept("n"),
+                concept("hub"),
+                concept("a"),
+                concept("m"),
+                "wiki/documents/s1.md".into(),
+                "wiki/documents/s2.md".into(),
+            ],
+            "classes rotate; a lapsed follow-up precedes citing pages among changed work"
+        );
+        assert_eq!(
+            json!(rotated.candidates[0].priority),
+            json!({"review": null, "follow_up": true, "evidence_pages": 0, "discovery": false})
+        );
+    }
+
+    #[test]
+    fn classes_rotate_under_continuous_changes_and_new_prefixes() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
         let a = "wiki/concepts/a.md";
@@ -5560,7 +5735,8 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                reopened.candidates[0].reason, "changed",
+                reopened.candidates[0].reason,
+                AuditReason::Changed,
                 "prior follow-up without an open review cannot remain current"
             );
             let mut open = metadata;
