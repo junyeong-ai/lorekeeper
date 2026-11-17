@@ -41,6 +41,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+// Invocation timeout fixtures keep the full version-preflight allowance.
+const INVOCATION_TIMEOUT_SECONDS: u64 = 10;
+
 struct Fixture {
     directory: tempfile::TempDir,
     config: PathBuf,
@@ -5225,12 +5228,17 @@ fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
 
 #[test]
 fn deadline_preserves_pending_work_and_releases_the_workflow() {
-    let fixture = Fixture::new("codex", 1, "exec sleep 30");
+    let fixture = Fixture::new("codex", INVOCATION_TIMEOUT_SECONDS, "exec sleep 30");
     fixture.ingest();
     let (output, result) = fixture.run("process");
     assert!(!output.status.success());
     assert_eq!(result["cancelled"], false);
     assert_eq!(result["halted"], false);
+    assert_eq!(result["semantic_calls"], 1, "{result}");
+    assert_eq!(
+        result["work_steps"][0]["host_failure"]["phase"],
+        "invocation"
+    );
     assert!(
         result["stages"].as_array().unwrap().iter().any(|stage| {
             stage["name"] == "whole-section invocation held"
@@ -7731,9 +7739,10 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
             );
             std::fs::write(agent, body).unwrap();
             if timeout {
-                let config = std::fs::read_to_string(&fixture.config)
-                    .unwrap()
-                    .replace("timeout_seconds: 30", "timeout_seconds: 3");
+                let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+                    "timeout_seconds: 30",
+                    &format!("timeout_seconds: {INVOCATION_TIMEOUT_SECONDS}"),
+                );
                 std::fs::write(&fixture.config, config).unwrap();
             }
             let (_, report) = fixture.run("process");

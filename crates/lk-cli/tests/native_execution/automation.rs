@@ -60,15 +60,20 @@ fn daily_review_reassessment_defers_without_pausing_and_invalid_reviews_remain_f
 fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 1, "exec sleep 30");
-        let config = std::fs::read_to_string(&fixture.config)
-            .unwrap()
-            .replace("timeout_seconds: 30", "timeout_seconds: 3");
+        let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+            "timeout_seconds: 30",
+            &format!("timeout_seconds: {INVOCATION_TIMEOUT_SECONDS}"),
+        );
         std::fs::write(&fixture.config, config).unwrap();
         configure(&fixture, Some(20), 60);
         for expected in [1, 2] {
             let report = run(&fixture, "knowledge", false);
             assert_eq!(calls(&report), 1, "{report}");
             assert_eq!(report["runs"][0]["halted"], false, "{report}");
+            assert_eq!(
+                report["runs"][0]["work_steps"][0]["host_failure"]["phase"], "invocation",
+                "{report}"
+            );
             assert_eq!(
                 report["runs"][0]["work_steps"][0]["host_failure"]["termination"], "timed-out",
                 "{report}"
@@ -141,12 +146,15 @@ fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() 
     subject=json.loads((root/'vault/.lorekeeper/work'/work_id/'plan.json').read_text())['context']['subject']['path']
     if subject=='wiki/concepts/large.md':
         import time
-        time.sleep(5)
+        time.sleep(30)
 "#, 1);
         let fixture = bounded_audit_fixture(engine, 64, &behavior);
         let config = std::fs::read_to_string(&fixture.config)
             .unwrap()
-            .replace("timeout_seconds: 30", "timeout_seconds: 2")
+            .replace(
+                "timeout_seconds: 30",
+                &format!("timeout_seconds: {INVOCATION_TIMEOUT_SECONDS}"),
+            )
             .replace("max_calls: 64}", "max_calls: 64, max_parallel: 2}")
             .replace("batch_size: 1", "batch_size: 2");
         std::fs::write(&fixture.config, config).unwrap();

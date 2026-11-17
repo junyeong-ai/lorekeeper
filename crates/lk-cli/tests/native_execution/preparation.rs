@@ -321,7 +321,11 @@ fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progre
         ] {
             let fixture = Fixture::new(
                 engine,
-                if kind == "timed-out" { 1 } else { 30 },
+                if kind == "timed-out" {
+                    INVOCATION_TIMEOUT_SECONDS
+                } else {
+                    30
+                },
                 &format!("/bin/cat > /dev/null\n{behavior}"),
             );
             let config = std::fs::read_to_string(&fixture.config)
@@ -331,6 +335,12 @@ fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progre
             fixture.ingest();
             let (_, first) = fixture.run("process");
             assert_eq!(first["semantic_calls"], 1, "{engine}/{kind}: {first}");
+            if kind == "timed-out" {
+                assert_eq!(
+                    first["work_steps"][0]["host_failure"]["phase"], "invocation",
+                    "{first}"
+                );
+            }
             assert_eq!(first["halted"], false, "{first}");
             assert_eq!(first["retained_progress"]["action_receipts"], 0);
             assert_eq!(first["retained_progress"]["staged_requests"], 0);
