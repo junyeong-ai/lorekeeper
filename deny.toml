@@ -7,7 +7,12 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "warn"
-ignore = []
+ignore = [
+  # Unmaintained, not vulnerable, and no release is patched. It is reached only through
+  # feed-rs 3.0.0, whose move to jiff is feed-rs/feed-rs#310; drop this entry with that
+  # release, when cargo-deny reports it as no longer encountered.
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; reached only through feed-rs" },
+]
 
 [licenses]
 version = 2

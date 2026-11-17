@@ -1,0 +1,3 @@
+# The same acceptance as deny.toml, which records its reason and exit condition.
+[advisories]
+ignore = ["RUSTSEC-2026-0543"]
