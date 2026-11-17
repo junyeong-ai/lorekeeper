@@ -40,6 +40,12 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         return Ok(());
     }
 
+    let id_width = brief
+        .learned
+        .iter()
+        .map(|entry| unicode_width::UnicodeWidthStr::width(entry.id.as_str()))
+        .max()
+        .unwrap_or_default();
     let mut category = None;
     for entry in &brief.learned {
         if category.as_ref() != Some(&entry.category) {
@@ -48,7 +54,7 @@ pub async fn run(opts: &GlobalOptions, date: Option<String>, json: bool) -> miet
         }
         println!(
             "  {}  {}",
-            super::pad(&entry.id, 40),
+            super::pad(&entry.id, id_width),
             entry.statement.as_deref().unwrap_or_default()
         );
     }

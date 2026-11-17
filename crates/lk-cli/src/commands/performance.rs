@@ -53,11 +53,19 @@ pub async fn run(opts: &super::GlobalOptions) -> miette::Result<()> {
 
     eprintln!("Recent {} work-logs — category distribution:", recent.len());
     let max_count = counts.values().copied().max().unwrap_or(1);
+    let category_width = counts
+        .keys()
+        .map(|cat| unicode_width::UnicodeWidthStr::width(cat.as_str()))
+        .max()
+        .unwrap_or_default();
     for (cat, count) in &counts {
         let pct = lk_core::math::round_percent(*count, total);
         let bar_len = (count * 30 / max_count).max(1);
         let bar = "█".repeat(bar_len);
-        eprintln!("  {cat:30} {bar} {count} ({pct}%)");
+        eprintln!(
+            "  {}  {bar} {count} ({pct}%)",
+            super::pad(cat, category_width)
+        );
     }
     Ok(())
 }
