@@ -44,7 +44,22 @@ paths:
   discovery/action receipts or verified publication. Cached refusals and
   already-complete work add no progress. Each checkpoint retains its incomplete outcome;
   a settled process campaign requires the final batch's full checks to pass. Defaults
-  remain one batch and the configured per-batch calls.
+  remain one batch and the configured per-batch calls for manual runs. Scheduled
+  process/knowledge campaigns continue within their single cumulative automation budget.
+- Scheduled process/knowledge runs may yield an owned workflow after new retained
+  progress when admission is contended. Settle every launched peer before checking
+  contention; never yield from inside a paid recording wave. Probe admission only,
+  leaving the owned workflow lock intact until the checkpoint returns. A yielded
+  checkpoint is incomplete, not a failure or budget reset. Preserve genuine failed
+  stages in the campaign outcome. Discard captures and revalidate pinned configuration,
+  root and current inputs after reacquisition. Intermediate checkpoints skip global
+  completion tails but verify any recorded selected audit receipts. Uncontended runs
+  keep their existing checks. Cached holds cannot cause zero-progress handoff loops.
+  Original-subject replan allowances also survive checkpoints and proven merges;
+  inherited budget groups never resolve subjects or authorize captured-input reuse.
+- A newly retained semantic audit action or other verified progress can advance the
+  next knowledge batch while the overall result stays incomplete. Operational
+  rejections and cached refusals earn no progress and cannot sustain continuation.
 - Process classifies final review health through the shared typed reports. Reassessment
   keeps strict completion nonzero without halting budgeted independent queue progress;
   invalid reviews and failed reads remain fatal. Queue settlement alone cannot satisfy

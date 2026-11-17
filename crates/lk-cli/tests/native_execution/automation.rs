@@ -382,6 +382,153 @@ fn a_paused_scheduled_operation_reports_without_waiting_for_an_owned_workflow() 
 }
 
 #[test]
+fn a_waiting_workflow_gets_a_settled_parallel_wave_without_renewing_the_run_budget() {
+    use std::io::Write;
+    let behavior = RECORD_BOUNDED_AUDIT.replacen(
+        "if action=='inspect':",
+        r#"if action=='inspect':
+    import time
+    try:
+        (root/'first-paid').open('x').close()
+        first=True
+    except FileExistsError:
+        first=False
+    if first:
+        deadline=time.monotonic()+20
+        while not (root/'contender-queued').exists():
+            assert time.monotonic()<deadline, 'contender did not queue'
+            time.sleep(.005)
+"#,
+        1,
+    );
+    let fixture = bounded_audit_fixture("codex", 4, &behavior);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("max_calls: 4}", "max_calls: 4, max_parallel: 2}");
+    std::fs::write(&fixture.config, config).unwrap();
+    configure(&fixture, None, 60);
+    let owner = fixture
+        .command()
+        .args(["run", "knowledge", "--scheduled", "--wait", "--json"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let wait_for = |path: &Path| {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !path.exists() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        true
+    };
+    let started = wait_for(&fixture.root().join("first-paid"));
+    let mut contender = fixture
+        .command()
+        .args([
+            "workflow",
+            "--wait",
+            "--",
+            "/bin/sh",
+            "-c",
+            "printf entered > \"$TEST_EXECUTION_ROOT/contender-entered\"; read task_release",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let admission = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/workflow-admission.lock"),
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let queued = loop {
+        match admission.try_lock() {
+            Ok(()) => admission.unlock().unwrap(),
+            Err(std::fs::TryLockError::WouldBlock) => break true,
+            Err(error) => panic!("{error}"),
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    std::fs::write(fixture.root().join("contender-queued"), "ready").unwrap();
+    let entered = wait_for(&fixture.root().join("contender-entered"));
+    let at_checkpoint = usage(&fixture);
+    let rows = bounded_calls(&fixture);
+    let paid: Result<Vec<_>, std::io::Error> = rows
+        .iter()
+        .filter(|row| row["action"] == "inspect")
+        .map(|row| {
+            let path = fixture
+                .root()
+                .join("vault/.lorekeeper/work")
+                .join(row["work_id"].as_str().unwrap())
+                .join("nodes")
+                .join(format!("{}.json", row["node_id"].as_str().unwrap()));
+            std::fs::read(&path).map(|raw| (path, raw))
+        })
+        .collect();
+    contender
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"release\n")
+        .unwrap();
+    let contender = contender.wait_with_output().unwrap();
+    let output = owner.wait_with_output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(started && queued && entered, "{report}");
+    assert!(
+        contender.status.success(),
+        "{}",
+        String::from_utf8_lossy(&contender.stderr)
+    );
+    assert_eq!(at_checkpoint["reserved_calls"], 2, "{report}");
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for (path, raw) in paid.unwrap() {
+        assert_eq!(std::fs::read(path).unwrap(), raw);
+    }
+    let runs = report["runs"].as_array().unwrap();
+    assert_eq!(runs[0]["yield_reason"], "workflow-contention", "{report}");
+    assert_eq!(runs[0]["ok"], false);
+    assert_eq!(runs[0]["halted"], false);
+    assert_eq!(runs[0]["retained_progress"]["evidence_nodes"], 2);
+    assert!(
+        !runs[0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "queue completion")
+    );
+    assert_eq!(calls(&report), 4, "{report}");
+    assert_eq!(usage(&fixture)["reserved_calls"], 4);
+    assert_eq!(report["stop_reason"], "settled", "{report}");
+    assert_eq!(
+        runs.last().unwrap()["audit_progress"]["after"]["reviewed_current"],
+        1
+    );
+    assert_eq!(
+        runs.last().unwrap()["audit_progress"]["after"]["unreviewed"],
+        0
+    );
+    assert!(
+        runs.iter()
+            .all(|run| run["automation"]["max_calls_per_run"] == 4)
+    );
+    assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+}
+
+#[test]
 fn scheduled_workflow_wait_is_bounded_without_starting_a_model() {
     use std::io::{BufRead, Write};
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
@@ -434,17 +581,17 @@ fn scheduled_workflow_wait_is_bounded_without_starting_a_model() {
 }
 
 #[test]
-fn scheduled_execution_retains_its_duration_after_waiting_for_the_workflow() {
+fn scheduled_execution_accounts_for_workflow_wait_before_admitting_a_model() {
     use std::io::{BufRead, Write};
     use std::time::{Duration, Instant};
 
     let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
     write_audit_concept(&fixture, "waiting");
     record_discovery(&fixture, "wiki/concepts/waiting.md");
-    configure(&fixture, None, 3);
+    configure(&fixture, None, 60);
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
-        "max_run_seconds: 3",
-        "max_run_seconds: 3, max_wait_seconds: 15",
+        "max_run_seconds: 60",
+        "max_run_seconds: 60, max_wait_seconds: 15",
     );
     std::fs::write(&fixture.config, config).unwrap();
     let mut holder = fixture
@@ -493,9 +640,6 @@ fn scheduled_execution_retains_its_duration_after_waiting_for_the_workflow() {
         }
         std::thread::sleep(Duration::from_millis(5));
     };
-    if waiting {
-        std::thread::sleep(Duration::from_millis(3500));
-    }
     holder
         .stdin
         .take()
@@ -511,7 +655,7 @@ fn scheduled_execution_retains_its_duration_after_waiting_for_the_workflow() {
         report["runs"][0]["automation"]["workflow_wait_ms"]
             .as_u64()
             .unwrap()
-            >= 3000,
+            > 0,
         "{report}"
     );
 }

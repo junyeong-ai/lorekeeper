@@ -213,6 +213,22 @@ impl WorkflowLease {
         Ok(lease)
     }
 
+    pub fn admission_contended(&self) -> miette::Result<bool> {
+        self.root.validate()?;
+        match self.admission.try_lock() {
+            Ok(()) => {
+                self.admission.unlock().map_err(|error| {
+                    miette::miette!("release workflow admission probe: {error}")
+                })?;
+                Ok(false)
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Ok(true),
+            Err(std::fs::TryLockError::Error(error)) => {
+                Err(miette::miette!("workflow admission probe failed: {error}"))
+            }
+        }
+    }
+
     pub async fn acquire_publication(
         opts: &super::GlobalOptions,
         config: &lk_core::config::Config,

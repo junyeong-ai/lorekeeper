@@ -253,6 +253,15 @@ impl Control {
             })
     }
 
+    pub fn has_remaining_budget(&self) -> bool {
+        self.report.stop.is_none()
+            && !self.wait_remaining.is_zero()
+            && self
+                .deadline
+                .is_some_and(|deadline| Instant::now() < deadline)
+            && self.available() != 0
+    }
+
     pub fn check_duration(&mut self) -> bool {
         if self.report.stop.is_none()
             && self
@@ -455,6 +464,23 @@ mod tests {
     }
 
     #[test]
+    fn initial_workflow_wait_can_exceed_the_execution_budget_without_starting_its_clock() {
+        let directory = fixture();
+        let policy = AutomationConfig {
+            max_run_seconds: 1.try_into().unwrap(),
+            max_wait_seconds: Some(60.try_into().unwrap()),
+            ..policy(8)
+        };
+        let mut control = Control::new(policy, ExecutionOperation::Knowledge, false, 4).unwrap();
+        control.record_wait(Duration::from_secs(20)).unwrap();
+        assert!(control.deadline.is_none());
+        assert_eq!(control.report.workflow_wait_ms, 20_000);
+        assert!(control.enter(directory.path()).unwrap());
+        assert_eq!(control.report.stop, None);
+        assert_eq!(control.available(), 4);
+    }
+
+    #[test]
     fn workflow_waiting_preserves_execution_time_and_accumulates_across_batches() {
         let directory = fixture();
         let mut control = Control::new(policy(8), ExecutionOperation::Process, false, 4).unwrap();
@@ -502,6 +528,8 @@ mod tests {
         assert!(control.enter(root).unwrap());
         assert!(control.reserve(root, 1).unwrap());
         assert!(control.enter(root).unwrap());
+        assert!(!control.has_remaining_budget());
+        assert_eq!(control.report.stop, None);
         assert!(!control.reserve(root, 1).unwrap());
         assert_eq!(control.report.stop, Some(Stop::RunLimit));
         assert_eq!(Usage::load(root, today()).unwrap().reserved_calls, 2);

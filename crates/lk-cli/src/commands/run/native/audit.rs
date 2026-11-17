@@ -2,7 +2,7 @@ use super::*;
 
 impl Runner<'_> {
     pub(super) fn current_audit_subjects(
-        &self,
+        &mut self,
         batch: &[lk_graph::audit::AuditCandidate],
     ) -> miette::Result<Vec<lk_graph::audit::AuditCandidate>> {
         let pages = lk_graph::scan::scan_vault_controlled(
@@ -15,7 +15,7 @@ impl Runner<'_> {
             .lease
             .as_ref()
             .ok_or_else(|| miette::miette!("audit has no workflow lease"))?;
-        lk_graph::audit::resolve_batch_subjects_controlled(
+        let current = lk_graph::audit::resolve_batch_subjects_controlled(
             &self.root,
             &self.config.vault.dirs,
             &pages,
@@ -23,14 +23,21 @@ impl Runner<'_> {
             workflow.id(),
             self.supervisor.read_control(),
         )
-        .map_err(|error| miette::miette!("{error}"))
+        .map_err(|error| miette::miette!("{error}"))?;
+        for (original, subject) in batch.iter().zip(&current) {
+            self.audit_replans.inherit(&original.path, &subject.path);
+        }
+        Ok(current)
     }
 
     pub(super) async fn whole_audit(&mut self, batch: &[lk_graph::audit::AuditCandidate]) {
         use crate::commands::work::audit::{capture_controlled, whole_request};
         use execution::audit::Judgment;
+        let bindings = batch
+            .iter()
+            .map(|candidate| self.audit_replans.bind(&candidate.path))
+            .collect::<Vec<_>>();
         let mut pending = (0..batch.len()).collect::<std::collections::BTreeSet<_>>();
-        let mut replanned = std::collections::BTreeSet::new();
         while !pending.is_empty() {
             if !self.call_budget_available() || !self.configuration_is_current() {
                 return;
@@ -241,10 +248,19 @@ impl Runner<'_> {
                     }
                     WorkStep::Replan => {
                         for index in &slots[0] {
-                            if !replanned.insert(*index) {
+                            if !self.audit_replans.try_spend(&bindings[*index]) {
                                 self.deferred("audit inputs unstable", &batch[*index].path);
                                 pending.remove(index);
                             }
+                        }
+                        // Carry a proven survivor's budget before a workflow checkpoint.
+                        let originals = slots[0]
+                            .iter()
+                            .map(|index| batch[*index].clone())
+                            .collect::<Vec<_>>();
+                        if let Err(error) = self.current_audit_subjects(&originals) {
+                            self.failure("audit fresh scope", error);
+                            return;
                         }
                     }
                     WorkStep::Deferred(reason) => {
@@ -393,7 +409,7 @@ impl Runner<'_> {
                 };
                 if !subject.same_input(&fresh) {
                     for index in indices {
-                        if !replanned.insert(*index) {
+                        if !self.audit_replans.try_spend(&bindings[*index]) {
                             self.deferred("audit inputs unstable", &batch[*index].path);
                             pending.remove(index);
                         }

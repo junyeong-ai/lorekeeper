@@ -91,6 +91,8 @@ pub async fn run(
 mod native {
     mod audit;
     mod preparation;
+    mod replans;
+    use replans::AuditReplans;
 
     use super::*;
     use super::{automation, scheduler};
@@ -131,6 +133,7 @@ mod native {
         Rejected,
         Failed,
         Cancelled,
+        Yielded,
     }
 
     #[derive(Serialize)]
@@ -549,6 +552,12 @@ mod native {
         detail: Option<String>,
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum YieldReason {
+        WorkflowContention,
+    }
+
     #[derive(Serialize)]
     struct ExecutionInfo {
         #[serde(flatten)]
@@ -591,6 +600,8 @@ mod native {
         recovered_section_proposals: usize,
         budget_exhausted: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
+        yield_reason: Option<YieldReason>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         automation: Option<automation::Report>,
         #[serde(flatten)]
         work_telemetry: WorkTelemetry,
@@ -618,6 +629,7 @@ mod native {
         Failed,
         Cancelled,
         AutomationLimit,
+        Yielded,
     }
 
     impl JobResult {
@@ -634,6 +646,7 @@ mod native {
                 semantic_calls: 0,
                 recovered_section_proposals: 0,
                 budget_exhausted: false,
+                yield_reason: None,
                 automation: None,
                 work_telemetry: WorkTelemetry::default(),
                 queue_planning: QueuePlanningMetrics::default(),
@@ -665,10 +678,18 @@ mod native {
                     | automation::Stop::WaitDuration => CampaignStop::AutomationLimit,
                 };
             }
+            if self.halted {
+                return CampaignStop::Failed;
+            }
+            if self.yield_reason.is_some() {
+                return if self.work_telemetry.retained_progress.has_progress() {
+                    CampaignStop::Yielded
+                } else {
+                    CampaignStop::NoProgress
+                };
+            }
             if matches!(self.operation, Operation::Process) {
-                return if self.halted {
-                    CampaignStop::Failed
-                } else if self.ok {
+                return if self.ok {
                     CampaignStop::Settled
                 } else if self.budget_exhausted {
                     if self.work_telemetry.retained_progress.has_progress()
@@ -685,12 +706,11 @@ mod native {
             if self.audit.as_ref().is_some_and(Vec::is_empty) && self.audit_blocked_count > 0 {
                 CampaignStop::Blocked
             } else if !self.ok {
-                if self.halted {
-                    CampaignStop::Failed
-                } else if self
+                if self
                     .audit
                     .as_ref()
                     .is_some_and(|completed| !completed.is_empty())
+                    || self.work_telemetry.retained_progress.has_progress()
                 {
                     CampaignStop::BatchLimit
                 } else {
@@ -708,6 +728,16 @@ mod native {
                 CampaignStop::BatchLimit
             }
         }
+
+        fn is_successful_yield(&self) -> bool {
+            self.yield_reason.is_some()
+                && !self.halted
+                && !self.cancelled
+                && self
+                    .stages
+                    .iter()
+                    .all(|stage| matches!(stage.state, StageState::Completed | StageState::Skipped))
+        }
     }
 
     struct Runner<'a> {
@@ -719,6 +749,7 @@ mod native {
         root: PathBuf,
         supervisor: &'a mut execution::Supervisor,
         automation: Option<&'a mut automation::Control>,
+        audit_replans: &'a mut AuditReplans,
         lease: Option<workflow::WorkflowLease>,
         agents: std::collections::BTreeMap<String, PreparedAgent>,
         project_protection: Option<crate::commands::installation::Protection>,
@@ -762,6 +793,9 @@ mod native {
                 .as_ref()
                 .map(|control| control.report.clone());
             self.result.duration_ms = self.started_at.elapsed().as_millis() as u64;
+            if self.result.yield_reason.is_some() {
+                self.result.ok = false;
+            }
             self.result
         }
 
@@ -799,6 +833,9 @@ mod native {
         }
 
         fn record_work_step(&mut self, mut step: WorkStepMetrics) {
+            if self.result.yield_reason.is_some() && step.agent_duration_ms.is_none() {
+                step.outcome = WorkOutcome::Yielded;
+            }
             if self.supervisor.is_cancelled()
                 && !matches!(
                     step.outcome,
@@ -1888,7 +1925,52 @@ mod native {
             self.finish_observation_record(id, node, completed, record.result, metrics)
         }
 
+        fn yield_to_waiter(&mut self) -> bool {
+            if self.result.yield_reason.is_some() {
+                return true;
+            }
+            if self.automation.is_none()
+                || matches!(self.result.operation, Operation::Daily)
+                || self.result.halted
+                || self.result.cancelled
+                || !self.result.work_telemetry.retained_progress.has_progress()
+            {
+                return false;
+            }
+            if !self.configuration_is_current() {
+                return true;
+            }
+            if !self
+                .automation
+                .as_ref()
+                .expect("scheduled checkpoint")
+                .has_remaining_budget()
+            {
+                return false;
+            }
+            let Some(lease) = &self.lease else {
+                self.failure("workflow checkpoint", "yield requires an owned workflow");
+                return true;
+            };
+            match lease.admission_contended() {
+                Ok(false) => false,
+                Ok(true) => {
+                    self.result.yield_reason = Some(YieldReason::WorkflowContention);
+                    self.record("workflow checkpoint", StageState::Skipped, Some("paid results retained; yielding to a waiting workflow before fresh preparation".into()));
+                    true
+                }
+                Err(error) => {
+                    self.failure("workflow checkpoint", error);
+                    true
+                }
+            }
+        }
+
         fn call_budget_available(&mut self) -> bool {
+            self.call_limit_available() && !self.yield_to_waiter()
+        }
+
+        fn call_limit_available(&mut self) -> bool {
             if let Some(control) = &mut self.automation {
                 if !control.check_duration() {
                     return self.record_automation_stop();
@@ -1939,7 +2021,7 @@ mod native {
         }
 
         fn reserve_calls(&mut self, count: usize) -> bool {
-            if !self.configuration_is_current() || !self.call_budget_available() {
+            if !self.configuration_is_current() || !self.call_limit_available() {
                 return false;
             }
             if self.supervisor.is_cancelled() {
@@ -4701,6 +4783,9 @@ mod native {
                 if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
                     return false;
                 }
+                if self.yield_to_waiter() {
+                    return false;
+                }
                 self.queue_turn = None;
                 if replan != QueueReplan::Refresh {
                     self.queue_admitted.clear();
@@ -5056,6 +5141,9 @@ mod native {
         }
 
         async fn reconcile(&mut self) {
+            if self.result.yield_reason.is_some() {
+                return;
+            }
             for (name, args) in [
                 ("schema", vec!["schema"]),
                 ("queue apply", vec!["queue", "apply"]),
@@ -5064,6 +5152,9 @@ mod native {
                 self.native(name, &args).await;
             }
             self.drain().await;
+            if self.result.yield_reason.is_some() || self.yield_to_waiter() {
+                return;
+            }
             for (name, args) in [
                 ("queue apply", vec!["queue", "apply"]),
                 ("backlinks-sync", vec!["graph", "backlinks-sync"]),
@@ -5846,6 +5937,9 @@ mod native {
         }
 
         fn check_process_reviews(&mut self) -> bool {
+            if self.result.yield_reason.is_some() {
+                return false;
+            }
             if self.result.halted || !self.inspect_review_health() {
                 return false;
             }
@@ -5871,9 +5965,12 @@ mod native {
                 return;
             }
             self.audit().await;
-            self.reconcile().await;
-            if !self.inspect_review_health() {
-                return;
+            let yielded = self.result.yield_reason.is_some() || self.yield_to_waiter();
+            if !yielded {
+                self.reconcile().await;
+                if self.result.yield_reason.is_none() && !self.inspect_review_health() {
+                    return;
+                }
             }
             if let Some(batch) = self.audit_batch.take() {
                 match self.verify_audit(&batch) {
@@ -5892,7 +5989,9 @@ mod native {
                         self.failure("audit completion", error);
                     }
                 }
-            } else if self.result.audit.as_ref().is_some_and(Vec::is_empty) {
+            } else if self.result.yield_reason.is_none()
+                && self.result.audit.as_ref().is_some_and(Vec::is_empty)
+            {
                 match self.inspect_audit_coverage() {
                     Ok(coverage) => {
                         if let Some(progress) = &mut self.result.audit_progress {
@@ -6029,6 +6128,16 @@ mod native {
             }
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
+                let bindings = plan
+                    .candidates
+                    .iter()
+                    .map(|candidate| {
+                        (
+                            candidate.path.clone(),
+                            self.audit_replans.bind(&candidate.path),
+                        )
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 let mut originals = plan
                     .candidates
                     .iter()
@@ -6037,7 +6146,6 @@ mod native {
                 let Some(mut jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
                     return;
                 };
-                let mut replanned = std::collections::BTreeSet::new();
                 while !jobs.is_empty() {
                     jobs.retain(|path, work| {
                         if self.inspection_deferred.contains_key(work) {
@@ -6092,7 +6200,7 @@ mod native {
                                 .get_mut(&selected)
                                 .expect("selected audit has original slots")
                                 .retain(|original| {
-                                    if replanned.insert(original.path.clone()) {
+                                    if self.audit_replans.try_spend(&bindings[&original.path]) {
                                         true
                                     } else {
                                         deferred_subjects.insert(original.path.clone());
@@ -6194,6 +6302,7 @@ mod native {
         supervisor: execution::Supervisor,
         root: Option<workflow::VaultRootPin>,
         automation: Option<automation::Control>,
+        audit_replans: AuditReplans,
     }
 
     pub(super) async fn run(
@@ -6274,6 +6383,7 @@ mod native {
             supervisor: execution::Supervisor::new()?,
             root: None,
             automation,
+            audit_replans: AuditReplans::default(),
         };
         let mut outcomes = Vec::new();
         let mut stop_reason = CampaignStop::BatchLimit;
@@ -6294,14 +6404,19 @@ mod native {
             .await;
             stop_reason = result.campaign_stop();
             outcomes.push(result);
-            if stop_reason != CampaignStop::BatchLimit {
+            if !matches!(
+                stop_reason,
+                CampaignStop::BatchLimit | CampaignStop::Yielded
+            ) {
                 break;
             }
         }
         let ok = if matches!(operation, Operation::Process) && batch_limit > 1 {
             stop_reason == CampaignStop::Settled
         } else {
-            outcomes.iter().all(|result| result.ok)
+            outcomes
+                .iter()
+                .all(|result| result.ok || result.is_successful_yield())
         };
         if json {
             let value = if batch_limit == 1 {
@@ -6339,6 +6454,7 @@ mod native {
             supervisor,
             root: campaign_root,
             automation,
+            audit_replans,
         } = campaign;
         let (config, config_revision) = configuration;
         let board = config
@@ -6362,6 +6478,7 @@ mod native {
             opts: options,
             supervisor,
             automation: automation.as_mut(),
+            audit_replans,
             lease: None,
             agents: std::collections::BTreeMap::new(),
             project_protection: None,
@@ -6465,6 +6582,39 @@ mod native {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn workflow_yield_requires_new_progress_and_keeps_failure_and_completion_distinct() {
+            let mut result = JobResult::new(Operation::Process);
+            result.ok = false;
+            result.yield_reason = Some(YieldReason::WorkflowContention);
+            assert_eq!(result.campaign_stop(), CampaignStop::NoProgress);
+            result.work_telemetry.retained_progress.evidence_nodes = 1;
+            assert_eq!(result.campaign_stop(), CampaignStop::Yielded);
+            assert!(result.is_successful_yield());
+            result.stages.push(StageResult {
+                name: "required evidence".into(),
+                state: StageState::Failed,
+                detail: None,
+            });
+            assert!(!result.is_successful_yield());
+            result.halted = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::Failed);
+            result.cancelled = true;
+            assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
+        }
+
+        #[test]
+        fn knowledge_continues_after_a_new_semantic_hold_but_stops_on_cached_holds() {
+            let mut result = JobResult::new(Operation::Knowledge);
+            result.ok = false;
+            result.audit = Some(Vec::new());
+            assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
+            result.work_telemetry.retained_progress.action_receipts = 1;
+            assert_eq!(result.campaign_stop(), CampaignStop::BatchLimit);
+            result.work_telemetry.retained_progress = RetainedProgress::default();
+            assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
+        }
 
         #[test]
         fn process_campaign_requires_a_verified_budget_checkpoint() {
