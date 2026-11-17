@@ -507,8 +507,8 @@ pub(super) fn prepare_queue_publication_controlled(
                 "nonempty concept extraction requires discovery before drafting",
             ));
         }
-        let selected_owners = if let Some(selection) = &typed.selection {
-            let (selected, owners) = selected_task_controlled(
+        if let Some(selection) = &typed.selection {
+            let (selected, _) = selected_task_controlled(
                 &root,
                 config,
                 config_revision,
@@ -519,7 +519,6 @@ pub(super) fn prepare_queue_publication_controlled(
                 read,
             )?;
             prepared = selected;
-            Some(owners)
         } else {
             prepared = resources::with_discovery_controlled(
                 &root,
@@ -528,8 +527,7 @@ pub(super) fn prepare_queue_publication_controlled(
                 &typed.discovery,
                 read,
             )?;
-            None
-        };
+        }
         for concept in &typed.concepts {
             if let lk_queue::ConceptAdmission::Reuse { owner } = &concept.admission {
                 let canonical = match lk_vault::page_path(&root, Path::new(&owner.path))
@@ -548,16 +546,7 @@ pub(super) fn prepare_queue_publication_controlled(
                     .strip_prefix(&root)
                     .into_diagnostic()?
                     .to_string_lossy();
-                if selected_owners
-                    .as_ref()
-                    .is_some_and(|owners| !owners.contains(address.as_ref()))
-                    || !prepared.resources.iter().any(|resource| {
-                        (selected_owners.is_some()
-                            || resource.authority == lk_core::semantic::SemanticAuthority::Context)
-                            && resource.address == address
-                            && resource.revision == owner.revision
-                    })
-                {
+                if !prepared.is_reuse_owner(address.as_ref(), &owner.revision) {
                     return Err(publication_rejection(
                         RejectionKind::EvidenceScopeChanged,
                         "selected concept owner is outside the captured discovery context or its read revision changed",
@@ -2103,12 +2092,17 @@ fn validate_result_finalization(
                     config,
                     &task,
                     work,
+                    &generation::Owners::build(config, prepared)?,
                     &work.plan.subject_revision,
                     &completed,
                 )?,
-                state::CompletionKind::Frontier => {
-                    native::frontier_request(config, &task, work, &completed)?
-                }
+                state::CompletionKind::Frontier => native::frontier_request(
+                    config,
+                    &task,
+                    work,
+                    &generation::Owners::build(config, prepared)?,
+                    &completed,
+                )?,
             }
         }
     };
@@ -3340,7 +3334,13 @@ fn frontier_result(
         }
     };
     let completed = snapshot.result().clone();
-    let request = match native::frontier_request(config, task, work, &completed) {
+    let request = match native::frontier_request(
+        config,
+        task,
+        work,
+        &generation::Owners::build(config, prepared)?,
+        &completed,
+    ) {
         Ok(request) => request,
         Err(error) => {
             let Some(capacity) = error.downcast_ref::<generation::ResultCapacity>() else {
@@ -3637,6 +3637,7 @@ fn prepare_finalization_from_capture(
             config,
             &task,
             work,
+            &generation::Owners::build(config, prepared)?,
             &work.plan.subject_revision,
             &completed,
         ) {
@@ -3775,6 +3776,7 @@ pub(super) fn finish_result(
     let outcome = match &prepared.subject {
         Subject::Audit { .. } => audit::assemble(&prepared, reply)?,
         Subject::Queue { task_id, .. } => generation::assemble_prepared(
+            config,
             &super::queue::current_task(root, task_id)?,
             &prepared,
             &work.plan.subject_revision,
@@ -6110,6 +6112,7 @@ mod tests {
             &config,
             &task,
             &work,
+            &generation::Owners::build(&config, &prepared).unwrap(),
             &work.plan.subject_revision,
             &completed,
         )

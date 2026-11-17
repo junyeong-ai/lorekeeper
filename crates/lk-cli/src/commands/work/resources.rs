@@ -34,6 +34,7 @@ pub(super) struct Prepared {
     pub pages: BTreeMap<PathBuf, String>,
     pub(super) absent_pages: BTreeSet<PathBuf>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
+    pub(super) selected_owners: Option<BTreeSet<String>>,
 }
 
 pub(super) struct SelectionInventory {
@@ -48,6 +49,18 @@ pub(super) struct SelectionInventory {
 }
 
 impl Prepared {
+    pub(super) fn is_reuse_owner(&self, address: &str, revision: &str) -> bool {
+        self.resources.iter().any(|resource| {
+            self.selected_owners
+                .as_ref()
+                .map_or(resource.authority == SemanticAuthority::Context, |owners| {
+                    owners.contains(address)
+                })
+                && resource.address == address
+                && resource.revision == revision
+        })
+    }
+
     pub fn validate_audit_result(
         &self,
         result: &Value,
@@ -293,6 +306,7 @@ impl<'a> Capture<'a> {
             pages: self.pages,
             absent_pages: self.absent_pages,
             audit_reviews: None,
+            selected_owners: None,
         }
     }
 }
@@ -767,6 +781,7 @@ pub(super) fn task_with_selection(
     prepared.pages.clone_from(&inventory.pages);
     prepared.absent_pages.clone_from(&inventory.absent_pages);
     prepared.resources = resources.into_values().collect();
+    prepared.selected_owners = Some(selected.clone());
     prepared.context["purpose"]["discovery"] = json!({
         "queries":inventory.capture.queries,
         "match_count":inventory.capture.candidates.len(),
@@ -1624,6 +1639,38 @@ mod tests {
         let admitted =
             task_with_selection(&inventory, &selection, &BTreeSet::from([selected.into()]))
                 .unwrap();
+        #[cfg(unix)]
+        {
+            let roster = |prepared: &Prepared| {
+                super::super::generation::Owners::build(&config, prepared)
+                    .unwrap()
+                    .presentation()
+            };
+            let owners = roster(&admitted);
+            assert_eq!(owners.as_array().unwrap().len(), 1);
+            assert_eq!(owners[0]["path"], selected);
+            let mut other_authority = admitted.clone();
+            other_authority
+                .resources
+                .iter_mut()
+                .find(|resource| resource.address == selected)
+                .unwrap()
+                .authority = SemanticAuthority::Page;
+            assert_eq!(roster(&other_authority), owners);
+            let revision = admitted.revision("config").unwrap();
+            let mut empty = admitted.clone();
+            empty.selected_owners = Some(BTreeSet::new());
+            assert_eq!(roster(&empty), json!([]));
+            assert_eq!(empty.revision("config").unwrap(), revision);
+            let mut extra = admitted.clone();
+            extra.resources.push(SemanticResource {
+                address: "wiki/concepts/unselected-review-evidence.md".into(),
+                revision: "a".repeat(64),
+                authority: SemanticAuthority::Context,
+                text: "---\ntype: concept\n---\nUnselected review evidence.\n".into(),
+            });
+            assert_eq!(roster(&extra), owners);
+        }
         for path in [target, selected, excluded] {
             assert!(admitted.pages.contains_key(Path::new(path)));
         }
@@ -1802,6 +1849,7 @@ mod tests {
                 errors: Vec::new(),
                 evidence: Vec::new(),
             }]),
+            selected_owners: None,
         };
         let mut result = json!({"assessments":[{
             "path":path, "file_revision":"file", "input_revision":"input",
@@ -2006,6 +2054,13 @@ mod tests {
                 resource.address == "wiki/concepts/context.md"
                     && resource.authority == SemanticAuthority::Context
             }));
+            #[cfg(unix)]
+            assert_eq!(
+                super::super::generation::Owners::build(&config, &batched)
+                    .unwrap()
+                    .presentation(),
+                json!([])
+            );
         }
         assert!(task_with_audit(&root, &config, &tasks[0].task_id, Some(&candidates[1])).is_err());
         let mut wrong_kind = candidates[0].clone();

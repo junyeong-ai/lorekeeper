@@ -3,8 +3,8 @@
 Contents: selected tasks; revision ownership; completed Work; complete observation
 coverage; semantic response.
 
-Use only when the native controller supplies `native-selected-results-v3`,
-`native-finalize-results-v4` or `native-finalize-frontier-v4`. The complete request arrives through supervised stdin.
+Use only when the native controller supplies `native-selected-results-v4`,
+`native-finalize-results-v5` or `native-finalize-frontier-v5`. The complete request arrives through supervised stdin.
 It is neither semantic completion nor permission to process unrelated work.
 
 Its task metadata, exact context, evidence and shared contracts replace ordinary
@@ -22,6 +22,13 @@ explicit resource reference. `contract_indices` select shared `contracts`.
 These values replace ordinary configuration, queue enumeration, repeated `work context`
 and reference-file intake. A candidate is not automatically the same concept or
 independent corroboration.
+
+Each task or completed Work supplies its own `owners` roster. Reuse admission is
+`{decision: reuse, owner_ref: "o0"}` with an exact reference from that roster; new
+admission is `{decision: new}`. Compare the owner’s meaning and scope before reuse.
+Rust supplies its canonical path and file revision. Never copy or reconstruct those
+guards into a native reply. An empty roster permits no reuse. References have meaning
+only within the exact supplied task or Work.
 
 ## Revision ownership
 
@@ -70,7 +77,7 @@ original authority and cannot upgrade legacy page-only evidence.
 
 ## Complete observation coverage
 
-`native-finalize-frontier-v4` supplies `frontier` instead of `completed`. Its current
+`native-finalize-frontier-v5` supplies `frontier` instead of `completed`. Its current
 observations jointly cover every planned inspection exactly once, but no combined
 root observation has been recorded. Read every supplied observation, its source
 questions, resolutions and evidence mapping. Compare claims under their stated scope

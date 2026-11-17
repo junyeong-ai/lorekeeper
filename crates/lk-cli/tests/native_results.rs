@@ -34,7 +34,7 @@ if request.get('kind') in ['whole-section','finalize-section']:
     if engine=='claude-code':
         response={'type':'result','subtype':'success','is_error':False,'structured_output':response}
     print(json.dumps(response)); raise SystemExit()
-if request.get('schema') in ['native-selected-results-v3','native-finalize-results-v4','native-finalize-frontier-v4']:
+if request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']:
     assert '--safe-mode' not in sys.argv
     assert '--output-schema' in sys.argv or '--json-schema' in sys.argv
     assert 'Do not write result files' in raw or 'do not write result files' in raw
@@ -61,7 +61,7 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
         assert [entry['resource'] for entry in roster]==list(range(len(roster)))
         if (root/'expect-uncited-owner').exists():
             assert any(entry['resource'] not in completed['evidence_resources'] for entry in roster)
-    if request['schema']=='native-finalize-frontier-v4':
+    if request['schema']=='native-finalize-frontier-v5':
         (root/'last-frontier.json').write_text(json.dumps(request))
         assert completed['observations'] and completed['proof']['nodes']
     tasks=request.get('tasks') or [{'task':{'kind':completed['context']['purpose']['task_kind'],
@@ -95,6 +95,11 @@ if request.get('schema') in ['native-selected-results-v3','native-finalize-resul
             path.write_text('---\ntype: exploration\ntitle: Review\nreview:\n  status: unresolved\n  subjects: ['+target+']\n---\n# New scoped issue\n')
         if task['kind']=='extract-concepts':
             value={'concepts':[]}
+            if mode=='reuse':
+                owners=item.get('owners', request.get('owners'))
+                owner=next(owner for owner in owners if owner['path']=='wiki/concepts/protocol.md')
+                value={'concepts':[{'name':'Protocol','category':None,'aliases':[],
+                    'admission':{'decision':'reuse','owner_ref':owner['owner_ref']},'synthesis':None,'rss_evidence':[]}]}
             if mode=='new-concept': value={'concepts':[{'name':'Transactional Outbox','category':None,'aliases':[],
                 'admission':{'decision':'new'},'synthesis':'The source proposes a transactional outbox; deployment is unverified.','rss_evidence':[]}]}
         else: value={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None}
@@ -504,6 +509,60 @@ fn native_owns_extraction_and_synthesis_results_for_selected_and_bounded_work_on
                     assert_eq!(result["task_id"], task.task_id);
                     assert_eq!(result["cache_hash"], task.cache_hash);
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn native_owner_references_publish_selected_root_and_frontier_results_on_both_hosts() {
+    for engine in ["codex", "claude-code"] {
+        for mode in ["selected", "root", "frontier"] {
+            let fixture = Fixture::new(engine);
+            let owner = fixture.root().join("vault/wiki/concepts/protocol.md");
+            std::fs::write(&owner, "---\ntype: concept\ntitle: Protocol\nsource_count: 0\n---\n# Protocol\n\n## Synthesis\nAn explicit protocol proposal.\n\n## Sources\n\n## Related\n").unwrap();
+            std::fs::write(fixture.root().join("mode"), "reuse").unwrap();
+            let (task, plan) = if mode == "frontier" {
+                let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::ExtractConcepts);
+                (task, Some(plan))
+            } else {
+                fixture.add(
+                    "source",
+                    lk_queue::TaskKind::ExtractConcepts,
+                    mode == "root",
+                )
+            };
+            let report = fixture.run();
+            assert!(fixture.done(&task), "{engine}/{mode}: {report}");
+            assert_eq!(report["halted"], false, "{report}");
+            let raw =
+                std::fs::read_to_string(fixture.root().join("vault").join(&task.target.vault_path))
+                    .unwrap();
+            assert!(raw.contains("../concepts/protocol.md"), "{raw}");
+            if let Some(plan) = plan {
+                let value: Value = serde_json::from_slice(
+                    &std::fs::read(
+                        fixture
+                            .root()
+                            .join("vault/.lorekeeper/work")
+                            .join(plan["work_id"].as_str().unwrap())
+                            .join("final.json"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    value["concepts"][0]["admission"]["owner"]["path"],
+                    "wiki/concepts/protocol.md"
+                );
+                assert_eq!(
+                    value["concepts"][0]["admission"]["owner"]["revision"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
+                    64
+                );
+                assert!(value["concepts"][0]["admission"].get("owner_ref").is_none());
             }
         }
     }
@@ -1252,7 +1311,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
         let mut observed_capacity = false;
         for line in calls.lines() {
             let call: Value = serde_json::from_str(line).unwrap();
-            if call["schema"] == "native-selected-results-v3" {
+            if call["schema"] == "native-selected-results-v4" {
                 assert!(
                     call["tasks"]
                         .as_array()
@@ -1261,7 +1320,7 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
                         .all(|task| task["task"]["task_id"] != blocked.task_id)
                 );
             } else {
-                assert_ne!(call["schema"], "native-finalize-results-v4");
+                assert_ne!(call["schema"], "native-finalize-results-v5");
             }
         }
         for stage in report["stages"].as_array().unwrap() {

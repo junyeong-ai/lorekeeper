@@ -101,6 +101,12 @@ paths:
   Corrupt receipts, signal/cleanup errors and failed fresh scope validation stay fatal.
   Standalone full-path `select-record`,
   selection identities and existing paid decisions remain unchanged.
+- Native extraction reuse replies select a task-local `owner_ref` from its complete
+  admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
+  contract. Progressive membership is explicit, including an empty selection; legacy
+  admission requires Context authority. Review-only and unselected pages grant no reuse.
+  Reserve per-occurrence expansion bytes, including repeated references, while retaining
+  a fitting empty extraction. Fresh request equality precedes expansion.
 - Native new questions contain only semantic text/evidence; Rust supplies IDs and
   retains inherited active questions unchanged unless an exact local question key is
   explicitly resolved. Native child question tuples separate active keys from closed

@@ -158,6 +158,7 @@ struct Captured<'a> {
     subject: &'a Subject,
     context: &'a Value,
     resources: &'a [SemanticResource],
+    owners: &'a super::generation::Owners,
 }
 
 struct FinalizationView {
@@ -221,6 +222,7 @@ pub(super) fn selected_task(
             subject: &prepared.subject,
             context: &prepared.context,
             resources: &prepared.resources,
+            owners: &super::generation::Owners::build(config, prepared)?,
         },
         work,
         target_owner,
@@ -315,9 +317,9 @@ fn selected_task_value(
         "kind":"selected-task", "task":metadata,
         "context_revision":work.plan.subject_revision, "context":captured.context,
         "retained_input":retained, "target_resource":owner,
-        "resources":resources, "contracts":contracts,
+        "resources":resources, "owners":captured.owners.presentation(), "contracts":contracts,
         "max_result_bytes":work.plan.max_result_bytes,
-        "max_response_bytes":super::generation::response_limit(task, captured.subject, captured.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
+        "max_response_bytes":super::generation::response_limit(task, captured.subject, captured.context, &work.plan.subject_revision, captured.owners, work.plan.max_result_bytes)?,
     }))
 }
 
@@ -370,7 +372,7 @@ pub(in crate::commands) fn selected_request(
         .min()
         .expect("nonempty selection");
     Ok(json!({
-        "schema":"native-selected-results-v3", "tasks":selected, "contracts":contracts,
+        "schema":"native-selected-results-v4", "tasks":selected, "contracts":contracts,
         "max_input_bytes":limits.max_input_bytes,
         "max_result_bytes":limits.max_result_bytes,
         "max_response_bytes":max_response_bytes,
@@ -457,10 +459,11 @@ fn rss_evidence_bindings(task: &QueueTask, work: &Work) -> miette::Result<Value>
         .map(Value::Array)
 }
 
-pub(in crate::commands) fn finalization_request(
+pub(super) fn finalization_request(
     config: &Config,
     task: &QueueTask,
     work: &Work,
+    owners: &super::generation::Owners,
     context_revision: &str,
     completed: &Value,
 ) -> miette::Result<Value> {
@@ -491,22 +494,23 @@ pub(in crate::commands) fn finalization_request(
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     let view = FinalizationView::build(work, completed)?;
     Ok(json!({
-        "schema":"native-finalize-results-v4", "context_revision":context_revision,
+        "schema":"native-finalize-results-v5", "context_revision":context_revision,
         "completed":view.observation, "contracts":contracts,
-        "inspected_resources":view.resources,
+        "inspected_resources":view.resources, "owners":owners.presentation(),
         "rss_evidence_bindings":rss_evidence_bindings(task, work)?,
         "source_read":super::source::descriptor(work)?,
         "max_input_bytes":work.max_input_bytes, "max_result_bytes":work.plan.max_result_bytes,
-        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, work.plan.max_result_bytes)?,
+        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, context_revision, owners, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
         "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. The supplied completed object replaces work result/status setup reads; Use source_read for a necessary targeted reread of this exact retained task source. Its literal matches are text positions, never event identities or semantic support. Preserve page continuation and resource guards. Ordinary setup and paid inspections must not restart; targeted owner comparison remains permitted, and a required change of discovery scope uses the typed needs-discovery response with a complete explicit replacement query list. {}", super::generation::instruction()),
     }))
 }
 
-pub(in crate::commands) fn frontier_request(
+pub(super) fn frontier_request(
     config: &Config,
     task: &QueueTask,
     work: &Work,
+    owners: &super::generation::Owners,
     frontier: &Value,
 ) -> miette::Result<Value> {
     if frontier["kind"] != "finalize-frontier"
@@ -539,13 +543,13 @@ pub(in crate::commands) fn frontier_request(
         crate::commands::execution::finalization::generation_contracts(config, kind, target.kind)?;
     let view = FinalizationView::build(work, frontier)?;
     Ok(json!({
-        "schema":"native-finalize-frontier-v4", "context_revision":work.plan.subject_revision,
+        "schema":"native-finalize-frontier-v5", "context_revision":work.plan.subject_revision,
         "frontier":view.observation, "contracts":contracts,
-        "inspected_resources":view.resources,
+        "inspected_resources":view.resources, "owners":owners.presentation(),
         "rss_evidence_bindings":rss_evidence_bindings(task, work)?,
         "source_read":super::source::descriptor(work)?,
         "max_input_bytes":work.max_input_bytes,"max_result_bytes":work.plan.max_result_bytes,
-        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, work.plan.max_result_bytes)?,
+        "max_response_bytes":super::generation::response_limit(task, &subject, &work.context, &work.plan.subject_revision, owners, work.plan.max_result_bytes)?,
         "response_schema":super::generation::schema(),
         "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; use source_read for a necessary targeted reread of this exact retained task source, following its page continuation and resource guards. Literal matches are positions, never event identities. Targeted owner comparison remains permitted; a required change of discovery scope uses the typed needs-discovery response with a complete explicit replacement query list. Do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction()),
     }))
@@ -628,6 +632,7 @@ mod tests {
                 subject: &subject,
                 context: &context,
                 resources: &resources,
+                owners: &super::super::generation::Owners::default(),
             },
             &work,
             Path::new("wiki/documents/owner.md"),
@@ -650,7 +655,8 @@ mod tests {
                 Captured {
                     subject: &subject,
                     context: &context,
-                    resources: &resources
+                    resources: &resources,
+                    owners: &super::super::generation::Owners::default(),
                 },
                 &work,
                 Path::new("wiki/documents/owner.md"),
@@ -698,6 +704,7 @@ mod tests {
                 subject: &subject,
                 context: &context,
                 resources: &resources,
+                owners: &super::super::generation::Owners::default(),
             },
             &work,
             Path::new("wiki/documents/owner.md"),
@@ -725,7 +732,15 @@ mod tests {
     fn finalizer_keeps_root_and_publication_guards_distinct_without_source_bodies() {
         let (task, _, context, resources, work, _) = fixture();
         let completed = json!({"kind":"finalize","work_id":work.plan.id,"context":context,"input_revision":"root-input","output":{"summary":"Pinned finding","source_questions":[{"id":"question"}]},"evidence":work.inspection_guards().unwrap()});
-        let request = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
+        let request = finalization_request(
+            &config(),
+            &task,
+            &work,
+            &super::super::generation::Owners::default(),
+            "scope",
+            &completed,
+        )
+        .unwrap();
         assert_eq!(canonical_observation(&request, "completed"), completed);
         assert_eq!(
             request["inspected_resources"],
@@ -749,7 +764,15 @@ mod tests {
                 .contains(&resources[0].text)
         );
         assert!(
-            finalization_request(&config(), &task, &work, "another-scope", &completed).is_err()
+            finalization_request(
+                &config(),
+                &task,
+                &work,
+                &super::super::generation::Owners::default(),
+                "another-scope",
+                &completed
+            )
+            .is_err()
         );
     }
 
@@ -794,8 +817,23 @@ mod tests {
         let frontier = json!({"kind":"finalize-frontier","work_id":work.plan.id,
             "context":context,"input_revision":"frontier-input","observations":[],
             "evidence":work.inspection_guards().unwrap()});
-        let root = finalization_request(&config(), &task, &work, "scope", &completed).unwrap();
-        let frontier_request = frontier_request(&config(), &task, &work, &frontier).unwrap();
+        let root = finalization_request(
+            &config(),
+            &task,
+            &work,
+            &super::super::generation::Owners::default(),
+            "scope",
+            &completed,
+        )
+        .unwrap();
+        let frontier_request = frontier_request(
+            &config(),
+            &task,
+            &work,
+            &super::super::generation::Owners::default(),
+            &frontier,
+        )
+        .unwrap();
         for request in [&root, &frontier_request] {
             assert_eq!(request["rss_evidence_bindings"], expected);
             assert!(!serde_json::to_string(request).unwrap().contains(text));
@@ -807,19 +845,57 @@ mod tests {
         );
         let mut changed = task.clone();
         changed.input.remove("rss_original");
-        assert!(finalization_request(&config(), &changed, &work, "scope", &completed).is_err());
+        assert!(
+            finalization_request(
+                &config(),
+                &changed,
+                &work,
+                &super::super::generation::Owners::default(),
+                "scope",
+                &completed
+            )
+            .is_err()
+        );
         let mut changed = task.clone();
         changed.input.get_mut("rss_original").unwrap()["events"][0]["revision"] =
             "f".repeat(64).into();
-        assert!(finalization_request(&config(), &changed, &work, "scope", &completed).is_err());
+        assert!(
+            finalization_request(
+                &config(),
+                &changed,
+                &work,
+                &super::super::generation::Owners::default(),
+                "scope",
+                &completed
+            )
+            .is_err()
+        );
         let mut changed = work.clone();
         changed.plan.resources[1].authority = SemanticAuthority::Page;
-        assert!(finalization_request(&config(), &task, &changed, "scope", &completed).is_err());
+        assert!(
+            finalization_request(
+                &config(),
+                &task,
+                &changed,
+                &super::super::generation::Owners::default(),
+                "scope",
+                &completed
+            )
+            .is_err()
+        );
         let (legacy, _, context, _, work, _) = fixture();
         let completed = json!({"kind":"finalize","work_id":work.plan.id,
             "context":context,"input_revision":"root-input","output":{"summary":"Legacy page only"},
             "evidence":work.inspection_guards().unwrap()});
-        let legacy = finalization_request(&config(), &legacy, &work, "scope", &completed).unwrap();
+        let legacy = finalization_request(
+            &config(),
+            &legacy,
+            &work,
+            &super::super::generation::Owners::default(),
+            "scope",
+            &completed,
+        )
+        .unwrap();
         assert_eq!(legacy["rss_evidence_bindings"], json!([]));
     }
 
@@ -941,7 +1017,14 @@ mod tests {
             .unwrap();
         let canonical = completed.result();
         let before = canonical.clone();
-        let request = frontier_request(&config(), &task, &work, canonical).unwrap();
+        let request = frontier_request(
+            &config(),
+            &task,
+            &work,
+            &super::super::generation::Owners::default(),
+            canonical,
+        )
+        .unwrap();
         let canonical_bytes = serde_json::to_vec(canonical).unwrap().len();
         let request_bytes = serde_json::to_vec(&request).unwrap().len();
         assert!(canonical_bytes <= work.max_input_bytes);
@@ -1029,7 +1112,7 @@ mod tests {
             "contracts":["exact rules"],
             "response_schema":{"type":"object"},
             "instructions":"preserve every claim\n",
-            "schema":"native-finalize-frontier-v4"
+            "schema":"native-finalize-frontier-v5"
         });
         let raw = serde_json::to_vec(&request).unwrap();
         let components =

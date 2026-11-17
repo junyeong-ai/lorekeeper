@@ -6,6 +6,8 @@ use std::path::Path;
 
 use super::action::{Action, GENERATION, digest};
 use super::{Prepared, Subject};
+mod owners;
+pub(super) use owners::Owners;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,12 +31,9 @@ pub(in crate::commands) enum SelectedFinish {
 }
 
 pub(in crate::commands) fn schema() -> Value {
-    let owner = json!({"type":"object","additionalProperties":false,
-        "properties":{"path":{"type":"string"},"revision":{"type":"string"}},
-        "required":["path","revision"]});
     let admission = json!({"anyOf":[
         {"type":"object","additionalProperties":false,"properties":{"decision":{"type":"string","enum":["new"]}},"required":["decision"]},
-        {"type":"object","additionalProperties":false,"properties":{"decision":{"type":"string","enum":["reuse"]},"owner":owner},"required":["decision","owner"]}
+        {"type":"object","additionalProperties":false,"properties":{"decision":{"type":"string","enum":["reuse"]},"owner_ref":{"type":"string"}},"required":["decision","owner_ref"]}
     ]});
     let concept = json!({"type":"object","additionalProperties":false,"properties":{
         "admission":admission,"name":{"type":"string"},"category":{"type":["string","null"]},
@@ -73,6 +72,7 @@ pub(super) fn assemble(
     subject: &Subject,
     context: &Value,
     context_revision: &str,
+    owners: &Owners,
     reply: Value,
     max_result_bytes: usize,
 ) -> miette::Result<Outcome> {
@@ -124,11 +124,36 @@ pub(super) fn assemble(
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct Extraction {
-                concepts: Vec<lk_queue::ReportedConcept>,
+                concepts: Vec<NativeConcept>,
+            }
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct NativeConcept {
+                admission: owners::Admission,
+                name: String,
+                category: Option<String>,
+                aliases: Vec<String>,
+                synthesis: Option<String>,
+                rss_evidence: Vec<lk_core::rss_evidence::RssEventSelection>,
             }
             let value: Extraction = serde_json::from_value(semantic).into_diagnostic()?;
-            let body_error = value
+            let concepts = value
                 .concepts
+                .into_iter()
+                .map(|concept| {
+                    Ok(lk_queue::ReportedConcept {
+                        admission: owners.resolve(concept.admission)?,
+                        concept: lk_core::concept::ExtractedConcept {
+                            name: concept.name,
+                            category: concept.category,
+                            aliases: concept.aliases,
+                        },
+                        synthesis: concept.synthesis,
+                        rss_evidence: concept.rss_evidence,
+                    })
+                })
+                .collect::<miette::Result<Vec<_>>>()?;
+            let body_error = concepts
                 .iter()
                 .filter_map(|concept| concept.synthesis.as_deref())
                 .find_map(|body| lk_core::markdown::validate_section_body(body).err());
@@ -149,7 +174,7 @@ pub(super) fn assemble(
                     .transpose()?,
                 target: task.target.clone(),
                 date: serde_json::from_value(task.input["date"].clone()).into_diagnostic()?,
-                concepts: value.concepts,
+                concepts,
             })
             .into_diagnostic()?;
             (result, body_error)
@@ -197,6 +222,7 @@ pub(super) fn assemble(
 }
 
 pub(super) fn assemble_prepared(
+    config: &lk_core::config::Config,
     task: &QueueTask,
     prepared: &Prepared,
     revision: &str,
@@ -208,6 +234,7 @@ pub(super) fn assemble_prepared(
         &prepared.subject,
         &prepared.context,
         revision,
+        &Owners::build(config, prepared)?,
         reply,
         limit,
     )
@@ -236,6 +263,7 @@ pub(super) fn response_limit(
     subject: &Subject,
     context: &Value,
     revision: &str,
+    owners: &Owners,
     limit: usize,
 ) -> miette::Result<usize> {
     let value = match task.kind {
@@ -244,8 +272,15 @@ pub(super) fn response_limit(
         _ => return Err(miette::miette!("task uses section response bounds")),
     };
     let reply = json!({"status":"complete","value":value,"reason":null});
-    let Outcome::Complete(result) =
-        assemble(task, subject, context, revision, reply.clone(), usize::MAX)?
+    let Outcome::Complete(result) = assemble(
+        task,
+        subject,
+        context,
+        revision,
+        owners,
+        reply.clone(),
+        usize::MAX,
+    )?
     else {
         unreachable!("empty complete result")
     };
@@ -265,12 +300,16 @@ pub(super) fn response_limit(
         }
         .into());
     }
-    Ok(limit - metadata)
+    if task.kind == TaskKind::ExtractConcepts {
+        owners.response_limit(limit - metadata, reply_bytes)
+    } else {
+        Ok(limit - metadata)
+    }
 }
 
 pub(super) fn instruction() -> String {
     format!(
-        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction alone may return {{status: needs-discovery, value: {{queries: [{{query: explicit_query, phrase: boolean, spacing: boolean}}]}}, reason: nonblank}} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion. Extraction semantic_object contains only concepts in the shared ReportedConcept format; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. If extraction needs new discovery, use needs-discovery with explicit queries. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
+        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction alone may return {{status: needs-discovery, value: {{queries: [{{query: explicit_query, phrase: boolean, spacing: boolean}}]}}, reason: nonblank}} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion. Extraction semantic_object contains concepts with semantic name/category/aliases/synthesis/rss_evidence fields and admission {{decision: new}} or {{decision: reuse, owner_ref: exact_reference}}. Each task or completed Work supplies its own owners roster. Reuse only a reference from that exact roster after the required identity comparison. Never return owner paths or revisions; Rust expands the selected reference into the unchanged canonical ReportedConcept owner. An empty owners roster permits no reuse; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. If extraction needs new discovery, use needs-discovery with explicit queries. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
         crate::commands::execution::finalization::publication_rules()
     )
 }
@@ -375,6 +414,7 @@ pub(in crate::commands) fn finish_selected_controlled(
     let path = GENERATION.path(&task.task_id, &task.cache_hash);
     let mut plan = lk_vault::MutationPlan::default();
     let reason = match assemble_prepared(
+        config,
         &task,
         &prepared,
         &work.plan.subject_revision,
@@ -499,6 +539,7 @@ mod tests {
                     &subject,
                     &context,
                     &"c".repeat(64),
+                    &Owners::default(),
                     reply.clone(),
                     4096,
                 )
@@ -512,7 +553,18 @@ mod tests {
                     valid || matches!(result, Outcome::NeedsAction(_)),
                     "{field}/{body:?}"
                 );
-                assert!(assemble(&task, &subject, &context, &"c".repeat(64), reply, 1).is_err());
+                assert!(
+                    assemble(
+                        &task,
+                        &subject,
+                        &context,
+                        &"c".repeat(64),
+                        &Owners::default(),
+                        reply,
+                        1
+                    )
+                    .is_err()
+                );
             }
         }
     }
@@ -533,18 +585,29 @@ mod tests {
         let selection = json!({"policy":"progressive-evidence-v1","inventory_revision":"c".repeat(64),"decisions_revision":"d".repeat(64)});
         let context = json!({"purpose":{"discovery":{"queries":[{"query":"Protocol","phrase":true,"spacing":false}]},"extraction_scope":{"selection":selection}}});
         let revision = "e".repeat(64);
-        let limit = response_limit(&task, &subject, &context, &revision, 4096).unwrap();
+        let owners = Owners(vec![lk_queue::ConceptOwner {
+            path: "wiki/concepts/protocol.md".into(),
+            revision: "f".repeat(64),
+        }]);
+        let limit = response_limit(&task, &subject, &context, &revision, &owners, 4096).unwrap();
         assert!(limit < 4096);
         let mut reply = json!({"status":"complete","reason":null,"value":{"concepts":[{
-            "name":"Protocol — 좁은 범위", "aliases":[],"category":null,"admission":{"decision":"reuse","owner":{"path":"wiki/concepts/protocol.md","revision":"f".repeat(64)}},
+            "name":"Protocol — 좁은 범위", "aliases":[],"category":null,"admission":{"decision":"reuse","owner_ref":"o0"},
             "synthesis":"A source question remains unknown.","rss_evidence":[{"event_id":"rss:exact","revision":"1".repeat(64)}]
         }]}});
         let base = serde_json::to_vec(&reply).unwrap().len();
         reply["value"]["concepts"][0]["synthesis"] = json!("x".repeat(limit - base));
         assert!(serde_json::to_vec(&reply).unwrap().len() <= limit);
-        let Outcome::Complete(result) =
-            assemble(&task, &subject, &context, &revision, reply.clone(), 4096).unwrap()
-        else {
+        let Outcome::Complete(result) = assemble(
+            &task,
+            &subject,
+            &context,
+            &revision,
+            &owners,
+            reply.clone(),
+            4096,
+        )
+        .unwrap() else {
             panic!("complete")
         };
         assert_eq!(result["selection"], selection);
@@ -558,7 +621,7 @@ mod tests {
         );
         assert!(serde_json::to_vec(&result).unwrap().len() <= 4096);
         reply["value"]["task_id"] = json!("forged");
-        assert!(assemble(&task, &subject, &context, &revision, reply, 4096).is_err());
-        assert!(response_limit(&task, &subject, &context, &revision, 10).is_err());
+        assert!(assemble(&task, &subject, &context, &revision, &owners, reply, 4096).is_err());
+        assert!(response_limit(&task, &subject, &context, &revision, &owners, 10).is_err());
     }
 }
