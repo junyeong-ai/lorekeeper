@@ -633,6 +633,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let result = lk_graph::audit::plan_selected_partitioned(
                 &root,
                 &config.vault.dirs,
+                &config.graph.audit.subjects,
                 &pages,
                 limit.unwrap_or(config.graph.audit.batch_size),
                 &paths,

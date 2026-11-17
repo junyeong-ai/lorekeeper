@@ -81,9 +81,16 @@ and CLI discovery, not a second graph authority.
   or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
-- Check unreadable potential subjects before filtering on parsed `type`; an unknown
-  format cannot shrink corpus coverage. Exact selections require their own subjects
-  and reached subject context, without newly requiring unrelated concept bodies.
+- `graph.audit.subjects` names the kinds automatic plans, pending order and corpus
+  coverage include; concepts by default. Coverage is `reviewed_current` of `total`
+  over those kinds. Other kinds are counted in `excluded_by_kind` without deriving
+  their inputs. They keep their receipts and recorded discovery and stay auditable as
+  exact selections; a named subject of an excluded kind never enters corpus counts.
+  `coverage` derives inputs only for receipt holders and equals an automatic plan's.
+- Check unreadable potential subjects of an included kind before filtering on parsed
+  `type`; an unknown format cannot shrink corpus coverage. Exact selections require
+  their own subjects and reached subject context, without newly requiring unrelated
+  concept bodies.
 - Exact selected planning evaluates only selected discovery recipes;
   `coverage_scope` distinguishes selection counts from complete corpus accounting.
   Assessment recording evaluates current corpus inputs to preserve exact pending

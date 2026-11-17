@@ -155,6 +155,8 @@ These reads revalidate current inputs and leave existing observations and comple
 Concept extraction screens, per query, the 50 best-ranked existing pages (`execution.work.max_query_candidates`) plus every exact title or alias match.
 Decisions are stored per candidate, so an unchanged card keeps its decision when other pages change, and changes to candidates whose body was not read never block publication.
 
+Automatic audits plan only the kinds in `graph.audit.subjects` (concepts by default). Changed and first-time subjects rotate, and each class is ordered by scoped review obligations, a recorded follow-up, citing pages and discovery already started.
+The `audit` row of `lore status` reports the share of subjects with a current assessment. Lower-risk subjects can wait, and full coverage is not promised.
 Fresh audit discovery screens the complete match inventory in bounded packets and reuses unchanged decisions.
 Only admitted context receives full reads; mandatory evidence and direct links remain required.
 Unknown or explicitly deferred candidates prevent completion. See [candidate screening](skills/lore-wiki/references/maintenance.md#candidate-screening).

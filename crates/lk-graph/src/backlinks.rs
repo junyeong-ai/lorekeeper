@@ -2303,6 +2303,7 @@ mod tests {
                 let audit = crate::audit::plan_selected(
                     root.path(),
                     &dirs,
+                    &Default::default(),
                     &pages,
                     1,
                     &[concept.to_string_lossy().into_owned()],

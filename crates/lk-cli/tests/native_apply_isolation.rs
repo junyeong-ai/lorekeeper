@@ -95,7 +95,7 @@ impl Fixture {
         std::fs::set_permissions(&agent, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = root.join("config.yaml");
         std::fs::write(&config, format!(
-            "vault:\n  root: vault\n  locale: en\nidentity: {{name: Test, email: test@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    concept_policy: disabled\nexecution:\n  default_profile: primary\n  work: {{max_input_bytes: 262144, max_result_bytes: 65536, max_calls: 4}}\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: 30\n      work: {{extraction_context: full-context}}\ngraph:\n  audit:\n    batch_size: 1\n",
+            "vault:\n  root: vault\n  locale: en\nidentity: {{name: Test, email: test@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\n    concept_policy: disabled\nexecution:\n  default_profile: primary\n  work: {{max_input_bytes: 262144, max_result_bytes: 65536, max_calls: 4}}\n  profiles:\n    primary:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: 30\n      work: {{extraction_context: full-context}}\ngraph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n",
             serde_json::to_string(&agent).unwrap()
         )).unwrap();
         std::fs::create_dir_all(root.join("vault/inbox")).unwrap();

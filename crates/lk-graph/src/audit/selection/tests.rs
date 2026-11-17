@@ -844,6 +844,10 @@ fn deferred_cards_do_not_repeat_or_hide_later_unknown_candidates() {
         crate::audit::record(
             &MutationSession::acquire(&fixture.root).unwrap(),
             &fixture.dirs,
+            &BTreeSet::from([
+                crate::audit::AuditSubjectKind::Concept,
+                crate::audit::AuditSubjectKind::Document
+            ]),
             &fixture.pages(),
             AuditResults {
                 assessments: vec![AuditAssessment {

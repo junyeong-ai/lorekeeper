@@ -146,6 +146,7 @@ pub(super) fn record_controlled(
     let selected = lk_graph::audit::plan_selected_partitioned_controlled(
         root,
         &config.vault.dirs,
+        &config.graph.audit.subjects,
         &pages,
         selection.len(),
         &selection,
@@ -171,6 +172,7 @@ pub(super) fn record_controlled(
     lk_graph::audit::record_with_guard_controlled(
         session,
         &config.vault.dirs,
+        &config.graph.audit.subjects,
         &pages,
         results,
         config.graph.audit.max_input_bytes,
@@ -348,6 +350,7 @@ pub(super) fn plan_ready(
         let plan = lk_graph::audit::plan_available_partitioned(
             root,
             &config.vault.dirs,
+            &config.graph.audit.subjects,
             pages,
             limit,
             config.graph.audit.max_input_bytes,
@@ -360,6 +363,7 @@ pub(super) fn plan_ready(
         let plan = lk_graph::audit::plan_selected_partitioned(
             root,
             &config.vault.dirs,
+            &config.graph.audit.subjects,
             pages,
             limit,
             paths,

@@ -176,6 +176,24 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
         }),
     }
 
+    let coverage = audit_coverage(&vault_root, &config);
+    match &coverage {
+        Ok(coverage) if coverage.total + coverage.excluded_by_kind.values().sum::<usize>() == 0 => {
+        }
+        Ok(coverage) => subsystems.push(Subsystem {
+            name: "audit",
+            ok: true,
+            state: audit_state(coverage),
+            next: "lore wiki audit-plan",
+        }),
+        Err(error) => subsystems.push(Subsystem {
+            name: "audit",
+            ok: false,
+            state: format!("unreadable: {error}"),
+            next: "lore wiki audit-plan",
+        }),
+    }
+
     if json {
         let mut envelope = serde_json::json!({
             "ok": true,
@@ -187,6 +205,10 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
         });
         if let Some(automation) = automation {
             envelope["data"]["automation"] = automation;
+        }
+        if let Ok(coverage) = &coverage {
+            envelope["data"]["audit"] =
+                serde_json::to_value(coverage).map_err(|e| miette::miette!("{e}"))?;
         }
         println!(
             "{}",
@@ -275,6 +297,34 @@ fn automation_row(
             )
         }
     }
+}
+
+/// Receipt coverage of the subject kinds automatic audits plan. It is a ratio, not a
+/// verdict: the row marks only state `lore wiki audit-plan` would refuse to read.
+fn audit_coverage(
+    root: &std::path::Path,
+    config: &lk_core::config::Config,
+) -> Result<lk_graph::audit::AuditCoverage, lk_graph::GraphError> {
+    let pages = lk_graph::scan::scan_vault(root, config.graph.scope.follow_links)?;
+    lk_graph::audit::coverage(
+        root,
+        &config.vault.dirs,
+        &config.graph.audit.subjects,
+        &pages,
+        &lk_vault::ReadControl::default(),
+    )
+}
+
+fn audit_state(coverage: &lk_graph::audit::AuditCoverage) -> String {
+    let mut state = format!("{}/{} current", coverage.reviewed_current, coverage.total);
+    if coverage.changed > 0 {
+        let _ = write!(state, " · {} changed", coverage.changed);
+    }
+    let excluded = coverage.excluded_by_kind.values().sum::<usize>();
+    if excluded > 0 {
+        let _ = write!(state, " · {excluded} excluded");
+    }
+    state
 }
 
 /// The verdict `lore queue check` exits on. An interrupted publication, a staged result or an
@@ -412,6 +462,28 @@ mod tests {
             review_state(&health),
             "1 need reassessment · 2 open · 5 resolved"
         );
+    }
+
+    #[test]
+    fn audit_coverage_names_current_changed_and_excluded_subjects() {
+        use lk_graph::audit::{AuditCoverage, AuditCoverageScope, AuditSubjectKind};
+        let mut coverage = AuditCoverage {
+            coverage_scope: AuditCoverageScope::Corpus,
+            total: 4943,
+            reviewed_current: 87,
+            follow_up_current: 5,
+            unreviewed: 4795,
+            changed: 61,
+            counts_by_kind: Default::default(),
+            excluded_by_kind: [(AuditSubjectKind::Document, 2318)].into(),
+        };
+        assert_eq!(
+            super::audit_state(&coverage),
+            "87/4943 current · 61 changed · 2318 excluded"
+        );
+        coverage.changed = 0;
+        coverage.excluded_by_kind.clear();
+        assert_eq!(super::audit_state(&coverage), "87/4943 current");
     }
 
     #[test]

@@ -65,15 +65,9 @@ pub(super) fn build_adoption(
         Err(source) => return Err(error(source)),
     }
     let (before, mut receipts) = super::super::load_controlled(root, read)?;
-    let selected = BTreeSet::from([request.path.as_str()]);
-    let mut candidates = super::super::inputs_selected_controlled(
-        root,
-        dirs,
-        pages,
-        &receipts,
-        Some(&selected),
-        read,
-    )?;
+    let scope = super::super::Scope::Selection(BTreeSet::from([request.path.as_str()]));
+    let mut candidates =
+        super::super::inputs_controlled(root, dirs, pages, &receipts, &scope, read)?;
     let candidate = candidates
         .pop()
         .ok_or_else(|| error("discovery adoption requires an exact audit subject"))?;
@@ -111,14 +105,8 @@ pub(super) fn build_adoption(
         .get_mut(&candidate.path)
         .expect("current recorded discovery")
         .selection = Some(SelectionPlan::default());
-    let mut candidates = super::super::inputs_selected_controlled(
-        root,
-        dirs,
-        pages,
-        &receipts,
-        Some(&selected),
-        read,
-    )?;
+    let mut candidates =
+        super::super::inputs_controlled(root, dirs, pages, &receipts, &scope, read)?;
     let candidate = candidates.pop().expect("same guarded audit subject");
     capture_cards(root, dirs, &candidate, read)?.guard(root, &mut mutation, read)?;
     adoption.changed = true;

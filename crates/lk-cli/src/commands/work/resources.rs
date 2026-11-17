@@ -1001,6 +1001,7 @@ fn load_audit_candidate_controlled(
     let plan = lk_graph::audit::plan_selected_controlled(
         root,
         &config.vault.dirs,
+        &config.graph.audit.subjects,
         &pages,
         1,
         &[path.to_owned()],
@@ -1620,6 +1621,7 @@ mod tests {
         let plan = lk_graph::audit::plan_selected(
             &root,
             &config.vault.dirs,
+            &config.graph.audit.subjects,
             &pages,
             1,
             &["wiki/documents/a.md".into()],

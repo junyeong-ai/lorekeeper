@@ -381,6 +381,7 @@ mod tests {
         lk_graph::audit::plan_selected_partitioned(
             root,
             &Default::default(),
+            &Default::default(),
             &pages,
             1,
             &["wiki/documents/subject.md".into()],
@@ -679,6 +680,7 @@ mod tests {
         let plan = lk_graph::audit::plan_available_partitioned(
             root.path(),
             &Default::default(),
+            &[lk_graph::audit::AuditSubjectKind::Document].into(),
             &pages,
             3,
             u64::MAX,

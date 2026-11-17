@@ -124,7 +124,7 @@ fn discovery_action_preserves_independent_recipe_and_audit_publication() {
             "    rows[0]={'subject_ref':rows[0]['subject_ref'],'status':'needs-action','queries':None,'reason':'The first subject requires an explicit source decision.'}\n    value={'subjects':rows}");
         let fixture = Fixture::new(engine, 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap()
-            + "\ngraph:\n  audit: {batch_size: 2}\n";
+            + "\ngraph:\n  audit: {batch_size: 2, subjects: [concept, document]}\n";
         std::fs::write(&fixture.config, config).unwrap();
         let directory = fixture.root().join("vault/wiki/concepts");
         std::fs::create_dir_all(&directory).unwrap();

@@ -101,7 +101,13 @@ memory, native decoder allocations, or provider usage.
 
 Semantic maintenance is optional and separate from weekly synthesis and retention.
 Enable `graph.audit.schedule` deliberately: each run uses the LLM to review at most
-`batch_size` changed/first-time concepts or declared source documents. `lore run knowledge` uses the configured
+`batch_size` changed/first-time subjects. `graph.audit.subjects` lists the kinds
+automatic plans include: `[concept]` by default, `[concept, document]` to add declared
+source documents. Coverage is `reviewed_current` of `total` over those kinds, shown by
+`lore status` and `lore wiki audit-plan`; other kinds appear only as `excluded_by_kind`
+counts and stay auditable through explicit `audit-plan --path`. Subjects are planned by
+typed risk, so lower-risk pages can wait: coverage is reported, not promised.
+`lore run knowledge` uses the configured
 execution profile; structural lint alone cannot perform the semantic read.
 For an explicitly requested initial campaign, `lore run knowledge --batches N`
 repeats bounded batches, releasing the lease between them and resuming from current

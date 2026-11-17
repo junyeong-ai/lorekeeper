@@ -6,8 +6,8 @@ fn fixture(engine: &str) -> Fixture {
         "for reply, subject in zip(value['results'], request['subjects']):\n    if subject['context']['subject']['path']=='wiki/concepts/a-held.md':\n        reply.update(status='needs-action',disposition=None,reason='The selected source requires an explicit decision.')\nif '--output-last-message' in sys.argv:",
     );
     let fixture = Fixture::new(engine, 30, &behavior);
-    let config =
-        std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 2\n";
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 2\n    subjects: [concept, document]\n";
     std::fs::write(&fixture.config, config).unwrap();
     for name in ["a-held", "b-ready"] {
         write_audit_concept(&fixture, name);
@@ -196,7 +196,7 @@ DISCOVER
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 4}\n",
-        ) + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
+        ) + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n    max_input_bytes: 4096\n";
         std::fs::write(&fixture.config, config).unwrap();
         let subject = "wiki/concepts/capacity.md";
         std::fs::create_dir_all(fixture.root().join("vault/wiki/concepts")).unwrap();

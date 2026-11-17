@@ -1144,12 +1144,12 @@ pub fn record(
         } => (path, purpose_revision),
     };
     let (before, mut receipts) = super::load_controlled(root, read)?;
-    let mut selected = super::inputs_selected_controlled(
+    let mut selected = super::inputs_controlled(
         root,
         dirs,
         pages,
         &receipts,
-        Some(&BTreeSet::from([path.as_str()])),
+        &super::Scope::Selection(BTreeSet::from([path.as_str()])),
         read,
     )?;
     let candidate = selected

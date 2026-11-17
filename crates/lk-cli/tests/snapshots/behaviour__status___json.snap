@@ -6,6 +6,26 @@ exit: 0
 --- stdout ---
 {
   "data": {
+    "audit": {
+      "changed": 0,
+      "counts_by_kind": {
+        "concept": {
+          "changed": 0,
+          "follow_up_current": 0,
+          "reviewed_current": 0,
+          "total": 4,
+          "unreviewed": 4
+        }
+      },
+      "coverage_scope": "corpus",
+      "excluded_by_kind": {
+        "document": 0
+      },
+      "follow_up_current": 0,
+      "reviewed_current": 0,
+      "total": 4,
+      "unreviewed": 4
+    },
     "subsystems": [
       {
         "name": "install",
@@ -42,6 +62,12 @@ exit: 0
         "next": "lore graph lint",
         "ok": false,
         "state": "1 violation(s)"
+      },
+      {
+        "name": "audit",
+        "next": "lore wiki audit-plan",
+        "ok": true,
+        "state": "0/4 current"
       }
     ],
     "vault": "<staged>/corpus/vault",

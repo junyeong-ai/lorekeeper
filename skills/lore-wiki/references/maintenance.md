@@ -132,8 +132,11 @@ The final audit reads every admitted body; screening creates no citation or comp
    it is not a guarantee that all statements are true.
    Candidates identify `kind: concept` or `kind: document`; document subjects are
    declared source documents under the configured wiki documents collection, including
-   nested addresses. Aggregate counts cover both kinds; `counts_by_kind` separates
-   their coverage. A document needs no corresponding concept to be selectable.
+   nested addresses. Automatic plans include the kinds in `graph.audit.subjects`,
+   concepts by default. Aggregate counts and `counts_by_kind` cover those kinds, so
+   coverage is `reviewed_current` of `total`; `excluded_by_kind` only counts the others.
+   An excluded document stays auditable through its exact `--path`, where it needs no
+   corresponding concept to be selectable.
    Native selection defers subjects with unfinished semantic work in their actual
    subject/evidence/context/review pages and can select later ready subjects without
    draining unrelated queue work. Newly discovered context can also block a selected

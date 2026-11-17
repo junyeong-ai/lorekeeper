@@ -339,6 +339,7 @@ mod tests {
         let audit = crate::audit::plan_selected(
             root,
             &lk_core::config::VaultDirs::default(),
+            &Default::default(),
             &pages,
             1,
             &[new.into()],

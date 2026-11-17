@@ -270,7 +270,7 @@ fi
     let fixture = Fixture::new("codex", 30, &behavior);
     let config=std::fs::read_to_string(&fixture.config).unwrap()
         .replace("  default_profile: primary\n","  default_profile: primary\n  work: {max_input_bytes: 8192, max_result_bytes: 1024, max_calls: 64}\n")
-        + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
+        + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n    max_input_bytes: 4096\n";
     std::fs::write(&fixture.config, config).unwrap();
     route_profiles(
         &fixture,

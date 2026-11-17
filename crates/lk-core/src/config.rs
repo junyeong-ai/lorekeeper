@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -482,6 +482,11 @@ impl Config {
         if self.graph.audit.max_input_bytes == 0 {
             return Err(ConfigError::Validation(
                 "graph.audit.max_input_bytes must be positive".into(),
+            ));
+        }
+        if self.graph.audit.subjects.is_empty() {
+            return Err(ConfigError::Validation(
+                "graph.audit.subjects must name at least one of concept, document".into(),
             ));
         }
         if let Some(schedule) = &self.graph.audit.schedule {
@@ -1577,6 +1582,9 @@ pub struct GraphAuditConfig {
     pub batch_size: usize,
     /// Complete distinct source bytes in one audit batch, not model tokens or usage.
     pub max_input_bytes: u64,
+    /// Subject kinds automatic plans and coverage include. An exact selection may
+    /// still name a subject of any kind.
+    pub subjects: BTreeSet<AuditSubjectKind>,
 }
 
 impl Default for GraphAuditConfig {
@@ -1585,8 +1593,17 @@ impl Default for GraphAuditConfig {
             schedule: None,
             batch_size: 5,
             max_input_bytes: 262_144,
+            subjects: BTreeSet::from([AuditSubjectKind::Concept]),
         }
     }
+}
+
+/// A page kind the semantic audit can assess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuditSubjectKind {
+    Concept,
+    Document,
 }
 
 impl GraphConfig {
@@ -2755,6 +2772,12 @@ sources:
             ("graph:\n  audit:\n    batch_size: 101\n", false),
             ("graph:\n  audit:\n    schedule: 'not a schedule'\n", false),
             ("graph:\n  audit:\n    batchsize: 50\n", false),
+            (
+                "graph:\n  audit:\n    subjects: [document, concept]\n",
+                true,
+            ),
+            ("graph:\n  audit:\n    subjects: []\n", false),
+            ("graph:\n  audit:\n    subjects: [exploration]\n", false),
         ] {
             let parsed = crate::yaml::from_str::<Config>(&format!("{base}{settings}"));
             match parsed {
@@ -2764,6 +2787,10 @@ sources:
                         assert!(config.graph.audit.schedule.is_none());
                         assert_eq!(config.graph.audit.batch_size, 5);
                         assert_eq!(config.graph.audit.max_input_bytes, 262_144);
+                        assert_eq!(
+                            config.graph.audit.subjects,
+                            BTreeSet::from([AuditSubjectKind::Concept])
+                        );
                     }
                 }
                 Err(_) => assert!(!valid, "{settings}"),

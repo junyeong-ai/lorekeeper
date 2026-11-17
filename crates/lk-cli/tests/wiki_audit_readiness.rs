@@ -18,7 +18,7 @@ impl Fixture {
         let vault = directory.path().join("vault");
         std::fs::write(
             &config,
-            "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\ngraph:\n  audit: {batch_size: 1}\n",
+            "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\ngraph:\n  audit: {batch_size: 1, subjects: [concept, document]}\n",
         )
         .unwrap();
         Self {
@@ -158,6 +158,56 @@ fn automatic_readiness_skips_blocked_inputs_without_reserving_or_changing_defaul
             .join(".lorekeeper/knowledge-audit.json")
             .exists()
     );
+}
+
+#[test]
+fn default_plans_and_status_cover_concepts_while_exact_paths_still_reach_documents() {
+    let fixture = Fixture::build();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace(", subjects: [concept, document]", ""),
+    )
+    .unwrap();
+    fixture.write(
+        "wiki/concepts/a.md",
+        "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA scoped claim.\n",
+    );
+    fixture.write("wiki/documents/a.md", &authored("A"));
+    let before = fixture.bytes();
+    let automatic = fixture.plan(&["wiki", "audit-plan", "--limit", "5"]);
+    assert_eq!(automatic["candidates"].as_array().unwrap().len(), 1);
+    assert_eq!(automatic["candidates"][0]["path"], "wiki/concepts/a.md");
+    assert_eq!(automatic["total"], 1);
+    assert_eq!(automatic["excluded_by_kind"], json!({"document": 1}));
+    assert!(automatic["counts_by_kind"].get("document").is_none());
+    let selected = fixture.plan(&["wiki", "audit-plan", "--path", "wiki/documents/a.md"]);
+    assert_eq!(selected["coverage_scope"], "selection");
+    assert_eq!(selected["candidates"][0]["kind"], "document");
+    assert_eq!(selected["excluded_by_kind"], json!({}));
+    let status = fixture.plan(&["status", "--json"]);
+    let audit = &status["data"]["audit"];
+    for key in [
+        "coverage_scope",
+        "total",
+        "reviewed_current",
+        "follow_up_current",
+        "unreviewed",
+        "changed",
+        "counts_by_kind",
+        "excluded_by_kind",
+    ] {
+        assert_eq!(audit[key], automatic[key], "{key}");
+    }
+    let row = status["data"]["subsystems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == "audit")
+        .unwrap();
+    assert_eq!(row["state"], "0/1 current · 1 excluded");
+    assert_eq!(row["ok"], true);
+    assert_eq!(fixture.bytes(), before);
 }
 
 #[test]

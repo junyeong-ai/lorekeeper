@@ -386,7 +386,7 @@ fn reviewed_curation_is_read_only_in_preview_guarded_and_discoverable_after_publ
     assert_eq!(coverage["coverage_scope"], "corpus");
     assert_eq!(coverage["reviewed_current"], 1);
     assert_eq!(coverage["counts_by_kind"]["concept"]["reviewed_current"], 1);
-    assert_eq!(coverage["counts_by_kind"]["document"]["unreviewed"], 1);
+    assert_eq!(coverage["excluded_by_kind"]["document"], 1);
     assert_eq!(
         ok(&config, &["wiki", "audit-plan", "--path", concept])["candidates"][0]["path"],
         concept

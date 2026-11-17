@@ -350,7 +350,7 @@ fn knowledge_reserves_pending_order_before_discovery_across_call_limited_runs() 
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_calls: 1}\n",
-        ) + "graph:\n  audit:\n    batch_size: 1\n";
+        ) + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
         std::fs::write(&fixture.config, config).unwrap();
         let documents = fixture.root().join("vault/wiki/documents");
         std::fs::create_dir_all(&documents).unwrap();
@@ -434,7 +434,7 @@ fn knowledge_discovers_unlinked_documents_before_assessment_on_both_hosts() {
         std::fs::write(
             &fixture.config,
             std::fs::read_to_string(&fixture.config).unwrap()
-                + "graph:\n  audit:\n    batch_size: 1\n",
+                + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n",
         )
         .unwrap();
         let documents = fixture.root().join("vault/wiki/documents");
@@ -670,7 +670,8 @@ fn knowledge_audit_progresses_before_unrelated_queue_backlog_and_reports_it_unfi
     fixture.ingest();
     write_audit_concept(&fixture, "stable");
     let config = std::fs::read_to_string(&fixture.config).unwrap()
-        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 262144, max_result_bytes: 65536, max_calls: 1}\n");
+        .replace("  default_profile: primary\n", "  default_profile: primary\n  work: {max_input_bytes: 262144, max_result_bytes: 65536, max_calls: 1}\n")
+        + "graph:\n  audit:\n    subjects: [concept, document]\n";
     std::fs::write(&fixture.config, config).unwrap();
     let (output, result) = fixture.run("knowledge");
     assert!(
@@ -747,7 +748,9 @@ if [ "$status" -ne 100 ]; then exit "$status"; fi
             let config = std::fs::read_to_string(&fixture.config)
                 .unwrap()
                 .replace("concept_policy: supported-new", "concept_policy: disabled")
-                + &format!("graph:\n  audit:\n    batch_size: {batch_size}\n");
+                + &format!(
+                    "graph:\n  audit:\n    batch_size: {batch_size}\n    subjects: [concept, document]\n"
+                );
             std::fs::write(&fixture.config, config).unwrap();
             fixture.ingest();
             let documents = fixture.root().join("vault/wiki/documents");
@@ -926,6 +929,9 @@ fn knowledge_defers_selected_evidence_with_unfinished_semantics_and_record_reche
 #[test]
 fn current_authored_assessment_does_not_hide_unfinished_bookkeeping_or_force_a_reread() {
     let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
     let path = fixture.root().join("vault/wiki/documents/subject.md");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let ready = "---\ntype: document\ntitle: Subject\nllm_inputs: {summary: captured, summary_done: captured}\n---\n## Summary\nA completed interpretation.\n";
@@ -1200,8 +1206,8 @@ fn audit_exit_zero_without_assessments_is_incomplete() {
 #[test]
 fn unrelated_review_drift_remains_visible_while_knowledge_campaign_progresses() {
     let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
-    let config =
-        std::fs::read_to_string(&fixture.config).unwrap() + "graph:\n  audit:\n    batch_size: 1\n";
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
     std::fs::write(&fixture.config, config).unwrap();
     for name in ["a", "b"] {
         write_audit_concept(&fixture, name);
@@ -1307,7 +1313,7 @@ fn scoped_review_reassessment_preserves_independent_scheduled_audits() {
         let config = std::fs::read_to_string(&fixture.config)
             .unwrap()
             .replace("execution:\n", "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: null, max_run_seconds: 60}\n")
-            + "graph:\n  audit:\n    batch_size: 2\n";
+            + "graph:\n  audit:\n    batch_size: 2\n    subjects: [concept, document]\n";
         std::fs::write(&fixture.config, config).unwrap();
         write_audit_concept(&fixture, "a");
         write_review_attention(&fixture, "wiki/concepts/a.md", false);
@@ -1495,7 +1501,7 @@ fn bounded_audit_fixture(engine: &str, max_calls: usize, behavior: &str) -> Fixt
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "  default_profile: primary\n",
         &format!("  default_profile: primary\n  work: {{max_input_bytes: 8192, max_result_bytes: 1024, max_calls: {max_calls}}}\n"),
-    ) + "graph:\n  audit:\n    batch_size: 1\n    max_input_bytes: 4096\n";
+    ) + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n    max_input_bytes: 4096\n";
     std::fs::write(&fixture.config, config).unwrap();
     write_audit_concept(&fixture, "large");
     let path = fixture.root().join("vault/wiki/concepts/large.md");
@@ -4942,7 +4948,7 @@ fn knowledge_campaign_releases_each_lease_and_stops_on_failure_without_losing_pr
         );
         let fixture = Fixture::new("codex", 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap()
-            + "graph:\n  audit:\n    batch_size: 1\n";
+            + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
         std::fs::write(&fixture.config, config).unwrap();
         for name in ["a", "b"] {
             write_audit_concept(&fixture, name);
@@ -5037,7 +5043,7 @@ MERGE
         );
         let fixture = Fixture::new("codex", 30, &behavior);
         let config = std::fs::read_to_string(&fixture.config).unwrap()
-            + "graph:\n  audit:\n    batch_size: 1\n";
+            + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
         std::fs::write(&fixture.config, config).unwrap();
         let concepts = fixture.root().join("vault/wiki/concepts");
         std::fs::create_dir_all(&concepts).unwrap();

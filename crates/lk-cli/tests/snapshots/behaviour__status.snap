@@ -12,3 +12,4 @@ lore <version>  <staged>/corpus/vault
   · queue    drained                                     /lore-process
   · pages    5 clean                                     lore doctor
   ! graph    1 violation(s)                              lore graph lint
+  · audit    0/4 current                                 lore wiki audit-plan

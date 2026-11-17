@@ -253,7 +253,7 @@ fn scheduled_invocation_limit_survives_completed_audit_batch_boundaries() {
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
             "  default_profile: primary\n",
             "  default_profile: primary\n  work: {max_calls: 1}\n",
-        ) + "graph:\n  audit:\n    batch_size: 1\n";
+        ) + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
         std::fs::write(&fixture.config, config).unwrap();
         for name in ["first", "second"] {
             write_audit_concept(&fixture, name);

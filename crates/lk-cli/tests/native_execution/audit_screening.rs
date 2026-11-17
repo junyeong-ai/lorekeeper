@@ -135,7 +135,7 @@ fn fixture(
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "  default_profile: primary\n",
         &format!("  default_profile: primary\n  work: {{max_input_bytes: 65536, max_result_bytes: 16384, max_calls: 1{limit}}}\n"),
-    ) + if capacity { "graph:\n  audit: {batch_size: 2}\n" } else { "graph:\n  audit: {batch_size: 1}\n" };
+    ) + if capacity { "graph:\n  audit: {batch_size: 2, subjects: [concept, document]}\n" } else { "graph:\n  audit: {batch_size: 1, subjects: [concept, document]}\n" };
     std::fs::write(&fixture.config, config).unwrap();
     std::fs::write(fixture.root().join("screen-mode"), mode).unwrap();
     let vault = fixture.root().join("vault");
