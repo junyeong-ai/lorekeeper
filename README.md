@@ -32,7 +32,7 @@ Markdown이 지식의 기준이며, SQLite는 다시 만들 수 있는 검색 �
 ## 빠른 시작
 
 먼저 로컬 메모 한 개로 시작하세요. 외부 소스의 자격증명은 필요 없습니다.
-macOS Apple Silicon 또는 Linux x86_64/ARM64와 로그인한 **Claude Code 또는 Codex**가 필요합니다.
+macOS Apple Silicon 또는 Linux x86_64/ARM64와 로그인한 **Claude Code**(`>=2.1.303,<3`) **또는 Codex**(`>=0.163.0,<1`) CLI가 필요합니다.
 Obsidian은 선택 사항입니다. Windows 설치본은 제공하지만 네이티브 에이전트 실행과 `workflow`는 Unix 전용입니다.
 
 ### 1. 설치
@@ -52,8 +52,9 @@ cp -n "$LORE_CONFIG_DIR/config.starter.yaml" "$LORE_CONFIG_DIR/config.yaml"
 ${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"
 ```
 
-기존 설정은 보존됩니다. `vault.root`, `vault.timezone`, `vault.locale`, `identity`와
-`execution.profiles.primary.engine`(`claude-code` 또는 `codex`)을 맞추세요.
+기존 설정은 보존됩니다. `vault.root`, `vault.timezone`, `vault.locale`(`ko` 또는 `en`, 스타터는 `ko`),
+`identity`와 `execution.profiles.primary.engine`(`claude-code` 또는 `codex`)을 맞추세요.
+Lore는 이 파일보다 작업 디렉터리의 `./config.yaml`을 먼저 읽습니다. 다른 설정은 `--config`나 `LORE_CONFIG`로 지정합니다.
 
 ```bash
 lore validate
@@ -61,7 +62,7 @@ lore schema
 mkdir -p "$(lore config vault-root)/inbox"
 ```
 
-`validate`는 로컬 설정을 확인하고, `schema`는 볼트의 작성 규칙 `AGENTS.md`를 생성합니다.
+`validate`는 로컬 설정을 확인하고, `schema`는 볼트의 페이지 작성 규칙을 `wiki/AGENTS.md`에 씁니다.
 설정·인증의 상세 절차는 [초기 설정](skills/lore-setup/references/config.md#initial-setup)을 따르세요.
 
 ### 3. 메모를 넣고 실행
@@ -73,37 +74,41 @@ lore ingest --dry-run   # 입력 확인; 페이지는 쓰지 않음
 lore run daily         # 수집 → 의미 처리 → 게시와 최종 검사
 ```
 
+게시가 끝나면 스타터의 inbox 설정이 메모를 `inbox/archived/`로 옮깁니다.
 수집만 하려면 `lore ingest`, 수집된 기록의 남은 작업만 처리하려면 `lore run process`를 사용합니다.
-큰 작업은 여러 호출과 실행에 걸칠 수 있습니다.
+`lore run`은 `--batches N`으로 늘리지 않으면 한 배치만 실행하므로, 큰 작업은 여러 번의 실행에 걸칠 수 있습니다.
 
 ### 4. 결과와 근거 확인
 
 ```bash
 lore queue check
 lore wiki reviews --check
-lore wiki search "메모의 핵심 주제" --json
+lore wiki search "메모의 핵심 주제"
 ```
 
 검색된 페이지에서 설명과 연결된 출처를 함께 확인하세요. 기본 저장 위치는
-`daily/`, `wiki/documents/`, `wiki/concepts/`, `wiki/explorations/`이며 설정할 수 있습니다.
-Obsidian에서는 상대 경로 Markdown 링크를 사용하세요. `lore validate`가 관련 설정을 확인합니다.
+`daily/`, `wiki/documents/`, `wiki/concepts/`, `wiki/explorations/`이며, `vault.dirs`로 `daily/`와 `wiki/` 최상위 디렉터리 이름을 바꿀 수 있습니다.
+Obsidian에서는 Settings → Files and links에서 Use [[Wikilinks]]를 끄고 New link format을 Relative path to file로 지정하세요.
+볼트의 Obsidian 설정이 다르면 `lore validate`가 경고합니다.
 
 ## 지식을 찾고 활용하기
 
 Claude Code에서는 `/lore-wiki query 재시도 정책을 정한 근거는?`, Codex에서는 `$lore-wiki`와 질문을 사용하세요.
+볼트에 쓰는 세션(기록, 소스 추가, 추출, 큐 처리)은 `lore workflow -- claude` 또는 `lore workflow -- codex`로 시작하세요.
+다른 방식으로 시작한 세션이면 스킬이 세션을 다시 시작하도록 안내합니다.
 
 | 하고 싶은 일 | 스킬 |
 |---|---|
-| 근거 검색·관계 검토·현재 작업의 배움 기록 | `lore-wiki` (`query`, `capture`) |
+| 근거 검색·소스 추가·현재 작업의 배움 기록·관계 감사 | `lore-wiki` (`query`, `add`, `capture`, `audit`) |
 | 저장소 문서·코드에서 지식 추출 | `lore-extract` (`scan → run → audit`) |
 | 소스 설정 / 수집·스케줄 / 남은 의미 작업 | `lore-setup` / `lore-ingest` / `lore-process` |
 | 오늘 할 일·지식 브리핑·완료 기록 | `lore-day` — 개인 보드는 선택 사항 |
 
-기본 검색은 개념의 자동 출처 안내문을 제외하며, `--body`로 원문을 검색할 수 있습니다.
+`lore wiki search --body`는 페이지의 Markdown 본문을 줄 단위로 그대로 검색합니다.
 아래 경로는 실제 검색 결과로 바꾸세요.
 
 ```bash
-lore wiki search "재시도" --json
+lore wiki search "재시도"
 lore wiki read wiki/concepts/retry-policy.md
 ```
 
@@ -127,44 +132,42 @@ lore wiki read wiki/concepts/retry-policy.md
 | `manual` | 로컬 텍스트·지원되는 바이너리 문서 | 기본 입력은 인증 불필요 |
 | `tasks` | 완료한 할 일·메모 | 인증 불필요 |
 
-필요한 소스만 [전체 설정 예제](config.example.yaml)에서 복사해 활성화하세요. 같은 타입을 여러 개 둘 수 있습니다.
+필요한 소스만 `$LORE_CONFIG_DIR`에 설치된 `config.example.yaml`에서 복사해 활성화하세요. 설치된 예제는 바이너리 버전과 일치합니다
+([저장소 사본](config.example.yaml)). 같은 타입을 여러 개 둘 수 있습니다.
 인증은 `lore init credentials`, 소스 접근 확인은 `lore ingest --dry-run SOURCE_ID`를 사용합니다.
+자격증명은 `credentials.file`로 다른 경로를 지정하지 않으면 `<vault>/.lorekeeper/credentials.json`에 저장됩니다. `.lorekeeper/`는 Git과 공유 동기화에서 제외하세요.
 DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/config.md#document-preprocessing)이 필요할 수 있습니다.
 개념 추출은 소스의 `concept_policy`로 켜며, 생략하면 꺼집니다.
 
 ## 에이전트와 실행 설정
 
+에이전트는 두 방식으로 동작합니다. 스킬은 사용자가 시작한 Claude Code나 Codex 세션 안에서 질문·기록·추출을 수행합니다.
+`lore run`과 예약 작업은 `execution.profiles`가 고른 `claude` 또는 `codex` CLI를 직접 실행합니다.
+이 호출은 해당 CLI 계정의 사용량을 쓰며, 예산은 토큰이 아니라 에이전트 호출 횟수로 셉니다.
+
 최소 설정은 [스타터](config.starter.yaml)를 사용하세요. 프로필 선택 순서는
 `--profile` → 작업별 `execution.operations` → `execution.default_profile`입니다.
 [단계별 프로필](skills/lore-setup/references/config.md#optional-stage-profiles)은 필요한 단계만 설정할 수 있고,
 생략한 단계는 선택된 기본 프로필을 그대로 사용합니다. 실패 시 호스트를 자동 전환하지 않습니다.
-지원 CLI는 Claude Code `>=2.1.303,<3`, Codex `>=0.163.0,<1`입니다.
 
 기본 배치 예산은 **64회 호출·동시 실행 1개·입력 262144B·결과 32768B**입니다.
 `execution.work`와 프로필별 선택적 덮어쓰기로 조정하며, 단계가 바뀌어도 예산은 공유합니다.
 이는 토큰·요금 상한이나 품질 보장이 아닙니다. [실행 설정](skills/lore-setup/references/config.md#execution-profiles)을 참고하세요.
 
-새 읽기 계획은 전송 바이트와 별도로 **노드당 최대 8만 Unicode 문자**를 배정합니다.
-원래 읽기 노드가 명시적으로 더 작은 단위를 요청하면 같은 예산 안에서 한 번 분할할 수 있습니다.
-기존 유료 계획·관측과 일반 보류는 유지하며, 자식을 자동으로 계속 나누지 않습니다.
-취합·최종화는 별도 크기 제한을 따릅니다. 작은 단위가 충실한 완독이나 최종 완료를 보장하지는 않습니다.
-상태·명시적 복구 절차는 [대용량 작업](skills/lore-process/references/bounded-work.md)에 있습니다.
-분할 작업의 최종화는 관찰에서 빠진 근거를 같은 Work의 보존 원문에서 필요한 구간만 다시 읽어 확인할 수 있습니다.
-원문 읽기는 현재 입력을 재검증하며, 기존 관찰이나 완료 기록을 변경하지 않습니다.
+큰 입력은 제한된 크기로 나누어 읽고, 끝난 호출의 결과는 돌아오는 즉시 저장합니다.
+그래서 예산에 걸려 멈춘 실행도 이미 끝난 호출을 반복하지 않고 이어서 진행합니다. [대용량 작업](skills/lore-process/references/bounded-work.md)을 참고하세요.
+개념 추출은 소스마다 질의별로 검색 순위가 높은 기존 페이지 최대 `execution.work.max_query_candidates`개(기본 50개)와
+이름·별칭이 정확히 일치하는 페이지를 비교합니다. [탐색 안내](skills/lore-process/references/discovery.md)를 참고하세요.
 
-개념 추출은 질의마다 기존 검색 순위 상위 50개(`execution.work.max_query_candidates`)와 이름·별칭이 정확히 일치하는 페이지만 후보로 판단합니다.
-판정은 후보별로 저장되므로, 카드가 바뀌지 않은 후보는 다른 페이지가 바뀌어도 다시 판단하지 않습니다. 본문을 읽지 않은 후보의 변경은 게시를 막지 않습니다.
-
-자동 감사는 `graph.audit.subjects`에 지정한 유형(기본값은 개념)만 계획합니다. 변경된 주제와 처음 보는 주제를 번갈아 고르고, 각 묶음 안에서는 검토 의무, 후속 조치 기록, 인용 페이지 수, 이미 시작한 탐색 순으로 진행합니다.
-`lore status`의 audit 행은 현재 평가가 유효한 주제의 비율을 보여 줍니다. 위험이 낮은 주제는 뒤로 밀릴 수 있으며 전체 감사를 약속하지 않습니다.
-새 감사 탐색은 전체 후보를 제한된 패킷으로 판단하고, 입력이 같은 판단을 재사용합니다.
-선택한 문맥은 본문을 읽으며 필수 근거와 직접 링크는 항상 유지합니다.
-미판정·명시적 보류 후보가 있으면 완료할 수 없습니다. [후보 판단 절차](skills/lore-wiki/references/maintenance.md#candidate-screening)를 참고하세요.
+자동 감사는 `graph.audit.subjects`에 지정한 유형(기본값은 개념)만 계획합니다. 변경된 주제와 아직 평가하지 않은 주제를 번갈아 고르고,
+각 묶음 안에서는 검토 의무, 후속 조치 기록, 인용 페이지 수, 이미 시작한 탐색 순으로 진행합니다. `lore status`의 audit 행은
+현재 평가가 유효한 주제의 비율을 보여 줍니다. 위험이 낮은 주제는 뒤로 밀릴 수 있으며 전체 감사를 약속하지 않습니다.
 
 ## 운영과 완료 확인
 
 | 목적 | 명령 |
 |---|---|
+| 전체 상태·중지된 작업과 다음 명령 | `lore status` |
 | 수집부터 처리·게시까지 | `lore run daily` |
 | 수집된 기록의 남은 큐 작업 | `lore run process` |
 | 준비된 지식 감사 한 배치와 후속 큐 처리 | `lore run knowledge` |
@@ -173,26 +176,23 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 | 마지막 수집 성공과 최근 부분 수집·실패 구분 | `lore health --json` |
 | 저장소 탐색 변경 / 보존된 추출 입력 검증 | `lore extract status --json`, `lore extract verify --json` |
 
-`process --batches N`과 `knowledge --batches N`은 명시적 배치 상한입니다.
-`process`는 호출 예산 소진 뒤 새로 저장한 진척이 있을 때 다음 배치로 진행합니다.
-`knowledge`는 검증된 감사나 새로 보존한 처리 진척을 기준으로 이어갈 수 있습니다. 중간 진척은 감사 완료를 뜻하지 않습니다.
-치명적·알 수 없는 오류, 취소나 진행 조건을 충족하지 못한 보류에서는 멈춥니다.
-일부 게시가 성공해도 전체 작업은 미완료일 수 있습니다. 결과와 남은 상태를 확인하고,
-같은 보류를 원인 확인 없이 반복 호출하거나 기존 답변의 리비전만 바꾸어 채택하지 마세요.
-
-`lore run knowledge` 실행 중 검토 문서 생성이나 수정으로 입력이 바뀌면, 같은 호출 예산 안에서 한 번 새로 계획하고 읽습니다.
-다시 바뀌면 해당 주제를 보류합니다. 이전 관측은 보존하며, 오래된 평가를 새 입력의 완료로 인정하지 않습니다.
+일부 결과를 게시하고도 작업 전체는 미완료로 끝날 수 있습니다. 다시 실행하기 전에 `lore status`와 작업 보고를 확인하세요.
 
 정기 실행은 `lore schedule`로 정의를 출력한 뒤 [스케줄링 절차](skills/lore-ingest/references/scheduling.md)에 따라 OS에 등록합니다.
-`execution.automation`을 설정하면 대기열 소진을 별도로 예약하고, 기존 수집·감사 예약도 공통 UTC 일일 호출 한도와 실행시간 안에서 진행합니다. 필수 항목인 `max_calls_per_day`를 `null`로 지정하면 일일 한도를 해제하며, 실행별 제한과 오류 시 일시 중지는 유지합니다.
-`lore status`에서 호출 예약량과 중지 상태, 중지를 일으킨 단계를 확인합니다. 치명적 추론 장애는 해당 작업의 추론을 일시 중지하며, 원인 해결 후 `lore run OPERATION --scheduled --resume`으로 재개합니다.
-도구 없는 Inspect/Reduce 호출의 시간 초과는 같은 요청에 한 번만 자동 재시도합니다. 반복 시간 초과, 확인된 비정상 종료와 사용할 수 없는 응답은 해당 입력을 보류하며 독립적으로 성공한 결과는 보존합니다. 원인 해결 후 `lore work retry WORK NODE --dry-run`으로 확인하고 `lore work retry WORK NODE`로 운영 보류를 해제합니다. 이미 실패한 입력은 `lore work hold WORK NODE --reason "..."`로 호출 없이 보류할 수 있습니다. 사용량, 유료 관찰과 의미적 보류는 유지됩니다. 도구를 쓰는 최종화의 시간 초과와 확인된 비정상 종료도 해당 요청만 보류하며, 큐 작업은 `lore work retry-generation`, 감사는 `lore work retry-preparation --stage audit-assessment`로 해제합니다.
-수동 쓰기 에이전트는 근거를 읽기 **전에** `lore workflow -- claude` 또는 `lore workflow -- codex`로 시작하세요.
-네이티브 실행은 같은 보호를 직접 소유하며, 실행 중에는 설정과 볼트 선택이 고정됩니다.
-대기자가 있으면 예약 `process`·`knowledge`는 호출 결과를 보존한 처리 경계에서 실행권을 넘깁니다. 재획득해도 호출·시간·재검토 예산은 갱신되지 않습니다.
+launchd 작업은 `~/Library/Logs/lorekeeper`에 기록하므로 등록하기 전에 이 디렉터리를 만드세요. cron 출력은 crontab의 메일·리다이렉션 설정을 따릅니다.
+`execution.automation`을 설정하면 큐 처리를 별도로 예약하고, 모든 예약 작업이 하나의 UTC 일일 호출 한도와 실행별 시간 제한을 공유합니다.
+이 설정에는 `process_schedule`, `max_run_seconds`, `max_calls_per_day`가 필수이며, `max_calls_per_day`를 `null`로 지정하면 일일 한도가 없습니다.
 
-업데이트는 `lore self update`, 설치 상태 확인은 `lore self status`를 사용합니다.
-백업은 숨김 상태를 포함한 전체 볼트를 보존해야 합니다. 유료 관측·큐·검토 이력은 캐시가 아닙니다.
+신호에 의한 종료나 알 수 없는 호스트 오류처럼 입력 하나로 한정할 수 없는 실패가 나면 해당 작업의 예약 실행이 일시 중지됩니다.
+`lore status`가 중지를 일으킨 단계를 보여 줍니다. 원인을 해결한 뒤 `lore run OPERATION --scheduled --resume`으로 재개하세요.
+한 입력에서 시간 초과가 반복되거나 호출이 오류 코드로 끝나면 그 입력만 보류됩니다.
+끝난 결과는 저장된 채로 남고 다른 작업은 계속 진행되며, 보류된 입력은 해제하거나 입력이 바뀔 때까지 다시 호출되지 않습니다.
+`/lore-process`에 진단과 해제를 맡기거나, 정확한 `lore work retry` 명령은 [계획과 재개](skills/lore-process/references/bounded-work.md#plan-and-resume)를 따르세요. 각 명령은 `--dry-run`으로 먼저 확인할 수 있습니다.
+
+업데이트는 `lore self update`, 설치 상태 확인은 `lore self status`를 사용합니다. 큐 작업이나 중단된 게시가 남아 있으면 업데이트를 거부하며,
+`--force`를 쓸 조건은 [설치 안내](skills/lore-ingest/references/installation.md#update-and-repair)에 있습니다.
+백업은 숨김 상태를 포함한 전체 볼트와 `config.yaml`을 함께 보존해야 합니다. 에이전트 호출 결과·큐·검토 이력은 캐시가 아닙니다.
+백업에는 자격증명이 들어 있으므로 백업 자체를 보호하세요.
 Unix의 `lore self snapshot -- 백업명령 인수...`는 백업 동안 협력 쓰기를 차단합니다.
 백업 명령 안에서 Lore를 호출하지 말고, 외부 편집기를 중지한 뒤 백업 내용도 검증하세요.
 [설치·백업·복구](skills/lore-ingest/references/installation.md), [큐 복구](skills/lore-process/references/recovery.md),

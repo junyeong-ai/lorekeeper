@@ -32,7 +32,7 @@ Markdown is authoritative; SQLite is a rebuildable search index.
 ## Quick start
 
 Start with one local note. No external source credentials are needed.
-Use macOS Apple Silicon or Linux x86_64/ARM64 with an authenticated **Claude Code or Codex** CLI.
+Use macOS Apple Silicon or Linux x86_64/ARM64 with an authenticated **Claude Code** (`>=2.1.303,<3`) **or Codex** (`>=0.163.0,<1`) CLI.
 Obsidian is optional. A Windows CLI is available, but native agent jobs and `workflow` require Unix.
 
 ### 1. Install
@@ -52,8 +52,9 @@ cp -n "$LORE_CONFIG_DIR/config.starter.yaml" "$LORE_CONFIG_DIR/config.yaml"
 ${EDITOR:-vi} "$LORE_CONFIG_DIR/config.yaml"
 ```
 
-Existing configuration is preserved. Set `vault.root`, `vault.timezone`, `vault.locale`, `identity`
-and `execution.profiles.primary.engine` (`claude-code` or `codex`).
+Existing configuration is preserved. Set `vault.root`, `vault.timezone`, `vault.locale` (`ko` or `en`; the starter uses `ko`),
+`identity` and `execution.profiles.primary.engine` (`claude-code` or `codex`).
+Lore reads `./config.yaml` in the working directory before this file; select another with `--config` or `LORE_CONFIG`.
 
 ```bash
 lore validate
@@ -61,7 +62,7 @@ lore schema
 mkdir -p "$(lore config vault-root)/inbox"
 ```
 
-`validate` checks local configuration; `schema` generates the vault's writing rules in `AGENTS.md`.
+`validate` checks local configuration; `schema` writes the vault's page rules to `wiki/AGENTS.md`.
 Follow [initial setup](skills/lore-setup/references/config.md#initial-setup) for configuration and authentication details.
 
 ### 3. Add a note and run
@@ -73,37 +74,41 @@ lore ingest --dry-run   # Check inputs without writing pages
 lore run daily         # Collect → interpret → publish and run final checks
 ```
 
+After publication the starter's inbox moves the note to `inbox/archived/`.
 Use `lore ingest` for collection alone or `lore run process` for pending work on collected records.
-Large tasks may span multiple calls and runs.
+Each `lore run` performs one batch unless `--batches N` allows more, so large tasks may span several runs.
 
 ### 4. Check results and evidence
 
 ```bash
 lore queue check
 lore wiki reviews --check
-lore wiki search "your note's main topic" --json
+lore wiki search "your note's main topic"
 ```
 
 Read the returned pages together with their linked sources. Default locations are
-`daily/`, `wiki/documents/`, `wiki/concepts/` and `wiki/explorations/`; these are configurable.
-Use relative Markdown links in Obsidian. `lore validate` checks the relevant settings.
+`daily/`, `wiki/documents/`, `wiki/concepts/` and `wiki/explorations/`; `vault.dirs` can rename the `daily/` and `wiki/` roots.
+In Obsidian, open Settings → Files and links, turn off Use [[Wikilinks]] and set New link format to Relative path to file.
+`lore validate` warns when the vault's Obsidian settings differ.
 
 ## Find and use knowledge
 
 In Claude Code, ask `/lore-wiki query What evidence led to the retry policy?`; in Codex, select `$lore-wiki` and ask your question.
+Start a session that will write to the vault (capture, add, extract, process) with `lore workflow -- claude` or `lore workflow -- codex`;
+the skills ask you to restart a session started otherwise.
 
 | Goal | Skill |
 |---|---|
-| Find evidence, examine relationships, capture learning from current work | `lore-wiki` (`query`, `capture`) |
+| Find evidence, add sources, capture learning from current work, audit relationships | `lore-wiki` (`query`, `add`, `capture`, `audit`) |
 | Extract knowledge from repository documents and code | `lore-extract` (`scan → run → audit`) |
 | Configure sources / collect and schedule / process pending semantic work | `lore-setup` / `lore-ingest` / `lore-process` |
 | Daily tasks, knowledge brief and completion notes | `lore-day` — the personal board is optional |
 
-CLI search excludes concepts' exact generated Sources guidance; `--body` searches raw Markdown.
+`lore wiki search --body` matches the literal Markdown lines of pages.
 Replace the example path with an actual search result.
 
 ```bash
-lore wiki search "retry" --json
+lore wiki search "retry"
 lore wiki read wiki/concepts/retry-policy.md
 ```
 
@@ -127,44 +132,43 @@ An empty concept result is valid when nothing should be extracted.
 | `manual` | Local text and supported binary documents | Basic input needs no authentication |
 | `tasks` | Completed tasks and notes | No authentication |
 
-Copy and enable only the sources you need from the [full configuration example](config.example.yaml). Multiple sources can share a type.
+Copy and enable only the sources you need from the installed `config.example.yaml` in `$LORE_CONFIG_DIR`, which matches your binary
+([repository copy](config.example.yaml)). Multiple sources can share a type.
 Use `lore init credentials` for authentication and `lore ingest --dry-run SOURCE_ID` to check access.
+Credentials are stored in `<vault>/.lorekeeper/credentials.json` unless `credentials.file` names another path; keep `.lorekeeper/` out of Git and shared sync.
 DOCX, XLSX, PDF and images may require [preprocessing configuration](skills/lore-setup/references/config.md#document-preprocessing).
 Concept extraction is enabled by the source's `concept_policy`; omission disables it.
 
 ## Agents and execution settings
 
+Agents work in two ways. Skills run inside the Claude Code or Codex sessions you start, for questions, capture and extraction.
+`lore run` and scheduled jobs launch the configured `claude` or `codex` CLI themselves, as `execution.profiles` selects;
+those calls use that CLI account's allowance and are budgeted as agent calls, not tokens.
+
 Use the [starter](config.starter.yaml) for minimal configuration. Profile precedence is
 `--profile` → operation-specific `execution.operations` → `execution.default_profile`.
 [Stage profiles](skills/lore-setup/references/config.md#optional-stage-profiles) are optional: map only the stages you need,
 and omitted stages inherit the selected base profile. Failure never selects another host automatically.
-Supported CLIs are Claude Code `>=2.1.303,<3` and Codex `>=0.163.0,<1`.
 
 Default per-batch budgets are **64 calls, concurrency 1, input 262144B and result 32768B**.
 Configure `execution.work` with optional per-profile overrides; stages share the originating job's budgets.
 These are not token, billing or quality guarantees. See [execution profiles](skills/lore-setup/references/config.md#execution-profiles).
 
-New reading plans assign **at most 80000 Unicode scalars per node**, separately from transmission bytes.
-An original reading node may explicitly request smaller units, allowing one split within the same budgets.
-Existing paid plans, observations and ordinary holds are preserved; children do not split automatically again.
-Reduction and finalization keep their separate size limits. Smaller units do not guarantee faithful reading or final completion.
-See [bounded work](skills/lore-process/references/bounded-work.md) for status and explicit recovery procedures.
-Bounded finalizers can reread necessary retained-source ranges when observations omit required evidence.
-These reads revalidate current inputs and leave existing observations and completion records unchanged.
+Large inputs are read in bounded pieces, and each completed call's result is saved as it returns,
+so a run that stops at its budget resumes without repeating finished calls; see [bounded work](skills/lore-process/references/bounded-work.md).
+Concept extraction compares each source with at most `execution.work.max_query_candidates` (default 50) best-ranked
+existing pages per query, plus every exact title or alias match; see [discovery](skills/lore-process/references/discovery.md).
 
-Concept extraction screens, per query, the 50 best-ranked existing pages (`execution.work.max_query_candidates`) plus every exact title or alias match.
-Decisions are stored per candidate, so an unchanged card keeps its decision when other pages change, and changes to candidates whose body was not read never block publication.
-
-Automatic audits plan only the kinds in `graph.audit.subjects` (concepts by default). Changed and first-time subjects rotate, and each class is ordered by scoped review obligations, a recorded follow-up, citing pages and discovery already started.
-The `audit` row of `lore status` reports the share of subjects with a current assessment. Lower-risk subjects can wait, and full coverage is not promised.
-Fresh audit discovery screens the complete match inventory in bounded packets and reuses unchanged decisions.
-Only admitted context receives full reads; mandatory evidence and direct links remain required.
-Unknown or explicitly deferred candidates prevent completion. See [candidate screening](skills/lore-wiki/references/maintenance.md#candidate-screening).
+Automatic audits plan only the kinds in `graph.audit.subjects` (concepts by default). They alternate between changed and
+never-assessed subjects and take each group in order of scoped review obligations, a recorded follow-up, citing pages and
+discovery already started. The `audit` row of `lore status` shows the share of subjects with a current assessment;
+lower-risk subjects can wait, and full coverage is not promised.
 
 ## Operations and completion
 
 | Goal | Command |
 |---|---|
+| Overall state, paused operations and the next command | `lore status` |
 | Collect, process and publish | `lore run daily` |
 | Process the queue for collected records | `lore run process` |
 | Audit one ready knowledge batch, then process dependent queue work | `lore run knowledge` |
@@ -173,26 +177,25 @@ Unknown or explicitly deferred candidates prevent completion. See [candidate scr
 | Distinguish last collection success from recent partial reach or failure | `lore health --json` |
 | Check discovery changes / verify retained extraction inputs | `lore extract status --json`, `lore extract verify --json` |
 
-`process --batches N` and `knowledge --batches N` are explicit batch ceilings.
-`process` continues after call-budget exhaustion with newly retained progress.
-Verified audits or newly retained progress can advance `knowledge`; intermediate progress does not establish audit completion.
-Fatal or unknown errors, cancellation and holds without qualifying progress stop the campaign.
-Some publication can succeed while the overall job remains incomplete. Check results and remaining state;
-do not repeat an unchanged hold without diagnosing it or adopt an old answer by replacing its revisions.
-
-If review creation or repair changes a native audit's inputs, it replans and rereads once within the same call budget.
-Further changes defer that subject. Predecessor observations remain intact; an old assessment cannot complete new inputs.
+A job can publish some results and still end incomplete. Check `lore status` and the job's report before running it again.
 
 Generate schedule definitions with `lore schedule`, then register them with the OS using the [scheduling procedure](skills/lore-ingest/references/scheduling.md).
-With `execution.automation`, queue draining gets its own schedule; collection and audit schedules share the same UTC-day invocation allowance and run-duration policy. Set the required `max_calls_per_day` to `null` for no daily cap; per-run limits and failure pauses still apply.
-`lore status` shows reservations, pauses and the stage that caused each pause. Fatal inference errors pause that operation's semantic phase; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
-Tool-free Inspect/Reduce timeouts receive one automatic retry per exact request. Repeated timeouts, confirmed nonzero exits and unusable replies hold that input; independent successful results remain saved. After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then clear its operational hold with `lore work retry WORK NODE`. Use `lore work hold WORK NODE --reason "..."` to suspend a known failed input without calling the host. Usage, paid observations and semantic holds remain intact. Confirmed timeouts and nonzero exits of tool-enabled finalizers also hold only their request: release queue tasks with `lore work retry-generation` and audit subjects with `lore work retry-preparation --stage audit-assessment`.
-Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
-Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.
-Scheduled `process` and `knowledge` yield at a retained-work checkpoint when another workflow waits. Reacquisition renews neither calls, time nor replan allowances.
+launchd jobs write to `~/Library/Logs/lorekeeper` (create it before loading them); cron output follows your crontab's mail or redirection.
+With `execution.automation`, queue processing gets its own schedule and every scheduled job shares one UTC-day call allowance
+and per-run duration limit. It requires `process_schedule`, `max_run_seconds` and `max_calls_per_day` (`null` for no daily cap).
 
-Use `lore self update` to update and `lore self status` to check installation coherence.
-Back up the entire vault, including hidden state. Paid observations, queues and review history are not caches.
+When an agent call fails in a way that cannot be confined to one input, such as a signal exit or an unknown host error,
+scheduled runs of that operation pause. `lore status` names the stage that stopped it;
+fix that cause and continue with `lore run OPERATION --scheduled --resume`.
+A call that keeps timing out or exits with an error on one input holds only that input:
+completed results stay saved, independent work continues, and the held input is not called again until you release it or it changes.
+Ask `/lore-process` to diagnose and release it, or follow [plan and resume](skills/lore-process/references/bounded-work.md#plan-and-resume)
+for the exact `lore work retry` commands, each previewable with `--dry-run`.
+
+Use `lore self update` to update and `lore self status` to check installation coherence. Updates refuse while queue work
+or interrupted publication is outstanding; [installation](skills/lore-ingest/references/installation.md#update-and-repair) explains `--force`.
+Back up the entire vault, including hidden state, and your `config.yaml`. Agent results, queues and review history are not caches.
+Protect the backup: it contains your credentials.
 On Unix, `lore self snapshot -- BACKUP_COMMAND ARGS...` excludes cooperating writers during backup.
 Do not invoke Lore inside the backup command. Stop external editors and verify the backup contents too.
 See [installation, backup and restore](skills/lore-ingest/references/installation.md), [queue recovery](skills/lore-process/references/recovery.md)
