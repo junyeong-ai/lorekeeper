@@ -310,8 +310,7 @@ not proof of contradiction. Return `context_revision`, exact `discovery` recipes
 the ready `selection` when present. An empty result can use an empty recipe list;
 a nonempty result requires at least one meaningful query. Source-observation work
 alone cannot finish extraction. If ready context has `requires_bounded_work: true`,
-use `plan_command` and the [bounded-work protocol](bounded-work.md). Native selected
-workers retain the verified handoff and return without drafting that extraction.
+use `plan_command` and the [bounded-work protocol](bounded-work.md).
 
 ```json
 {

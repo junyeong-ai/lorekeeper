@@ -25,7 +25,6 @@ Do not run the other modes as part of a lookup.
 | Adopt legacy audit discovery | Explicitly transition pending discovery to candidate screening without rewriting retained Work | [Discovery adoption](references/discovery-adoption.md) |
 | `maintain` | Process one bounded batch of changed and never-reviewed knowledge | [Maintenance](references/maintenance.md) |
 | Native `native-audit-results-v1` | Return judgments for the exact supplied subjects; Rust owns assessment assembly and recording | [Native assessment](references/maintenance.md#native-assessment) |
-| `bounded inspect/finish` | Execute exactly one native partitioned audit unit | [Bounded work](../lore-process/references/bounded-work.md) |
 | `curate` | Publish authored pages; apply authorized evidence-based name, category, tag, lifecycle or review corrections | [Curation](references/curation.md) |
 | `status` | Report source currency, queue state and knowledge counts without writes | Commands below |
 | Imported identity migration | Verify legacy copies against a configured nodex source before assigning stable identity | [Add sources](references/add.md#imported-document-identity-migration) |
@@ -63,8 +62,8 @@ by an individual new source.
 
 Direct authoring must not overlap a synthesis worker wave. Start a long manual
 session under `lore --config /absolute/config.yaml workflow -- claude` or `lore --config /absolute/config.yaml workflow -- codex` before
-reading its evidence; scheduled skill sessions already hold this cooperative
-Unix lease. Do not reacquire it inside a guarded session. An agent cannot place
+reading its evidence; native jobs already hold this workflow lease. Do not
+reacquire it inside a guarded session. An agent cannot place
 itself under the lease: in a session the operator did not start that way, ask before
 authoring whether to restart under `workflow` or to stop scheduled writers first.
 External editors and programs that detach or close inherited descriptors remain
@@ -80,13 +79,10 @@ keywords, chronology or a structural lint result.
 After authored writes, reconcile backlinks and report pending synthesis. Complete
 queued repairs for the selected work through lore-process when authorized.
 Standalone sessions finish with `lore wiki refresh`, `lore graph lint` and the
-process skill's completion checks.
-When a native `lore run` caller explicitly owns finalization, it performs the final
-global checks; do not repeat them or enumerate unrelated reviews in the semantic
-session. Selected evidence and review reads, guarded publication and final-input
-assessment remain required. Report pending work and failures; in a native job,
-only the controller determines the complete job outcome. Refresh retrieval snapshots
-before querying newly published content.
+process skill's completion checks. A native assessment returns judgments only;
+its controller owns publication, the final global checks and the job outcome.
+Report pending work and failures. Refresh retrieval snapshots before querying newly
+published content.
 
 ## Status
 

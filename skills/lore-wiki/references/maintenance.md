@@ -11,8 +11,8 @@
 - [Operating budget and measurement](#operating-budget-and-measurement)
 
 This operation is a complete run of one batch, not a request to audit the entire vault.
-The scheduled session already holds the workflow lease. Follow the shared page and
-publication contracts in SKILL.md and read the curation reference before repairs.
+Coordinate the workflow lease and follow the shared page and publication contracts in
+SKILL.md; read the curation reference before repairs.
 
 ## Structural preflight and repair
 
@@ -123,7 +123,7 @@ The final audit reads every admitted body; screening creates no citation or comp
 
 ## Assessment
 
-1. Run `lore wiki audit-plan --ready` once. When the caller supplies exact batch addresses,
+1. Run `lore wiki audit-plan --ready` once. When the operator supplies exact batch addresses,
    use repeated `--path` for those addresses instead of choosing a new batch.
    Keep its candidate addresses as this run's scope.
    `graph.audit.batch_size` bounds subject count (1..100). Selection rotates changed
@@ -164,9 +164,8 @@ The final audit reads every admitted body; screening creates no citation or comp
    because their complete page, scoped review/evidence and selected RSS payload bytes exceed
    `graph.audit.max_input_bytes`. Report the measured bytes and configured bound;
    do not truncate evidence or replace selected subjects. Use `lore work plan --path
-   SUBJECT` and the bounded-work protocol linked from SKILL.md. The native controller
-   uses fresh configured agent sessions per node and verifies complete reduction
-   before accepting an assessment. The whole-input bound remains visible; it is
+   SUBJECT` and the [bounded-work protocol](../../lore-process/references/bounded-work.md).
+   The whole-input bound remains visible; it is
    distinct from `execution.work` request/result bounds. An execution profile changes
    the agent, not these bounds.
 2. Read each complete selected subject according to its `kind`.
@@ -258,22 +257,13 @@ remain discoverable through their reviews without being rewritten every week.
 
 Finish by reconciling backlinks and completing any queued repairs through the
 lore-process publication protocol; read that skill only when repairs need queue
-processing. Standalone sessions then run `lore wiki refresh`, `lore graph lint`,
-`lore wiki reviews` and `lore queue check`. In `lore run knowledge`, the native
-controller owns final global checks and reports review health after the semantic
-session. Do not repeat these checks or inventory unrelated reviews; all selected
-review dependencies still require complete reads and guarded assessment.
-The controller verifies the selected receipts again after global reconciliation;
-later queued publications can invalidate a draft or reopen an assessment. Reported
-audit progress can coexist with unrelated unfinished queue work; only the controller
-determines the overall job outcome.
-Unrelated `needs-reassessment` records remain backlog without expanding this batch.
-If a selected review still needs reassessment, or follow-up lacks a current open
-review, return `needs-action`. The native controller retains an exact subject hold,
-skips unchanged calls and continues independent subjects without pausing the operation.
-Invalid records or a blocked repair are failures; preserve their tasks and report
-them. The native audit verifier requires current scoped reviews; an unchanged open
-finding with a current scoped review remains a valid follow-up assessment.
+processing. Then run `lore wiki refresh`, `lore graph lint`, `lore wiki reviews` and
+`lore queue check`. Unrelated `needs-reassessment` records remain backlog without
+expanding this batch. A selected review that still needs reassessment, or a follow-up
+without a current open review, needs the step 2 reassessment before its subject can
+be recorded; otherwise leave that subject unrecorded and report it. An unchanged open
+finding with a current scoped review remains a valid follow-up assessment. Invalid
+records or a blocked repair are failures; preserve their tasks and report them.
 Report batch coverage, repairs, unresolved findings and remaining backlog separately.
 No lint or receipt count certifies that the entire corpus is semantically consistent.
 

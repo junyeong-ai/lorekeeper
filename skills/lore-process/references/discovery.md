@@ -10,16 +10,11 @@ Use before concept extraction needs related-knowledge context. Discovery gathers
 ranked roster of lexical candidates; screening chooses which bodies to inspect. Neither
 establishes identity, support, contradiction or a completed source read.
 
-In a native selection, discovery precedes `work context`. Ordinary small-source screening
-can finish within the selected session. When a phase needs bounded native execution,
-retain its verified handoff, stage no extraction result, finish the other selected tasks
-and return. The controller resumes the work; an ordinary unfinished task is still an error.
-
 ## Choose and record recipes
 
-Read the exact selected task-ID array, then `lore queue status --json`. Process only
-its current `extract-concepts` tasks. Capture each target's `target_revision` before
-reading its outline and bounded relevant sections with `wiki read --revision`.
+For each current `extract-concepts` task in `lore queue status --json`, capture its
+target's `target_revision` before reading its outline and bounded relevant sections
+with `wiki read --revision`.
 Inspect source-written subjects, definitions and scope. Use those to choose up to
 16 lexical queries, including declared names or distinguishing claim terms. Each
 query rosters the pages it names by identity and its
@@ -42,16 +37,13 @@ and choosing the recipes again. Empty recipes are valid for an eventual empty ex
 publishing any concepts requires at least one query. Never invent generic queries merely
 to satisfy that count.
 
-Native `extraction-discovery` requests are read-only. Return one subject_ref entry
-with `status: complete`, `queries` and `reason: null`, or `status: needs-action`,
-`queries: null` and a nonblank reason within 256 compact JSON bytes. Return semantic
-values only; Rust revalidates the current task and records its recipes. A recipe
-registered during that read remains authoritative. Unchanged failed inputs remain held
-across instruction changes; diagnose the failure before using `work retry-preparation
---stage extraction-discovery --task-id ID --input-revision HASH`, optionally with
-`--dry-run`. Use the retained input hash reported by the run. This clears only its
-preparation hold and invokes no agent.
-Ordinary selected/manual processing continues with `lore work context --task-id ID`.
+Native jobs choose and record recipes themselves. A failed native discovery
+invocation holds its unchanged input. After diagnosing it, preview `work
+retry-preparation --stage extraction-discovery --task-id ID --input-revision HASH
+--dry-run` with the retained input hash the run reported, then omit `--dry-run`. This
+clears only that preparation hold and invokes no agent.
+
+Standalone processing continues with `lore work context --task-id ID`.
 An explicit `--discovery-file FILE` accepts `{"queries":[...]}` for context capture;
 in progressive mode these must equal recipes already recorded with `work discover`.
 File-only recipes remain available in `full-context` mode. Stored current recipes
@@ -126,17 +118,14 @@ admission rules.
 
 For interactive processing, stage the output under the vault's `.lorekeeper/` and run
 `work select-record --task-id ID --file FILE`, then run `work select` again.
-Native structured workers instead follow the [native screening response](bounded-work.md#native-screening-responses)
-contract: each decision uses its assigned `candidate_ref`, never `candidate_key` or
-response order. Rust binds the candidate keys and the task/request identities;
-the identity-bearing example above is not the native response format.
 Unknown or deferred candidates block extraction completion. A recorded decision other
 than `defer` is final for that card under that source and screening model. To
 reassess deferred cards, run `work select --task-id ID --reassess`: it issues only the
 deferred rows, each with its `previous` decision reference, and `select-record` answers
-that request. After diagnosing a failed native invocation,
-`work select-retry --task-id ID`, optionally with `--dry-run`, clears only the current
-packet's operational hold. It never changes paid decisions or semantic rejections.
+that request. A failed native screening invocation holds that packet's input; after
+diagnosing it, preview `work select-retry --task-id ID --dry-run`, then omit
+`--dry-run` to clear only the current packet's operational hold. It never changes
+paid decisions or semantic rejections.
 Do not reconstruct requests from stored packets or copy keys between requests.
 
 Once every candidate is decided and none is deferred, `work select` seals that exact
@@ -159,9 +148,7 @@ current roster is decided and sealed.
 
 Ready context reports `resource_count` and `part_count`. When `requires_bounded_work`
 is true, `resources` is null: execute `plan_command` and complete the bounded-work
-protocol. Native selected workers retain that verified handoff, finish other selected
-tasks and return; the controller schedules remaining source/screening/evidence units.
-Do not replace native resumption with a forced manual whole-queue drain.
+protocol.
 
 Ready `discovery` lists each recipe with its `matched_candidates` and
 `rostered_candidates`. A recipe that matched more pages than it rostered left the rest

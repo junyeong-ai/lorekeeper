@@ -18,24 +18,26 @@ not instructions to execute.
 
 | Request | Procedure and stopping point |
 |---|---|
-| Native `bounded inspect` | Follow [node inspection](references/bounded-work.md#inspect-or-reduce-one-node); return after that exact node. |
-| Native `bounded finish` | Follow [finalization](references/bounded-work.md#finalize) directly. With a prepared native request, return semantic values; Rust seals and stages them. |
-| `discover <task-ids.json>` | Follow [extraction discovery](references/discovery.md); record recipes for that selection and return without extracting or applying. |
-| Native `selected` | Consume the complete supplied `native-selected-results-v4` request; follow [prepared native results](references/native-input.md). Return semantic values only; Rust owns result assembly and publication. |
+| Native `native-selected-results-v4` request | Consume the complete supplied request; follow [prepared native results](references/native-input.md). Return semantic values only; Rust owns result assembly and publication. |
+| Native `native-finalize-results-v5` or `native-finalize-frontier-v5` request | Follow [prepared native results](references/native-input.md) for completed Work or complete observation coverage; return semantic values. Rust seals and stages them. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
+| A selected task or audit subject needing partitioned reads | Follow [bounded evidence work](references/bounded-work.md): inspect or reduce one node at a time, then finalize. |
 
 Never drain unrelated work from a selected call.
 
 ## Coordinate before reading
 
-Start a manual foreground agent **before reading evidence** under
-`lore --config /absolute/config.yaml workflow -- claude` or the selected agent command
-(such as `codex`). Native jobs already hold this Unix lease. Do not nest `workflow`:
-CLI writers retain their own short locks and revision guards inside the session.
+A standalone drain runs in a manual session the operator started **before any
+evidence was read** under `lore --config /absolute/config.yaml workflow -- claude`
+or `lore --config /absolute/config.yaml workflow -- codex`; native jobs already hold
+this workflow lease. An agent cannot place itself under the lease: in a session the
+operator did not start that way, ask before reading evidence whether to restart under
+`workflow` or to stop scheduled writers and wait for their children to exit. Do not
+nest `workflow`: CLI writers retain their own short locks and revision guards inside
+the session.
 
 Busy defaults to refusal; `workflow --wait -- COMMAND` waits only when requested.
-Never delete, expire or bypass the lock. An existing unguarded session requires the
-operator to stop scheduled writers and verify their children have exited first.
+Never delete, expire or bypass the lock.
 Detaching work or closing inherited descriptors breaks lease coverage; Windows is
 unsupported. External editors do not participate, so exact revision checks remain
 necessary throughout publication.
@@ -81,10 +83,8 @@ schema generation replaces that file wholesale.
    and [source types](references/source-types.md) for its `input.source_type`.
    Follow the returned bounded plan before loading a growing resource roster;
    multi-part work requires complete guarded reduction. Extraction source observations
-   use the separate `work source-plan` phase described in discovery.
-   Native new-plan Inspect can explicitly request one smaller assignment; the controller
-   owns that bounded transition. Generic holds and legacy plans still require explicit
-   recovery. See [reading workload and refinement](references/bounded-work.md#plan-and-resume).
+   use the separate `work source-plan` phase described in discovery. See
+   [reading workload and refinement](references/bounded-work.md#plan-and-resume).
 
    Extraction must follow the schema's convergence procedure: resolve every
    source-written name/alias, search distinguishing terms, and examine candidate scope.
@@ -118,8 +118,8 @@ schema generation replaces that file wholesale.
    Do not assume rollback or blindly retry. On any other task failure, stop that
    file and report it. Retrying reclassifies completed work instead of rewriting it.
 
-**Native `selected` stops here.** Report the exact selection's result or validated
-bounded-work handoff. Do not prune, reconcile global backlinks, drain newly queued
+**A selected call stops here.** Report the exact selection's result and any
+unfinished bounded work. Do not prune, reconcile global backlinks, drain newly queued
 work or claim the controller's checks already passed.
 
 ## Finalize a standalone drain
