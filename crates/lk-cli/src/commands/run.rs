@@ -92,7 +92,7 @@ mod native {
     mod audit;
     mod preparation;
     mod replans;
-    use replans::AuditReplans;
+    use replans::{AuditReplans, FinalizationReplans};
 
     use super::*;
     use super::{automation, scheduler};
@@ -380,6 +380,9 @@ mod native {
         Replan,
         Failed,
     }
+
+    const FINALIZATION_CHANGED_AGAIN: &str =
+        "finalizer inputs changed again after fresh replanning; retained for a later run";
 
     #[derive(Default, PartialEq, Eq)]
     enum QueueReplan {
@@ -755,6 +758,7 @@ mod native {
         supervisor: &'a mut execution::Supervisor,
         automation: Option<&'a mut automation::Control>,
         audit_replans: &'a mut AuditReplans,
+        finalization_replans: &'a mut FinalizationReplans,
         lease: Option<workflow::WorkflowLease>,
         agents: std::collections::BTreeMap<String, PreparedAgent>,
         project_protection: Option<crate::commands::installation::Protection>,
@@ -2858,10 +2862,8 @@ mod native {
                     self.queue_replan = QueueReplan::Invalidate;
                     WorkStep::Replan
                 }
-                Err(error) => {
-                    if metrics.stages == [ExecutionStage::Audit]
-                        && is_semantic_context_changed(&error)
-                    {
+                Err(error) if is_semantic_context_changed(&error) => {
+                    if metrics.stages == [ExecutionStage::Audit] {
                         self.record(
                             "bounded audit inputs changed",
                             StageState::Skipped,
@@ -2869,10 +2871,42 @@ mod native {
                         );
                         WorkStep::Replan
                     } else {
-                        self.failure("native finalization", error);
-                        WorkStep::Failed
+                        self.finalization_inputs_changed(
+                            "bounded finalization inputs changed",
+                            error,
+                        )
                     }
                 }
+                Err(error) => {
+                    self.failure("native finalization", error);
+                    WorkStep::Failed
+                }
+            }
+        }
+
+        /// Discards a queue finalizer step whose fresh guard found changed inputs; its answer, if
+        /// any, is never relabeled. Each target may replan once per run, then defers.
+        fn finalization_inputs_changed(&mut self, name: &str, error: miette::Report) -> WorkStep {
+            self.record(name, StageState::Skipped, Some(error.to_string()));
+            let targets = self
+                .queue_turn
+                .as_ref()
+                .map(|turn| turn.targets.clone())
+                .unwrap_or_default();
+            let mut replan = true;
+            for target in &targets {
+                if !self
+                    .finalization_replans
+                    .try_spend(target, FINALIZATION_CHANGED_AGAIN)
+                {
+                    self.deferred("finalization inputs unstable", target);
+                    replan = false;
+                }
+            }
+            if replan {
+                WorkStep::Replan
+            } else {
+                WorkStep::Deferred(FINALIZATION_CHANGED_AGAIN.into())
             }
         }
 
@@ -3030,6 +3064,15 @@ mod native {
                     Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
                         deferred = true;
                         self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
+                        let target = input["task"]["target"]["vault_path"]
+                            .as_str()
+                            .expect("selected task target");
+                        if !self
+                            .finalization_replans
+                            .try_spend(target, FINALIZATION_CHANGED_AGAIN)
+                        {
+                            self.deferred("finalization inputs unstable", target);
+                        }
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::Rejected(reason)) => {
                         deferred = true;
@@ -3310,6 +3353,9 @@ mod native {
                         WorkStep::Staged
                     }
                 },
+                Err(error) if is_semantic_context_changed(&error) => {
+                    self.finalization_inputs_changed("bounded section inputs changed", error)
+                }
                 Err(error) => {
                     self.failure("bounded section finalization", error);
                     WorkStep::Failed
@@ -3338,7 +3384,11 @@ mod native {
                         self.deferred("bounded work capacity", &reason);
                         return WorkStep::Deferred(reason);
                     }
-                    if stage == ExecutionStage::Audit && is_semantic_context_changed(&error) {
+                    if is_semantic_context_changed(&error) {
+                        if stage != ExecutionStage::Audit {
+                            return self
+                                .finalization_inputs_changed("bounded work inputs changed", error);
+                        }
                         self.record(
                             "bounded audit inputs changed",
                             StageState::Skipped,
@@ -3401,6 +3451,12 @@ mod native {
                         .as_mut()
                         .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
                     self.record_work_step(metrics);
+                    if is_semantic_context_changed(&error) {
+                        return self.finalization_inputs_changed(
+                            "bounded finalization inputs changed",
+                            error,
+                        );
+                    }
                     self.failure("bounded work completion", error);
                     return WorkStep::Failed;
                 }
@@ -4482,6 +4538,10 @@ mod native {
                     }
                     needs_application |= rejection.needs_revalidation;
                     deferred.insert(target, vec![rejection.reason.clone()]);
+                    continue;
+                }
+                if let Some(reason) = self.finalization_replans.deferral(&target) {
+                    deferred.insert(target, vec![reason.to_owned()]);
                     continue;
                 }
                 targets.insert(target, task);
@@ -6400,6 +6460,7 @@ mod native {
         root: Option<workflow::VaultRootPin>,
         automation: Option<automation::Control>,
         audit_replans: AuditReplans,
+        finalization_replans: FinalizationReplans,
     }
 
     pub(super) async fn run(
@@ -6481,6 +6542,7 @@ mod native {
             root: None,
             automation,
             audit_replans: AuditReplans::default(),
+            finalization_replans: FinalizationReplans::default(),
         };
         let mut outcomes = Vec::new();
         let mut stop_reason = CampaignStop::BatchLimit;
@@ -6552,6 +6614,7 @@ mod native {
             root: campaign_root,
             automation,
             audit_replans,
+            finalization_replans,
         } = campaign;
         let (config, config_revision) = configuration;
         let board = config
@@ -6576,6 +6639,7 @@ mod native {
             supervisor,
             automation: automation.as_mut(),
             audit_replans,
+            finalization_replans,
             lease: None,
             agents: std::collections::BTreeMap::new(),
             project_protection: None,

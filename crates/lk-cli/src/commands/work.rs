@@ -1997,8 +1997,9 @@ fn validate_loaded_work(
     prepared: Prepared,
 ) -> miette::Result<(Work, Prepared)> {
     if expected(root, &prepared, config, config_revision)? != work {
-        return Err(miette::miette!(
-            "work inputs, configuration or bounded execution policy changed; replan"
+        return Err(publication_rejection(
+            RejectionKind::SemanticContextChanged,
+            "work inputs, configuration or bounded execution policy changed; replan",
         ));
     }
     Ok((work, prepared))
@@ -2091,8 +2092,9 @@ fn validate_result_finalization(
     current_result_finalization(root, config, work, prepared, request, kind)?
         .map(|snapshot| snapshot.result().clone())
         .ok_or_else(|| {
-            miette::miette!(
-                "native finalization scope or completed observations changed; reread and regenerate"
+            publication_rejection(
+                RejectionKind::SemanticContextChanged,
+                "native finalization scope or completed observations changed; reread and regenerate",
             )
         })
 }
@@ -3822,8 +3824,9 @@ pub(super) fn finish_result(
     let completed =
         validate_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?;
     if completed != result.completed {
-        return Err(miette::miette!(
-            "completed Work changed before native finalization"
+        return Err(publication_rejection(
+            RejectionKind::SemanticContextChanged,
+            "completed Work changed before native finalization",
         ));
     }
     let outcome = match &prepared.subject {
@@ -4002,8 +4005,9 @@ fn revalidate_section_finalization(
     let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
     current_section_finalization(root, config, config_revision, work, prepared, section)?
         .ok_or_else(|| {
-            miette::miette!(
-                "section finalization scope changed during generation; retained work requires a fresh request"
+            publication_rejection(
+                RejectionKind::SemanticContextChanged,
+                "section finalization scope changed during generation; retained work requires a fresh request",
             )
         })
 }

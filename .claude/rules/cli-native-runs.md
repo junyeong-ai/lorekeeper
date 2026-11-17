@@ -180,6 +180,11 @@ paths:
   repeated drift defers that subject while independent subjects continue. Keep all
   predecessor Work and paid outputs unchanged. Configuration/root drift, corrupt
   state and unexpected changes during tool-free observation recording remain fatal.
+  Queue finalizers follow the same rule per target: a fresh guard that finds changed
+  inputs before or after the host discards that step without relabeling its answer,
+  allows one replan per target per run and then defers the target. A publication guard
+  that refuses a selected result whose captured input is still current holds that exact
+  input in its generation receipt instead.
 - Whole-input audit judgments carry unique complete subject references. Rust supplies
   assessment metadata and records current inputs through the shared audit owner.
   Replan original slots through this workflow's guarded concept merges; documents

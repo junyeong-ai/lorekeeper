@@ -31,6 +31,8 @@ guards into a native reply. An empty roster permits no reuse. References have me
 only within the exact supplied task or Work.
 
 An unknown reference holds only that task’s exact input without another automatic call.
+So does a selected result that publication guards refuse while its captured input is still
+current. A changed input instead discards the answer and prepares one fresh request.
 An operator can inspect the reported input revision and retained rejection, then explicitly
 clear it with `lore work retry-generation --task-id ID --input-revision REVISION`.
 Native consumers return their assigned values and leave retry control to the operator.

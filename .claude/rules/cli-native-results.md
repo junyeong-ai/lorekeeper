@@ -116,8 +116,9 @@ paths:
   holds survive instruction changes. The same per-task receipt holds a confirmed
   timeout/numeric exit of a tool-enabled selected, bounded result or bounded section
   finalizer for its exact input. Receipts are strict native-generation-rejection-v2 with a
-  typed proposal or invocation cause; v1 proposal receipts are read without rewriting and
-  earlier readers refuse v2. `work retry-generation` requires the exact current
+  typed proposal or invocation cause; a proposal is refused for an unknown owner reference
+  or by publication guards while its input is current. v1 proposal receipts are read
+  without rewriting and earlier readers refuse v2. `work retry-generation` requires the exact current
   task/input; dry runs never recover or write, and clearing a receipt invokes no host.
   Pending tasks protect receipts during pruning; corrupt state and transport failures
   remain fatal.

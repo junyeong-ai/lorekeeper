@@ -22,7 +22,7 @@ pub(in crate::commands) enum Outcome {
     Complete(Value),
     NeedsAction(String),
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
-    Rejected(owners::ProposalRejection),
+    Rejected(rejection::ProposalRejection),
 }
 
 pub(in crate::commands) enum SelectedFinish {
@@ -155,7 +155,7 @@ pub(super) fn assemble(
                         rss_evidence: concept.rss_evidence,
                     })
                 })
-                .collect::<Result<Vec<_>, owners::ProposalRejection>>();
+                .collect::<Result<Vec<_>, rejection::ProposalRejection>>();
             let concepts = match concepts {
                 Ok(concepts) => concepts,
                 Err(reason) => return Ok(Outcome::Rejected(reason)),
@@ -392,7 +392,7 @@ pub(in crate::commands) fn plan_prune(
 }
 
 /// The selected task's fresh inputs, or `None` when its discovery or captured scope changed
-/// after `input` was prepared.
+/// after `input` was prepared; a changed scope never relabels an answer to the old input.
 fn current_selected(
     root: &Path,
     config: &lk_core::config::Config,
@@ -474,34 +474,11 @@ pub(in crate::commands) fn finish_selected_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectedFinish> {
     let root = session.root();
-    let task_id = input["task"]["task_id"]
-        .as_str()
-        .ok_or_else(|| miette::miette!("missing selected task"))?;
-    let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
-    if task.kind == TaskKind::ExtractConcepts {
-        let queries: Vec<lk_core::discovery::DiscoveryQuery> =
-            serde_json::from_value(input["context"]["purpose"]["discovery"]["queries"].clone())
-                .into_diagnostic()?;
-        if super::discovery::current(root, &task)?.is_some_and(|current| current != queries) {
-            return Ok(SelectedFinish::ScopeChanged);
-        }
-    }
-    let prepared = super::resources::refresh_controlled(
-        root,
-        config,
-        config_revision,
-        &input["context"],
-        read,
-    )?;
-    let work = super::expected(root, &prepared, config, config_revision)?;
-    let owner =
-        lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path)).into_diagnostic()?;
-    let current = super::native::selected_task(config, &task, &prepared, &work, &owner)?;
-    if current != *input {
-        return Err(miette::miette!(
-            "selected generation scope changed; reread and regenerate"
-        ));
-    }
+    let Some((task, prepared, work)) =
+        current_selected(root, config, config_revision, input, read)?
+    else {
+        return Ok(SelectedFinish::ScopeChanged);
+    };
     let before = GENERATION
         .read(root, &task.task_id, &task.cache_hash)?
         .map(|(raw, _)| raw);
@@ -567,15 +544,40 @@ pub(in crate::commands) fn finish_selected_controlled(
         }
         Outcome::Complete(result) => {
             prepared.guard_pages(&mut plan);
-            super::guard_queue_controlled(
+            let mut guards = lk_vault::MutationPlan::default();
+            if let Err(error) = super::guard_queue_controlled(
                 root,
                 config,
                 config_revision,
                 &task.task_id,
                 result.clone(),
-                &mut plan,
+                &mut guards,
                 prepared.read_control(),
-            )?;
+            ) {
+                let Some(refusal) = error
+                    .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+                else {
+                    return Err(error);
+                };
+                let rejection = rejection::ProposalRejection::PublicationGuard {
+                    kind: refusal.kind,
+                    detail: refusal.detail.clone(),
+                };
+                let reason = rejection::plan_record(
+                    root,
+                    rejection::Binding {
+                        task: &task,
+                        work: &work,
+                        input: rejection::Input::Selected,
+                        request,
+                    },
+                    rejection::Cause::proposal(reply, rejection)?,
+                    &mut plan,
+                )?;
+                session.apply(plan).into_diagnostic()?;
+                return Ok(SelectedFinish::Rejected(reason));
+            }
+            plan.extend(guards);
             let destination = super::queue_result_path(task.kind, &result)?;
             let raw = serde_json::to_string(&result).into_diagnostic()?;
             let prior = match std::fs::read_to_string(root.join(&destination)) {

@@ -1284,8 +1284,9 @@ fn discovery_recovery_refuses_invalid_queries_non_extraction_and_changed_target(
             let (task, _) = fixture.add("recover", kind, false);
             std::fs::write(fixture.root().join("mode"), mode).unwrap();
             let report = fixture.run();
-            assert!(
-                report["halted"].as_bool().unwrap(),
+            assert_eq!(
+                report["halted"],
+                mode != "discovery-target-drift",
                 "{engine}/{mode}: {report}"
             );
             assert!(!fixture.done(&task));
@@ -1486,20 +1487,33 @@ fn native_generation_rejects_ambiguous_results_without_staging_on_both_hosts() {
 #[test]
 fn malformed_missing_oversized_and_changed_scope_results_never_publish() {
     for engine in ["codex", "claude-code"] {
-        for mode in [
-            "metadata",
-            "wrong-count",
-            "prose",
-            "oversized",
-            "changed-target",
-            "changed-review",
-        ] {
+        for mode in ["metadata", "wrong-count", "prose", "oversized"] {
             let fixture = Fixture::new(engine);
             let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, false);
             std::fs::write(fixture.root().join("mode"), mode).unwrap();
             let report = fixture.run();
             assert_eq!(report["halted"], true, "{engine}/{mode}: {report}");
             assert!(!fixture.done(&task));
+        }
+        for mode in ["changed-target", "changed-review"] {
+            let fixture = Fixture::new(engine);
+            let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, false);
+            std::fs::write(fixture.root().join("mode"), mode).unwrap();
+            let report = fixture.run();
+            // One fresh replan follows the changed scope. The host changes the target on every
+            // call, so that target is deferred; its review change happens once, so the fresh
+            // request publishes. The review is itself invalid, which review health treats as fatal.
+            assert_eq!(report["semantic_calls"], 2, "{engine}/{mode}: {report}");
+            assert_eq!(
+                report["halted"],
+                mode == "changed-review",
+                "{engine}/{mode}: {report}"
+            );
+            assert_eq!(
+                fixture.done(&task),
+                mode == "changed-review",
+                "{engine}/{mode}"
+            );
         }
     }
     let fixture = Fixture::new("codex");
@@ -1996,7 +2010,13 @@ fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
         let report = fixture.run();
         assert!(!fixture.done(&task), "{mode}: {report}");
         assert!(!directory.join("frontier-seal.json").exists());
-        assert_eq!(report["halted"], true, "{mode}: {report}");
+        // Changed scope replans without halting; the host's changed review is itself invalid,
+        // which review health treats as fatal.
+        assert_eq!(
+            report["halted"],
+            mode == "changed-review",
+            "{mode}: {report}"
+        );
     }
 }
 

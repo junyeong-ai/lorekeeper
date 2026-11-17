@@ -9,12 +9,39 @@ use serde_json::Value;
 
 use super::super::state::InvocationFailure;
 use super::super::{Subject, Work};
-use super::owners::ProposalRejection;
 
 const DIRECTORY: &str = ".lorekeeper/queue/generation-rejections";
 const MAX_BYTES: usize = 65_536;
 const MAX_REPLY_BYTES: usize = 16_384;
 const PROPOSAL_SCHEMA: &str = "native-generation-rejection-v1";
+
+/// Why Rust refused a decoded proposal for its current input.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "reason", rename_all = "kebab-case", deny_unknown_fields)]
+pub(in crate::commands) enum ProposalRejection {
+    UnknownOwnerReference,
+    /// Publication guards refused the assembled result although its captured input was current.
+    PublicationGuard {
+        kind: crate::commands::queue::application::RejectionKind,
+        detail: String,
+    },
+}
+
+impl std::fmt::Display for ProposalRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownOwnerReference => {
+                f.write_str("native reuse reference is outside the admitted owner roster")
+            }
+            Self::PublicationGuard { detail, .. } => {
+                write!(
+                    f,
+                    "publication guards refused the result for its current input: {detail}"
+                )
+            }
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 enum Schema {
@@ -67,12 +94,15 @@ impl Cause {
     fn validate(&self) -> miette::Result<()> {
         match self {
             Self::Proposal {
+                rejection,
                 reply_revision,
                 reply_bytes,
                 reply,
-                ..
             } => {
-                if !is_revision(reply_revision, 64) || *reply_bytes == 0 {
+                if !is_revision(reply_revision, 64)
+                    || *reply_bytes == 0
+                    || matches!(rejection, ProposalRejection::PublicationGuard { detail, .. } if detail.trim().is_empty())
+                {
                     return Err(miette::miette!(
                         "invalid native generation rejection identity"
                     ));
@@ -405,9 +435,22 @@ mod tests {
         let reason = held(root, &task, &"b".repeat(64)).unwrap().unwrap();
         assert!(reason.contains("exited with status 7"), "{reason}");
         assert!(held(root, &task, &"e".repeat(64)).unwrap().is_none());
+        let mut guarded = json!({"kind":"proposal","reply_revision":proposal["reply_revision"],
+            "reply_bytes":proposal["reply_bytes"],"reply":proposal["reply"],
+            "rejection":{"reason":"publication-guard","kind":"evidence-scope-changed","detail":"owner left the captured scope"}});
+        receipt["cause"] = guarded.clone();
+        std::fs::write(
+            root.join(&destination),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        let reason = held(root, &task, &"b".repeat(64)).unwrap().unwrap();
+        assert!(reason.contains("owner left the captured scope"), "{reason}");
+        guarded["rejection"]["detail"] = json!(" ");
         for cause in [
             json!({"kind":"invocation","failure":{"kind":"exited","engine":"codex","code":0}}),
             json!({"kind":"proposal","rejection":proposal["rejection"]}),
+            guarded,
             json!({"kind":"unknown"}),
         ] {
             receipt["cause"] = cause;

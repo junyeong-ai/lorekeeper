@@ -1,7 +1,9 @@
 use lk_queue::{ConceptAdmission, ConceptOwner};
 use miette::IntoDiagnostic;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
+
+use super::rejection::ProposalRejection;
 
 #[derive(Default)]
 pub(in crate::commands::work) struct Owners(pub(super) Vec<ConceptOwner>);
@@ -11,22 +13,6 @@ pub(in crate::commands::work) struct Owners(pub(super) Vec<ConceptOwner>);
 pub(super) enum Admission {
     New,
     Reuse { owner_ref: String },
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-#[serde(tag = "reason", rename_all = "kebab-case", deny_unknown_fields)]
-pub(in crate::commands) enum ProposalRejection {
-    UnknownOwnerReference,
-}
-
-impl std::fmt::Display for ProposalRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownOwnerReference => {
-                f.write_str("native reuse reference is outside the admitted owner roster")
-            }
-        }
-    }
 }
 
 impl Owners {

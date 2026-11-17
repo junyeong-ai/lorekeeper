@@ -644,7 +644,11 @@ fn planned_section_review_changes_during_finalization_refuse_then_reuse_paid_nod
         fixture.mode("changed-review");
         let (output, report) = fixture.run();
         assert!(!output.status.success(), "{engine}: {report}");
-        assert_eq!(report["semantic_calls"], 1);
+        assert_eq!(report["halted"], false, "{engine}: {report}");
+        assert_eq!(
+            report["semantic_calls"], 2,
+            "one fresh replan, then deferral: {report}"
+        );
         assert_eq!(fixture.source_snapshot(&plan), source_before);
         assert_eq!(std::fs::read(&target).unwrap(), target_before);
         assert!(!fixture.work_path(&plan, "seal.json").exists());
@@ -1251,7 +1255,7 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                 assert_eq!(again["semantic_calls"], 0, "{again}");
                 assert_eq!(fixture.calls().len(), 2);
             } else if mode != "cancel" {
-                assert_eq!(report["halted"], true, "{report}");
+                assert_eq!(report["halted"], mode != "changed-target", "{report}");
             }
             assert_eq!(fixture.calls().len(), 2);
             let step = report["work_steps"]
