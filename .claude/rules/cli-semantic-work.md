@@ -31,8 +31,8 @@ paths:
   journals. Native `source_read` metadata supplies this capability without source bodies.
 - Fresh source inspection uses the shared scalar workload policy as well as complete
   JSON byte admission. Apply it to Work partitioning, whole-input task batches and raw
-  screening context. Exact retained legacy Work/selection keeps its original policy;
-  persist the selected manifest, never rebuild it with a newer default.
+  screening context. Exact retained legacy Work keeps its original policy; persist the
+  selected manifest, never rebuild it with a newer default.
 - A saved legacy inspection/reduction action stays held across native-contract changes
   only when its original canonical input revision still hashes the complete current
   request. Verify the whole request rather than trusting its supplied revision field;

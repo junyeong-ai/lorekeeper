@@ -157,24 +157,26 @@ status and target bytes normally. Do not replace a stale answer's guards.
 ## Extraction read scope
 
 Follow [extraction discovery](discovery.md) before drafting an extraction result.
-`work context` must be `ready`; source-observation completion or a recorded screening
-batch alone cannot authorize publication. The result envelope is in
+`work context` must be `ready`; source-observation completion or recorded screening
+decisions alone cannot authorize publication. The result envelope is in
 [processing kinds](processing-kinds.md#kind-extract-concepts).
 
 Progressive results carry the exact ready context's optional typed `selection`:
-`policy: "progressive-evidence-v1"`, `inventory_revision` for the complete guarded
-inventory and `decisions_revision` for its current complete decision ledger.
+`policy: "independent-screening-v1"`, `inventory_revision` naming the sealed candidate
+roster and `decisions_revision` for that roster's complete decisions.
 
-The inventory includes every candidate and scoped review/evidence guard, including
-excluded candidates. The ledger distinguishes selected full-body inputs from card-only
-`not-selected` assessments; unknown or deferred candidates block completion. Reused
-owners must be selected and read at their exact full file revisions. Changed membership,
-bytes, ownership or review dependencies invalidate selection and the final draft.
+The sealed roster lists every candidate the screening covered. Its decisions distinguish
+selected full-body inputs from card-only `not-selected` assessments; unknown or deferred
+candidates block completion. Reused owners must be selected and read at their exact
+full file revisions. The source, the selected owners and their scoped review/evidence
+dependencies stay guarded, and a change to any of them invalidates the draft. A
+candidate that was not selected is bound by its judged card, so its later edits do not.
 
-Omitting `selection` preserves the legacy/full-context contract, including all retrieved
+Omitting `selection` keeps the full-context contract, including all retrieved
 bodies and their dependencies. Never remove it from a progressive draft or copy a new
-inventory/decision/context revision onto old prose. Source uncertainty remains attributed;
-processing blockers must be resolved before an extraction can publish.
+roster/decision/context revision onto old prose. Application refuses a result that
+still carries `progressive-evidence-v1`; regenerate it. Source uncertainty remains
+attributed; processing blockers must be resolved before an extraction can publish.
 
 ## Completion keys
 

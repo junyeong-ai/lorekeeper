@@ -22,14 +22,16 @@ deferred subcommands expose their names eagerly for name-only discovery.
   remain valid; another directory or incomplete inherited context refuses. Root context
   validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
   retain unfinished work.
-- New semantic Work and extraction selection identities exclude execution automation policy,
+- New semantic Work identities exclude execution automation policy,
   call/parallel/consecutive-call/screening-packet limits, the per-query candidate bound
   and profile session timeouts. The bound acts only through the candidate roster.
   Input/result byte limits, extraction policy, model/effort and all other configuration
-  remain semantic inputs. The live workflow still pins every configuration byte. Legacy
-  byte-bound manifests resume only through an exact current-configuration
-  reconstruction; never retag them after an operational change or guess historical
-  settings.
+  remain semantic inputs. Candidate screening decisions bind their own contract instead:
+  reply schema, instruction and the screening profile's engine, model and effort, with
+  no configuration revision or byte limit. The live workflow still pins every
+  configuration byte. Legacy byte-bound Work manifests resume only through an exact
+  current-configuration reconstruction; never retag them after an operational change or
+  guess historical settings.
 - Optional typed stage overrides choose only host profiles. Keep the originating profile
   selected for Work policy, budgets and child LORE_EXECUTION_PROFILE. Resolve the actual
   node/task kind before each invocation; never route from prompts or paths. Independent

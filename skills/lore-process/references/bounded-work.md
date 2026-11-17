@@ -116,68 +116,47 @@ an old response or manufacture a receipt for it.
 
 Native screening returns only `{decisions: [{candidate_ref, decision, reason}, ...]}`.
 Copy each short reference from its assigned card; never return a candidate path or
-derive a reference from response order. Rust requires complete unique coverage and
-binds each reference to its original path, plus selection, batch and input identity.
-The native presentation omits opaque file/source guard hashes; canonical requests
-and fresh scope checks retain them. The reply allowance reserves full path expansion.
+derive a reference from response order. Judge each card independently of the others.
+Rust requires complete unique coverage and binds each reference to its candidate key,
+plus the task and request identity. The native presentation omits the keys and owner
+addresses; the canonical request retains them. The reply allowance reserves full key
+expansion.
 A reference-coverage or blank/oversized-reason rejection records no decisions and
-defers that task under an exact request/contract receipt. The reason limit counts
+holds that task at the exact request. The reason limit counts
 UTF-8 bytes of the JSON string, including quotes and escapes, not characters.
-Unchanged native calls are suppressed; changed scope or contracts may be reconsidered.
+The unchanged request is not sent again; changed undecided cards, a changed source or
+another screening model make a new request.
 Legacy inspection/reduction holds also survive a native-contract change when the
 complete canonical request still hashes to the original input revision. They
 require explicit action and keep their exact saved receipts; this does not approve
 an unmatched contract. Changed inputs do not inherit that hold. New-policy Work
 continues to match the exact current request and native contract.
-Existing v1/v2 rejection receipts remain readable without rewriting; new receipts use
-`screening-rejections-v3`, which earlier readers refuse. Its operational attempts are
-separate from semantic rejections. Confirmed numeric nonzero exits and unusable remote
-replies hold that canonical packet across contract changes. Unknown candidates remain
+Confirmed numeric nonzero exits and unusable remote replies hold that packet's input
+even after the screening model changes. Unknown candidates remain
 incomplete; independent targets and successful wave peers keep their progress. A wave
 with only invocation failures ends this run without pausing the scheduled operation.
-After diagnosis, preview `work select-retry --task-id ID --batch-id BATCH --dry-run`,
-then run it without `--dry-run` to clear only that operational attempt. Semantic
+After diagnosis, preview `work select-retry --task-id ID --dry-run`,
+then run it without `--dry-run` to clear only that operational hold. Semantic
 rejections and paid decisions remain intact; failures grant no progress or refinement.
-Corrupt receipts, failed fresh scope validation, signal/cleanup and unknown failures
-still stop.
-Screening receipts and standalone `select-record` inputs require unique object fields
-at every typed nesting level. Legacy whitespace and field ordering remain valid.
+Corrupt stored state, failed fresh scope validation, signal/cleanup and unknown
+failures still stop.
+Stored screening state and standalone `select-record` inputs require unique object
+fields at every typed nesting level; stored state must also be the exact bytes
+Lorekeeper wrote.
 
-After every packet is recorded, deferred cards keep only their target incomplete.
-Native planning preserves the validated ledger and continues independent ready work
-without repeating those calls. Earlier deferred cards do not prevent screening the
-remaining unknown packets. Reassessment still requires an explicit receipt revision;
-no decision is promoted automatically.
-Standalone `work select-record` still requires its complete identity-bearing format
+Decisions are recorded per candidate. A card whose row, source and screening model
+are unchanged keeps its decision when other candidates are added, removed or edited,
+so only new and changed cards are screened again. After every candidate is decided,
+deferred cards keep only their target incomplete. Native planning continues
+independent ready work without repeating those calls, and earlier deferred cards do
+not prevent screening the remaining unknown ones. Reassessment is explicit through
+`work select --reassess`; no decision is promoted automatically.
+Standalone `work select-record` uses the identity-bearing format
 from [extraction discovery](discovery.md#progressive-examination).
 
-### Exact packet computation reuse
-
-New selections use `receipt_policy: computed-packets-v1` and native request policy
-`progressive-evidence-v2`. Rust may reuse a complete recorded packet from the latest
-computed selection for the same task/cache owner. The complete ordered cards, paths,
-queries, source context, policies, byte limits and resolved screening profile contract
-must match. Current selection/inventory identifiers and full-file guard revisions
-remain freshness proofs rather than semantic card input. Rust still captures the
-complete current inventory, ownership and scoped reviews; admitted bodies and
-publication scope are freshly validated. No candidate subset or full-body observation
-is inferred from a prior card decision.
-
-`screening-computed-output-v1` stores the current exact output and dependency/contract
-revisions. Reused outputs also reference the direct authored receipt and its revision;
-the complete stored envelope stays within `max_result_bytes`. These formats require
-a compatible reader. Existing saved selections retain their original packet layout,
-native contract and receipt bytes, and never seed this reuse. Standalone full-path
-records remain readable but do not become native computation authorities.
-An older reader refuses these formats when encountered; this is not a global
-downgrade lock preventing it from independently preparing a legacy selection.
-
-A valid explicit reassessment of the origin holds its dependent packets for explicit
-reassessment; `processing_held_batches` reports these holds when nonzero. Unchanged
-holds and reused `defer` decisions spend no host call and remain incomplete. Missing,
-corrupt or indirect origins refuse. Pending/staged task references retain the head and
-all same-owner selection proofs; normal retention can remove the completed owner.
-Never edit these files to force reuse or completion.
+Each task's packets, decision ledger and sealed rosters live in its own directory under
+`.lorekeeper/queue/screening/`. Never edit these files to force a decision or
+completion; retention removes the directory once the task is neither pending nor staged.
 
 ## Plan and resume
 
@@ -215,7 +194,7 @@ must fit. The same reading bound routes oversized whole-input generation and raw
 screening context through source observations; combined whole-input batches share it.
 It is an execution workload policy, not a model token limit or measured quality
 threshold. Short inputs keep one reading unit. Retained `semantic-ranges-v1` plans
-and exact saved selections resume with their original policy and paid bytes.
+resume with their original policy and paid bytes.
 
 For a new original Inspect node whose request declares `inspection.can_refine`,
 native inference may return `needs-smaller-inspection` with a nonblank action reason
@@ -563,13 +542,15 @@ unselected bodies as inspected or discard source-phase questions during finaliza
 ## Changed inputs
 
 Changed semantic configuration, targets, evidence or review dependencies invalidate work.
-New Work and candidate selections use parsed configuration values, so comments and
-YAML formatting do not participate. They exclude `execution.automation`, `max_calls`,
+New Work uses parsed configuration values, so comments and
+YAML formatting do not participate. It excludes `execution.automation`, `max_calls`,
 `max_parallel`, `max_consecutive_calls`, `max_screening_batches` and profile `timeout_seconds` from configuration identity.
 Adjust these only between workflows: every configuration byte remains pinned during
 execution. Model/effort, input/result limits, extraction policy and other settings
-still invalidate derived work. Legacy byte-bound plans and selections resume with
-the exact original configuration; operational edits cannot adopt those old receipts.
+still invalidate derived work. Candidate screening decisions depend on the screening
+model, the source and the card alone, not on a configuration revision. Legacy
+byte-bound plans resume with the exact original configuration; operational edits
+cannot adopt those old receipts.
 Replan. `lore work reuse WORK NODE --from-work OLD --from-node OLD_NODE` permits
 explicitly attributed reuse of an inspection only when semantic purpose and its
 assigned exact resources/ranges match. It never claims a new read. Changed-source
@@ -649,7 +630,7 @@ It describes dispatched requests, not observed peak live-child concurrency.
 
 | Fields | Meaning |
 | --- | --- |
-| `role`, `work_id`, `node_id`, `node_kind`, `selection_id`, `batch_id` | Exact selected work or screening identities; unavailable identities are `null` |
+| `role`, `work_id`, `node_id`, `node_kind`, `screening_id`, `request_revision` | Exact selected work or screening identities; unavailable identities are `null` |
 | `request_json_bytes`, `result_json_bytes` | Compact UTF-8 JSON of the prepared request and decoded response (including a native observation/action envelope but excluding Rust-supplied identity), excluding prompts and host envelopes; native discovery, screening and finalization response bytes are measured |
 | `preparation_duration_ms`, `preparation_from_queue_plan` | Additional local preparation of the selected request or completed root; a screening request carried from the same queue checkpoint has `null` duration and `true` reuse |
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
@@ -720,14 +701,12 @@ pending; deferred windows do not establish settlement. Lookahead consumes no exe
 turns. Actual invocation reserves its target sequence, including all whole-input
 batch members. Discovery shares a fresh traversal and exact immutable bytes within
 the selected window, preserving each task's complete candidates and revision identity.
-Shared captures are discarded before host execution; recording recaptures current
-inputs, including added candidates, aliases and scoped reviews.
-`queue_planning.reused_screening_packets` counts newly composed packet receipts,
-separately from host calls and publications. It establishes neither measured time
-savings nor new semantic progress for campaign continuation.
+Shared captures are discarded before host execution. Screening replies record against
+the cards that were judged without another capture; evidence recording recaptures
+current inputs, including scoped reviews.
 
-`queue_planning.discovery_io`, `evidence_preparation_io`, `evidence_revalidation_io`,
-`screening_preparation_io` and `screening_revalidation_io` count existing reads in successful complete discovery
+`queue_planning.discovery_io`, `evidence_preparation_io`, `evidence_revalidation_io`
+and `screening_preparation_io` count existing reads in successful complete discovery
 captures. They separate concept `vocabulary`, full `knowledge` traversal and
 `matched_rereads`: `files`, logical `bytes`, enumeration/address/read/parse durations
 and maximum individual read duration, all in microseconds. Read time includes
@@ -743,9 +722,8 @@ the next check; durable journal transitions retain their recovery guarantees.
 Within a finalization checkpoint, status and preparation share one fresh capture.
 Its elapsed time belongs to preparation; sealed-result checks belong to verification.
 Host calls and writer waits still require fresh post-host input validation.
-`screening_revalidation_duration_ms` sums completed fresh reconstruction checkpoints;
-`screening_record_duration_ms` sums attempted receipt validation/publication, including
-page guards, ledger checks and journal I/O. Writer acquisition remains in
+`screening_record_duration_ms` sums attempted decision validation/publication, including
+ledger checks and journal I/O. Writer acquisition remains in
 `mutation_access`; work-step combined durations overlap these measurements.
 `evidence_preparation_duration_ms` covers shared wave preparation;
 `evidence_revalidation_duration_ms` covers completed fresh Work/resource reconstruction checkpoints,

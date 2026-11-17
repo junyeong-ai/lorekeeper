@@ -300,8 +300,9 @@ and require `lore work context --task-id TASK` to report `status: ready`. The de
 progressive scope first examines the ranked candidate-card roster, then reads
 selected bodies and their required reviews/evidence in full. `not-selected` certifies
 no whole-body negative judgment; unresolved `defer` blocks completion. `full-context`
-instead reads every retrieved body. Both read the complete retained source and guard
-the target, candidate inventory and scoped review/evidence dependencies.
+instead reads and guards every retrieved body. Both read the complete retained source
+and guard the target and the scoped review/evidence dependencies of what was read; a
+progressive result binds the candidates it did not select through their judged cards.
 
 Read the ready resource roster under its exact revisions. Lexical candidates are
 context, not automatic duplicates or support; open reviews are assessments to consider,
@@ -321,7 +322,7 @@ workers retain the verified handoff and return without drafting that extraction.
   "context_revision": "<work context or plan revision captured before drafting>",
   "discovery": [{"query":"source-written subject", "phrase":true, "spacing":false}],
   "selection": {
-    "policy": "progressive-evidence-v1",
+    "policy": "independent-screening-v1",
     "inventory_revision": "<ready selection inventory_revision>",
     "decisions_revision": "<ready selection decisions_revision>"
   },

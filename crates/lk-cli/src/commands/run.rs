@@ -147,8 +147,8 @@ mod native {
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
         workload: Option<crate::commands::work::workload::ObservationWorkload>,
-        selection_id: Option<String>,
-        batch_id: Option<String>,
+        screening_id: Option<String>,
+        request_revision: Option<String>,
         // Compact UTF-8 JSON, excluding prompts and host envelopes. Results measure
         // the decoded value before recording.
         request_json_bytes: Option<usize>,
@@ -175,8 +175,8 @@ mod native {
                 node_id: None,
                 node_kind: None,
                 workload: None,
-                selection_id: None,
-                batch_id: None,
+                screening_id: None,
+                request_revision: None,
                 request_json_bytes: None,
                 result_json_bytes: None,
                 preparation_duration_ms: None,
@@ -223,8 +223,6 @@ mod native {
         evidence_revalidation_duration_ms: u64,
         evidence_record_duration_ms: u64,
         screening_preparation_io: lk_vault::DiscoveryCaptureMetrics,
-        screening_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
-        screening_revalidation_duration_ms: u64,
         screening_record_duration_ms: u64,
     }
 
@@ -318,18 +316,17 @@ mod native {
 
     struct ScreeningAttempt {
         task_id: String,
-        completed_batches: usize,
-        batches: usize,
+        decided: usize,
+        candidates: usize,
         request: serde_json::Value,
-        contract_revision: String,
         metrics: WorkStepMetrics,
     }
 
     struct ScreeningReply {
         task_id: String,
         output: crate::commands::work::ScreeningResponse,
-        completed_batches: usize,
-        batches: usize,
+        decided: usize,
+        candidates: usize,
         metric_index: usize,
     }
 
@@ -425,7 +422,7 @@ mod native {
         },
         Screening {
             task: lk_queue::QueueTask,
-            selection_id: String,
+            screening_id: String,
             prepared: Option<Box<crate::commands::work::ScreeningTurn>>,
             prepared_at_call: usize,
         },
@@ -452,7 +449,7 @@ mod native {
                 | Self::Source { id }
                 | Self::RootFinalization { id, .. } => format!("work:{id}"),
                 Self::Finalization { id, .. } => format!("finalize:{id}"),
-                Self::Screening { selection_id, .. } => format!("screening:{selection_id}"),
+                Self::Screening { screening_id, .. } => format!("screening:{screening_id}"),
                 Self::Discovery { .. } | Self::Section { .. } | Self::WholeInput { .. } => {
                     return None;
                 }
@@ -512,7 +509,6 @@ mod native {
         audit_captures: usize,
         prepared_targets: usize,
         discovery_captures: usize,
-        reused_screening_packets: usize,
         discovery_io: lk_vault::DiscoveryCaptureMetrics,
     }
 
@@ -1501,9 +1497,10 @@ mod native {
                     ),
                     WorkRole::Screening => format!(
                         "screening:{}",
-                        request["selection_id"]
-                            .as_str()
-                            .expect("prepared selection identity")
+                        metrics
+                            .screening_id
+                            .as_deref()
+                            .expect("prepared screening identity")
                     ),
                     WorkRole::Finalizer => format!(
                         "work:{}",
@@ -3657,7 +3654,7 @@ mod native {
             let mut turns = Vec::new();
             for (index, (target, before)) in targets.iter().zip(prepared).enumerate() {
                 let expected = jobs[target].binding(target).expect("screening binding");
-                if expected.identity != format!("screening:{}", before.selection_id) {
+                if expected.identity != format!("screening:{}", before.screening_id) {
                     self.queue_replan = QueueReplan::Invalidate;
                     return Ok(None);
                 }
@@ -3678,8 +3675,8 @@ mod native {
                     _ => unreachable!(),
                 };
                 let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
-                metrics.selection_id = Some(before.selection_id);
-                metrics.batch_id = request["batch_id"].as_str().map(str::to_owned);
+                metrics.screening_id = Some(before.screening_id);
+                metrics.request_revision = request["request_revision"].as_str().map(str::to_owned);
                 metrics.preparation_from_queue_plan = reuse;
                 metrics.preparation_duration_ms = (index == 0 && !reuse).then_some(duration_ms);
                 metrics.request_json_bytes = Some(
@@ -3687,14 +3684,11 @@ mod native {
                         .expect("native request serializes")
                         .len(),
                 );
-                let contract_revision =
-                    execution::observation::screening_contract_revision(&request)?;
                 turns.push(ScreeningAttempt {
                     task_id,
-                    completed_batches: before.completed_batches,
-                    batches: before.batches,
+                    decided: before.decided,
+                    candidates: before.candidates,
                     request,
-                    contract_revision,
                     metrics,
                 });
             }
@@ -4153,10 +4147,9 @@ mod native {
             for ((turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 let ScreeningAttempt {
                     task_id,
-                    completed_batches,
-                    batches,
+                    decided,
+                    candidates,
                     request,
-                    contract_revision,
                     metrics: mut step,
                 } = turn;
                 step.agent_duration_ms = Some(attempt.duration_ms);
@@ -4164,7 +4157,6 @@ mod native {
                 let failed_reply =
                     |failure| crate::commands::work::ScreeningResponse::InvocationFailed {
                         request: request.clone(),
-                        contract_revision: contract_revision.clone(),
                         failure,
                     };
                 let invalid_reply = |bytes: &[u8]| {
@@ -4202,11 +4194,13 @@ mod native {
                                         &request,
                                         result_limit,
                                     ) {
-                                        Ok(output) => Some(crate::commands::work::ScreeningResponse::Decisions(output)),
+                                        Ok(output) => Some(crate::commands::work::ScreeningResponse::Decisions {
+                                            request: request.clone(),
+                                            output,
+                                        }),
                                         Err(error) if error.downcast_ref::<crate::commands::work::ScreeningRejection>().is_some() => {
                                             Some(crate::commands::work::ScreeningResponse::Rejected {
                                                 request: request.clone(),
-                                                contract_revision,
                                                 rejection: error.downcast_ref::<crate::commands::work::ScreeningRejection>().expect("typed rejection").clone(),
                                             })
                                         }
@@ -4272,8 +4266,8 @@ mod native {
                     replies.push(ScreeningReply {
                         task_id,
                         output,
-                        completed_batches,
-                        batches,
+                        decided,
+                        candidates,
                         metric_index: metrics.len(),
                     });
                 } else {
@@ -4291,7 +4285,7 @@ mod native {
             &mut self,
             decoded: DecodedScreenings,
             recorded: Option<(
-                miette::Result<crate::commands::work::RecordedScreenings>,
+                miette::Result<Vec<crate::commands::work::ScreeningRecord>>,
                 u64,
             )>,
         ) -> bool {
@@ -4305,15 +4299,6 @@ mod native {
             if let Some((recorded, total_duration_ms)) = recorded {
                 match recorded {
                     Ok(recorded) => {
-                        self.result
-                            .work_telemetry
-                            .screening_revalidation_duration_ms +=
-                            recorded.revalidation_duration_ms;
-                        self.result
-                            .work_telemetry
-                            .screening_revalidation_io
-                            .accumulate(recorded.discovery_io);
-                        let recorded = recorded.records;
                         self.result.work_telemetry.screening_record_duration_ms += recorded
                             .iter()
                             .map(|record| record.duration_ms)
@@ -4355,18 +4340,15 @@ mod native {
                                     );
                                 }
                                 Ok(crate::commands::work::ScreeningRecordOutcome::Recorded(
-                                    completed,
-                                )) if completed > reply.completed_batches => {
+                                    recorded,
+                                )) => {
                                     step.outcome = WorkOutcome::Recorded;
                                     usable = true;
-                                    self.record("candidate screening", StageState::Completed, Some(format!("{completed}/{} screening batches recorded; card decisions are not full-body assessments", reply.batches)));
-                                    if completed == reply.batches {
+                                    let decided = reply.decided + recorded;
+                                    self.record("candidate screening", StageState::Completed, Some(format!("{decided}/{} candidate decisions recorded; card decisions are not full-body assessments", reply.candidates)));
+                                    if decided == reply.candidates {
                                         self.queue_replan.refresh();
                                     }
-                                }
-                                Ok(_) => {
-                                    accepted = false;
-                                    self.failure("candidate screening", "worker did not advance the selected screening batch; work retained");
                                 }
                                 Err(error) => {
                                     accepted = false;
@@ -4398,7 +4380,7 @@ mod native {
             &mut self,
             replies: &[ScreeningReply],
         ) -> Option<(
-            miette::Result<crate::commands::work::RecordedScreenings>,
+            miette::Result<Vec<crate::commands::work::ScreeningRecord>>,
             u64,
         )> {
             if replies.is_empty() {
@@ -4407,16 +4389,14 @@ mod native {
             let started = Instant::now();
             let recorded =
                 if let Some((session, _)) = self.recording_session("candidate screening").await {
-                    crate::commands::work::record_screenings(
+                    Ok(crate::commands::work::record_screenings(
                         &session,
-                        &self.config,
-                        &self.config_revision,
                         replies
                             .iter()
                             .map(|reply| (reply.task_id.as_str(), reply.output.clone()))
                             .collect(),
                         self.supervisor.read_control(),
-                    )
+                    ))
                 } else {
                     Err(miette::miette!(
                         "candidate screening could not acquire writer access"
@@ -4467,7 +4447,7 @@ mod native {
                         );
                         (
                             recorded.screenings.map(|screenings| {
-                                (screenings, recorded.screening_duration_ms + wait_ms)
+                                (Ok(screenings), recorded.screening_duration_ms + wait_ms)
                             }),
                             recorded.inspections,
                             recorded.inspection_duration_ms,
@@ -4742,7 +4722,7 @@ mod native {
                     .collect()
                 };
                 self.result.queue_planning.prepared_targets += materialize.len();
-                let (prepared, captures, reused) = crate::commands::work::prepare_tasks_with_audit(
+                let (prepared, captures) = crate::commands::work::prepare_tasks_with_audit(
                     &session,
                     &self.config,
                     &self.config_revision,
@@ -4751,7 +4731,6 @@ mod native {
                     self.supervisor.read_control(),
                 )?;
                 self.result.queue_planning.discovery_captures += captures.captures;
-                self.result.queue_planning.reused_screening_packets += reused;
                 self.result.queue_planning.discovery_io.accumulate(captures);
                 let mut prepared = materialize
                     .into_iter()
@@ -4887,7 +4866,7 @@ mod native {
                                 target.clone(),
                                 QueueDispatch::Screening {
                                     task,
-                                    selection_id: turn.selection_id.clone(),
+                                    screening_id: turn.screening_id.clone(),
                                     prepared: Some(turn),
                                     prepared_at_call: self.result.semantic_calls,
                                 },
@@ -5017,7 +4996,7 @@ mod native {
                     (started_at.elapsed().as_millis() as u64).saturating_sub(acquisition_ms);
                 eprintln!(
                     "{}",
-                    serde_json::json!({"type":"lore.queue-planning","state":if planned.is_ok() { "completed" } else { "failed" },"attempt":self.result.queue_planning.attempts,"duration_ms":self.result.queue_planning.duration_ms-before.duration_ms,"prepared_targets":self.result.queue_planning.prepared_targets-before.prepared_targets,"discovery_captures":self.result.queue_planning.discovery_captures-before.discovery_captures,"audit_captures":self.result.queue_planning.audit_captures-before.audit_captures,"reused_screening_packets":self.result.queue_planning.reused_screening_packets-before.reused_screening_packets,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
+                    serde_json::json!({"type":"lore.queue-planning","state":if planned.is_ok() { "completed" } else { "failed" },"attempt":self.result.queue_planning.attempts,"duration_ms":self.result.queue_planning.duration_ms-before.duration_ms,"prepared_targets":self.result.queue_planning.prepared_targets-before.prepared_targets,"discovery_captures":self.result.queue_planning.discovery_captures-before.discovery_captures,"audit_captures":self.result.queue_planning.audit_captures-before.audit_captures,"elapsed_job_ms":self.started_at.elapsed().as_millis()})
                 );
                 let plan = match planned {
                     Ok(plan) => plan,

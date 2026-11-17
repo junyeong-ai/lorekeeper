@@ -562,7 +562,7 @@ execution:
     max_calls: 64                  # per native batch; scheduled invocations share this across batches
     max_parallel: 1               # concurrent evidence observers / distinct-target screening; bounded by remaining calls
     max_consecutive_calls: 4      # positive per-target phase quantum; uses the same total call budget
-    # max_screening_batches: 8    # optional complete candidate-card scope limit; exceeding it defers, never clips
+    # max_screening_batches: 8    # optional limit on the packets undecided candidate cards need; exceeding it defers, never clips
     max_query_candidates: 50      # ranked candidates each discovery query adds besides its identity matches
   profiles:
     primary:

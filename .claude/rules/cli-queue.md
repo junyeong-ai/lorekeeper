@@ -10,9 +10,9 @@ paths:
 
 ## Queue retirement
 
-- Prepare queue retirement and related rejection/action/discovery/selection cleanup before
+- Prepare queue retirement and related rejection/action/discovery/screening cleanup before
   publishing one guarded mutation plan. Preview validates the same plan without recovery
-  or canonical writes. Skip guard-only journals; empty selection-directory cleanup follows
+  or canonical writes. Skip guard-only journals; empty screening-directory cleanup follows
   successful publication and can resume separately.
 - Retirement classifications retain their same-read target and cited-source dependencies,
   including absence and RSS membership snapshots. Guard only classifications that retire
@@ -58,7 +58,8 @@ paths:
 - Discovery, finalizers and publication remain serial. Supervise every child
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
-  Capture the complete current recipe/review universe per typed view after hosts return,
+  Screening replies record against candidate keys without another capture. For evidence
+  replies, capture the complete current recipe/review universe after hosts return,
   sharing discovery across extraction Work and loading each Work once per checkpoint.
   Reevaluate current node dependencies for every serial record; preserve each mutation's
   durable checkpoint and exact page/ledger guards. Never retain a capture across a host.

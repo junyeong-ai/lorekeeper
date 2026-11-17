@@ -11,7 +11,7 @@ pub(super) struct PreparedPrune {
     summary: PruneSummary,
     plan: MutationPlan,
     root: PathBuf,
-    selection_directories: Vec<PathBuf>,
+    screening_directories: Vec<PathBuf>,
     removed: Vec<(&'static str, usize)>,
 }
 
@@ -43,9 +43,9 @@ impl PreparedPrune {
         if self.plan.has_changes() {
             session.apply(self.plan).into_diagnostic()?;
         }
-        super::super::work::cleanup_selection_directories(
+        super::super::work::cleanup_screening_directories(
             session.root(),
-            &self.selection_directories,
+            &self.screening_directories,
         )?;
         for (kind, count) in self.removed {
             if count != 0 {
@@ -218,7 +218,7 @@ fn prepare_with_classifier(
         "queue rejection receipt(s)",
         super::rejections::plan_prune(root, complete.then_some(&retained), &mut plan)?,
     )];
-    let mut selection_directories = Vec::new();
+    let mut screening_directories = Vec::new();
     if complete {
         removed.push((
             "native preparation attempt(s)",
@@ -239,22 +239,22 @@ fn prepare_with_classifier(
             "extraction discovery recipe(s)",
             super::super::work::plan_prune_discovery(root, &retained_pending, &mut plan)?,
         ));
-        let selections = super::super::work::plan_prune_selection(
+        let screening = super::super::work::plan_prune_screening(
             root,
             &pending,
             &retained_pending,
             &changed,
             &mut plan,
         )?;
-        removed.push(("extraction selection ledger(s)", selections.removed));
-        selection_directories = selections.directories;
+        removed.push(("extraction screening ledger(s)", screening.removed));
+        screening_directories = screening.directories;
     }
     plan.validate_addresses(root).into_diagnostic()?;
     Ok(PreparedPrune {
         summary,
         plan,
         root: root.canonicalize().into_diagnostic()?,
-        selection_directories,
+        screening_directories,
         removed,
     })
 }
@@ -964,7 +964,7 @@ mod tests {
             "section-actions/unknown.json",
             "result-actions/unknown.json",
             "discovery/unknown.recovery.json",
-            "selection/unknown",
+            "screening/unknown",
         ] {
             let fixture = Fixture::new();
             let path = Path::new(".lorekeeper/queue").join(store);

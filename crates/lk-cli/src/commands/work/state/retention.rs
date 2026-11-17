@@ -1487,7 +1487,7 @@ mod tests {
             context_revision: "admitted-context".into(),
             discovery: vec![],
             selection: Some(lk_queue::ExtractionSelection {
-                policy: lk_queue::ExtractionSelectionPolicy::ProgressiveV1,
+                policy: lk_queue::ExtractionSelectionPolicy::IndependentV1,
                 inventory_revision: "complete-inventory".into(),
                 decisions_revision: "screened".into(),
             }),

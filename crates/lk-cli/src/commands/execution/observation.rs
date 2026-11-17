@@ -7,8 +7,7 @@ use crate::commands::work::state::{ObservationTextError, OutputCapacity, WorkFin
 mod questions;
 mod screening;
 use questions::{ActiveQuestions, Question, Resolution};
-pub(in crate::commands) use screening::packet_contract_revision as screening_packet_contract_revision;
-pub(in crate::commands) use screening::{screening_contract_revision, screening_request};
+pub(in crate::commands) use screening::screening_request;
 
 pub(in crate::commands) struct Invocation {
     pub command: tokio::process::Command,
@@ -127,7 +126,7 @@ struct ObservationBody {
 }
 
 const EVIDENCE_IDENTITIES: [&str; 3] = ["work_id", "node_id", "input_revision"];
-const SCREENING_IDENTITIES: [&str; 3] = ["selection_id", "batch_id", "input_revision"];
+const SCREENING_IDENTITIES: [&str; 2] = ["task_id", "request_revision"];
 
 fn identities(input: &Value, fields: &[&str]) -> miette::Result<serde_json::Map<String, Value>> {
     fields
@@ -1218,7 +1217,7 @@ mod tests {
     }
 
     fn request() -> Value {
-        json!({"kind":"inspect","work_id":"w".repeat(64),"node_id":"n".repeat(64),"selection_id":"s".repeat(64),"batch_id":"b".repeat(64),"input_revision":"r".repeat(64),"max_result_bytes":2048,"max_reason_json_bytes":2048,"candidates":[]})
+        json!({"kind":"inspect","work_id":"w".repeat(64),"node_id":"n".repeat(64),"task_id":"t".repeat(64),"request_revision":"b".repeat(64),"input_revision":"r".repeat(64),"max_result_bytes":2048,"max_reason_json_bytes":2048,"candidates":[]})
     }
 
     fn completion() -> Value {
@@ -1268,11 +1267,15 @@ mod tests {
         let expected = "054865db6396fc652894cc3626064fd2100de58914e60695eb7957895831f45e";
         let damaged = "054865db6396fc652894cc3626064fd2100de589e60695eb7957895831f45e";
         for id in [expected, damaged] {
-            let error = decode_screening(json!({"selection_id":id,"decisions":[]}), &request, 2048)
-                .unwrap_err()
-                .to_string();
+            let error = decode_screening(
+                json!({"request_revision":id,"decisions":[]}),
+                &request,
+                2048,
+            )
+            .unwrap_err()
+            .to_string();
             assert!(error.contains(&format!(
-                "selection_id (string, {} Unicode scalars",
+                "request_revision (string, {} Unicode scalars",
                 id.len()
             )));
             assert!(!error.contains(id));
@@ -1347,8 +1350,8 @@ mod tests {
             for field in [
                 "work_id",
                 "node_id",
-                "selection_id",
-                "batch_id",
+                "task_id",
+                "request_revision",
                 "input_revision",
             ] {
                 changed[field] = json!("different");
@@ -1387,8 +1390,8 @@ mod tests {
                 for field in [
                     "work_id",
                     "node_id",
-                    "selection_id",
-                    "batch_id",
+                    "task_id",
+                    "request_revision",
                     "input_revision",
                 ] {
                     assert!(schema["properties"].get(field).is_none());
@@ -1407,6 +1410,7 @@ mod tests {
             let mut invalid = request();
             invalid["input_revision"] = Value::Null;
             assert!(build_invocation(&profile, &invalid, 8192, 2048).is_err());
+            invalid["request_revision"] = Value::Null;
             assert!(build_screening_invocation(&profile, &invalid, 2048).is_err());
         }
     }
@@ -1421,7 +1425,7 @@ mod tests {
                 "engine: {engine}\nmodel: selected-model\ntimeout_seconds: 1\n{options}"
             ))
             .unwrap();
-            let input = json!({"kind":"inspect","work_id":"w","node_id":"n","selection_id":"s","batch_id":"b","input_revision":"r","max_result_bytes":2048,"candidates":[]});
+            let input = json!({"kind":"inspect","work_id":"w","node_id":"n","task_id":"t","request_revision":"b","input_revision":"r","max_result_bytes":2048,"candidates":[]});
             for invocation in [
                 build_invocation(&profile, &input, 8192, 2048),
                 build_screening_invocation(&profile, &input, 2048),

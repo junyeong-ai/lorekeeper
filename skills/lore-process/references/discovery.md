@@ -68,7 +68,7 @@ status rather than assuming that a context revision or resource roster is ready:
 | `needs-discovery` | Record meaningful recipes against the current target. |
 | `needs-source-observations` | Run `work source-plan --task-id ID`; complete its bounded reads and reductions, then return to `work context`. |
 | `needs-admission` | Read `work cost --task-id ID`; explicitly reconsider the discovery scope or capacity. Keep the task incomplete and all candidates/paid decisions retained. |
-| `needs-screening` | Run `work select --task-id ID`; examine and record each returned packet. |
+| `needs-screening` | Run `work select --task-id ID`; record a decision for every card of each returned packet until it reports `ready`. A fully decided roster becomes ready once `work select` has sealed it. |
 | `ready` | Retain `context_revision`, `selection` and the exact resource roster; read that evidence before drafting. |
 
 The source phase uses the normal `work status`, `work read`, `work record` and
@@ -76,38 +76,41 @@ The source phase uses the normal `work status`, `work read`, `work record` and
 target dependencies. **Do not run `work finish` for this phase:** its observations
 prepare screening; they are not an extraction result. Preserve attributed source
 questions and processing blockers through later examination and finalization.
-`work cost --task-id ID` is read-only: it reports exact candidate and packet counts,
-per-query matched and rostered pages, compact JSON bytes, recorded packets and
-deferred/unknown decisions. Remaining request bytes cover unrecorded packets; they exclude future
-reassessment of deferred decisions, prompts, host envelopes, tokens and billed cost.
+`work cost --task-id ID` is read-only: it reports the roster's candidates, per-query
+matched and rostered pages, the packets the undecided candidates still need, compact
+JSON bytes and deferred/unknown counts. Remaining request bytes cover undecided
+candidates; they exclude future reassessment of deferred decisions, prompts, host
+envelopes, tokens and billed cost.
 Packet cost remains unknown until oversized source observations are complete.
-An optional `execution.work.max_screening_batches` bounds the complete selection's
-packet count; omission adds no limit. A completed ledger remains usable. Exceeding
-the limit defers the scope without dropping candidates or rewriting recorded work.
+An optional `execution.work.max_screening_batches` bounds the packets the undecided
+candidates need; omission adds no limit. A completely decided roster remains usable.
+Exceeding the limit defers the scope without dropping candidates or rewriting recorded
+decisions.
 Refine a recipe only when its expressed source question is wrong or incomplete;
 large lexical scope alone does not prove irrelevance. An unaffordable valid scope
-remains deferred, never silently clipped. Recipe changes create a new scope and
-preserve prior decisions rather than relabeling them.
+remains deferred, never silently clipped. A recipe change alters the roster and the
+rows of the candidates it matches; a row that stays the same keeps its decision and
+nothing is relabeled.
 If complete source observations reveal missing relevant subjects, revise the recipes
-and recapture the inventory before choosing evidence for those subjects.
+before choosing evidence for those subjects.
 
-`work select --task-id ID --limit 20 --offset 0` creates or resumes a guarded ledger.
-It returns one bounded `request`, progress and paged receipt metadata. Receipt pagination
-does not remove candidates from coverage. Read the request's complete source context
-and every assigned card. Cards preserve declared identity, bounded openings/matches,
-available section locators, truncation and review counts; they are not full page reads.
-Never load the whole manifest or all candidate bodies to perform screening.
+`work select --task-id ID` returns the next packet of undecided candidates as one
+bounded `request`, with progress and any `hold`. It writes nothing while candidates
+remain undecided. Read the request's complete `source` and every assigned card. Cards
+preserve declared identity, bounded openings/matches, outline, truncation and review
+counts; they are not full page reads. Judge each card on its own: a decision depends
+only on that card and the source, never on the other cards, their order or how many
+are assigned. Never load all candidate bodies to perform screening.
 
 For standalone `select-record`, return one strict output covering every candidate in
 that request exactly once:
 
 ```json
 {
-  "selection_id": "<request.selection_id>",
-  "batch_id": "<request.batch_id>",
-  "input_revision": "<request.input_revision>",
+  "task_id": "<request.task_id>",
+  "request_revision": "<request.request_revision>",
   "decisions": [{
-    "candidate_key": "<assigned exact owner>",
+    "candidate_key": "<that candidate's request.candidates[].candidate_key>",
     "decision": "inspect",
     "reason": "The card may describe the same scoped subject; read the body."
   }]
@@ -122,32 +125,37 @@ Insufficient previews do not establish irrelevance. Each reason’s serialized J
 admission rules.
 
 For interactive processing, stage the output under the vault's `.lorekeeper/` and run
-`work select-record --task-id ID --file FILE`, then request the next packet.
+`work select-record --task-id ID --file FILE`, then run `work select` again.
 Native structured workers instead follow the [native screening response](bounded-work.md#native-screening-responses)
 contract: each decision uses its assigned `candidate_ref`, never `candidate_key` or
-response order. Rust binds the original path and selection/batch/input identities;
+response order. Rust binds the candidate keys and the task/request identities;
 the identity-bearing example above is not the native response format.
-Unknown or deferred candidates block extraction completion. To reassess a recorded
-batch, obtain its exact current packet with `work select --task-id ID --batch-id BATCH_ID`.
-This read-only lookup also returns its `receipt.revision`. Submit the reconsidered
-whole batch using `select-record --previous-revision RECEIPT_REV`; ordinary retries
-cannot overwrite earlier decisions. After diagnosing a failed native invocation,
-`work select-retry --task-id ID --batch-id BATCH_ID`, optionally with `--dry-run`,
-clears only its current operational hold. It never changes paid decisions or semantic
-rejections. Do not reconstruct packets from the manifest or copy new guards onto old decisions.
+Unknown or deferred candidates block extraction completion. A recorded decision other
+than `defer` is final for that card under that source and screening model. To
+reassess deferred cards, run `work select --task-id ID --reassess`: it issues only the
+deferred rows, each with its `previous` decision reference, and `select-record` answers
+that request. After diagnosing a failed native invocation,
+`work select-retry --task-id ID`, optionally with `--dry-run`, clears only the current
+packet's operational hold. It never changes paid decisions or semantic rejections.
+Do not reconstruct requests from stored packets or copy keys between requests.
 
-An empty candidate inventory needs no screening model response. Let `work select`
-record the empty selection, then continue to the full retained-source read. No matches
-do not establish that the source contains nothing to extract.
+Once every candidate is decided and none is deferred, `work select` seals that exact
+roster and reports `status: ready` with the typed `selection`. An empty candidate roster
+needs no screening model response: `work select` seals it at once. No matches do not
+establish that the source contains nothing to extract.
 
 ## Draft from admitted evidence
 
-After screening, call `work context` again and require `status: ready`. Read the retained
-source, selected bodies and their required scoped reviews/current or verified archived
-evidence under the captured revisions. A reused owner must be selected and fully read.
-Excluded candidate bytes and all scoped review/evidence guards remain pinned even though
-their bodies are not semantic inputs. New matches, owner/alias changes, edits or changed
-dependencies invalidate the selection; recapture and reconsider rather than retagging it.
+After `work select` reports `ready`, call `work context` and require `status: ready`.
+Read the retained source, selected bodies and their required scoped reviews/current or
+verified archived evidence under the captured revisions. A reused owner must be selected
+and fully read. The source, the selected owners and their scoped reviews stay pinned
+through publication; a change to any of them requires rereading and a regenerated
+result, never a retagged one. A candidate that was not selected is bound by the card
+that was judged: its later edits, new matches and owner or alias changes do not
+invalidate a result drafted against the sealed roster. They return as undecided cards
+before the next draft, and `work context` reports `needs-screening` again until the
+current roster is decided and sealed.
 
 Ready context reports `resource_count` and `part_count`. When `requires_bounded_work`
 is true, `resources` is null: execute `plan_command` and complete the bounded-work
@@ -156,8 +164,9 @@ tasks and return; the controller schedules remaining source/screening/evidence u
 Do not replace native resumption with a forced manual whole-queue drain.
 
 The final extraction carries the exact ready `context_revision`, `discovery` recipes
-and returned typed `selection`. Coverage distinguishes card screening from selected
-full-body inspection; it never certifies unselected knowledge or semantic truth.
+and returned typed `selection`, which names the sealed roster and its decisions.
+Coverage distinguishes card screening from selected full-body inspection; it never
+certifies unselected knowledge or semantic truth.
 
 `full-context` explicitly retains the complete retained-input plus every retrieved
 candidate-body contract. It can be selected globally or through a profile's `work`

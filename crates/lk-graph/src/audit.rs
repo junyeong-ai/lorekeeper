@@ -1295,23 +1295,6 @@ pub fn review_dependencies_with_inventory(
     scoped_review_dependencies(root, pages, &mut index, &receipts)
 }
 
-/// Capture evidence-only card review inputs, separately from assessment subject scope.
-/// Owners are verified canonical vault-relative addresses.
-pub fn review_card_dependencies_with_inventory(
-    root: &Path,
-    owners: &BTreeSet<String>,
-    inventory: &mut lk_vault::ReviewInventory,
-    read: &lk_vault::ReadControl,
-) -> Result<Vec<AuditReviewDependency>, GraphError> {
-    read.check().map_err(GraphError::from)?;
-    let mut index = ReviewDependencyIndex::from_inventory(root, inventory, read)?;
-    for owner in owners {
-        index.card_dependencies(root, owner)?;
-    }
-    read.check().map_err(GraphError::from)?;
-    Ok(index.card_dependencies.into_values().collect())
-}
-
 /// Reuse freshly read reports within one capture, retaining current review/evidence guards.
 pub fn review_dependencies_with_reports(
     root: &Path,

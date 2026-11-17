@@ -35,9 +35,9 @@ pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUES
 pub(super) const FINALIZATION_REVISION_ENV: &str = "LORE_WORK_FINALIZATION_REVISION";
 use resources::{Prepared, Subject};
 #[cfg(unix)]
-pub(in crate::commands) use selection::computation::is_computed_request as is_computed_screening_request;
-#[cfg(unix)]
-pub(in crate::commands) use selection::computation::receipt_overhead as screening_receipt_overhead;
+pub(in crate::commands) use selection::{
+    INSTRUCTION as SCREENING_INSTRUCTION, reply_schema as screening_reply_schema,
+};
 use state::{Work, WorkLimits, WorkOutput};
 
 use super::queue::application::{
@@ -47,48 +47,36 @@ use super::queue::application::{
 #[derive(clap::Subcommand)]
 #[command(defer = true)]
 pub enum WorkCommand {
-    /// Inspect complete candidate-screening costs without creating or changing work
+    /// Inspect the candidate roster and remaining screening cost without changing work
     Cost {
         /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
     },
-    /// Plan or resume one bounded candidate-screening packet without publishing knowledge
+    /// Read the next bounded packet of undecided candidates; seal the roster once all are decided
     Select {
         /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
-        /// Reread this exact packet without creating or recovering state
+        /// Issue the deferred decisions for explicit reassessment instead
         #[arg(long)]
-        batch_id: Option<String>,
-        /// Receipt pagination limit (1..100); does not reduce candidate coverage
-        #[arg(long, default_value = "20")]
-        limit: usize,
-        /// Skip this many recorded receipt summaries; candidate coverage is unchanged
-        #[arg(long, default_value = "0")]
-        offset: usize,
+        reassess: bool,
     },
-    /// Record exact decisions for a candidate-screening packet
+    /// Record a decision for every candidate of one issued packet
     SelectRecord {
         /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
-        /// JSON decisions for every candidate in the exact selected packet
+        /// JSON decisions answering the packet's exact request revision
         #[arg(long)]
         file: PathBuf,
-        /// Exact receipt revision being reassessed; ordinary retries never overwrite decisions
-        #[arg(long)]
-        previous_revision: Option<String>,
     },
-    /// Clear only a current candidate packet's operational hold after diagnosing its failure
+    /// Clear only the current packet's operational hold after diagnosing its failure
     SelectRetry {
         /// Exact retained concept-extraction task identifier
         #[arg(long)]
         task_id: String,
-        /// Exact candidate packet retaining the operational attempt
-        #[arg(long)]
-        batch_id: String,
-        /// Validate current packet guards without publishing or recovering state
+        /// Validate the current hold without publishing or recovering state
         #[arg(long)]
         dry_run: bool,
     },
@@ -456,22 +444,37 @@ pub(super) fn guard_queue(
         config_revision,
         task_id,
         result,
+        None,
         mutation,
         &lk_vault::ReadControl::default(),
     )
 }
 
-pub(super) fn guard_queue_controlled(
+/// Add the guards application would need for `result`. `sealing` is the candidate roster
+/// this plan stores beside a freshly drafted extraction result.
+#[allow(clippy::too_many_arguments)]
+fn guard_queue_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
     result: Value,
+    sealing: Option<&selection::RosterSeal>,
     mutation: &mut lk_vault::MutationPlan,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
-    let guard =
-        prepare_queue_publication_controlled(root, config, config_revision, task_id, result, read)?;
+    let guard = prepare_queue_publication_controlled(
+        root,
+        config,
+        config_revision,
+        task_id,
+        result,
+        sealing,
+        read,
+    )?;
+    if let Some(seal) = sealing {
+        seal.plan(root, mutation)?;
+    }
     let owned = guard
         .pages
         .iter()
@@ -494,16 +497,18 @@ pub(super) fn prepare_queue_publication(
         config_revision,
         task_id,
         result,
+        None,
         &lk_vault::ReadControl::default(),
     )
 }
 
-pub(super) fn prepare_queue_publication_controlled(
+fn prepare_queue_publication_controlled(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
     task_id: &str,
     result: Value,
+    sealing: Option<&selection::RosterSeal>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<QueuePublicationGuard> {
     let root = root.canonicalize().into_diagnostic()?;
@@ -522,17 +527,19 @@ pub(super) fn prepare_queue_publication_controlled(
             ));
         }
         if let Some(selection) = &typed.selection {
-            let (selected, _) = selected_task_controlled(
+            let sealed = sealed_task_controlled(
                 &root,
                 config,
                 config_revision,
-                task_id,
+                &prepared,
                 &typed.discovery,
                 selection,
-                &mut selection_guards,
+                sealing,
                 read,
             )?;
-            prepared = selected;
+            sealed.roster.guard(&mut selection_guards);
+            prepared = sealed.prepared;
+            prepared.pages.extend(sealed.observation_guards);
         } else {
             prepared = resources::with_discovery_controlled(
                 &root,
@@ -774,8 +781,8 @@ pub(super) fn task_context(
                 "authority":"Record explicit discovery queries against the exact target before selecting candidate evidence. No semantic read or completion is certified."}));
         };
         match screening(&root, config, config_revision, task_id, queries)? {
-            ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
-            ScreeningPreparation::SourceBlocked { work_id, .. } => {
+            ScreeningPreparation::Capacity(capacity) => return Err(capacity.into()),
+            ScreeningPreparation::SourceBlocked { work_id } => {
                 return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
             }
             ScreeningPreparation::Source { work, .. } => {
@@ -787,27 +794,26 @@ pub(super) fn task_context(
                 );
             }
             ScreeningPreparation::Candidates(screening) => {
-                if let Some(reason) = screening.selection.admission_reason(config, &root)? {
+                if let Some(reason) = screening.selection.admission_reason(config)? {
                     return Ok(json!({"status":"needs-admission", "context_revision":null,
                         "requires_screening":true,"resources":null,"reason":reason,
-                        "cost":screening.selection.cost(&root, &screening.inventory.capture)?,
+                        "cost":screening.selection.cost(&screening.inventory.capture)?,
                         "cost_command":["lore","work","cost","--task-id",task_id]}));
                 }
-                let planned = screening.selection.is_planned(&root)?;
-                let ledger = planned
-                    .then(|| screening.selection.ledger(&root))
-                    .transpose()?;
-                if let Some(ledger) = ledger.filter(|ledger| ledger.progress.complete) {
-                    admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
-                } else {
+                let progress = screening.selection.progress();
+                if !progress.complete || !screening.selection.seal()?.is_published(&root)? {
                     return Ok(json!({"status":"needs-screening","context_revision":null,
                         "requires_screening":true,"requires_source_work":false,"resources":null,
-                        "candidate_count":screening.inventory.capture.candidates.len(),
-                        "selection_id":screening.selection.id,"planned":planned,
-                        "cost":screening.selection.cost(&root, &screening.inventory.capture)?,
+                        "progress":progress,
+                        "cost":screening.selection.cost(&screening.inventory.capture)?,
                         "plan_command":["lore","work","select","--task-id",task_id],
-                        "authority":"Complete retrieval is not a semantic assessment. Read and record each assigned candidate-card decision; unresolved applicability remains deferred. Selected bodies still require full evidence inspection before publication."}));
+                        "authority":"A ranked roster is not a semantic assessment, and matches it left out were not examined. Read and record each assigned candidate-card decision; unresolved applicability remains deferred. `work select` seals a completely decided roster before evidence is read. Selected bodies still require full evidence inspection before publication."}));
                 }
+                let read = lk_vault::ReadControl::default();
+                let mut reviews =
+                    lk_vault::ReviewInventory::load_controlled(&root, &config.vault.dirs, &read)
+                        .into_diagnostic()?;
+                admitted_task(&root, config, &screening, &mut reviews, &read)?
             }
         }
     } else {
@@ -911,17 +917,17 @@ pub(super) fn plan_prune_discovery(
     discovery::plan_prune(root, pending, plan)
 }
 
-pub(super) fn plan_prune_selection(
+pub(super) fn plan_prune_screening(
     root: &Path,
     pending: &std::collections::BTreeSet<(String, String)>,
     retained: &std::collections::BTreeSet<(String, String)>,
     changed_queue_files: &std::collections::BTreeSet<PathBuf>,
     plan: &mut lk_vault::MutationPlan,
-) -> miette::Result<selection::PreparedSelectionPrune> {
+) -> miette::Result<selection::PreparedScreeningPrune> {
     selection::plan_prune(root, pending, retained, changed_queue_files, plan)
 }
 
-pub(super) fn cleanup_selection_directories(
+pub(super) fn cleanup_screening_directories(
     root: &Path,
     directories: &[PathBuf],
 ) -> miette::Result<()> {
@@ -1001,18 +1007,22 @@ fn task_for_plan(
     })?;
     let screening =
         screening(root, config, config_revision, task_id, &queries)?.into_candidates()?;
-    if !screening.selection.is_planned(root)? {
+    if !screening.selection.progress().complete {
         return Err(miette::miette!(
             "candidate screening is incomplete; use lore work select before planning selected evidence"
         ));
     }
-    let ledger = screening.selection.ledger(root)?;
-    admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)
+    let read = lk_vault::ReadControl::default();
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, &read)
+        .into_diagnostic()?;
+    admitted_task(root, config, &screening, &mut reviews, &read)
 }
 
 struct Screening {
     selection: selection::Selection,
     inventory: resources::SelectionInventory,
+    /// The completed source Work result, when the source was too large to screen whole.
+    source_observations: Option<Value>,
 }
 
 enum ScreeningPreparation {
@@ -1021,20 +1031,50 @@ enum ScreeningPreparation {
         prepared: Box<Prepared>,
     },
     Candidates(Box<Screening>),
-    Capacity {
-        inventory: Box<resources::SelectionInventory>,
-        capacity: selection::ScreeningCapacity,
-    },
+    Capacity(selection::ScreeningCapacity),
     SourceBlocked {
-        inventory: Box<resources::SelectionInventory>,
         work_id: String,
     },
+}
+
+/// How far a task's source is ready to be screened against.
+enum SourceReadiness {
+    Ready(Box<selection::Selection>, Option<Value>),
+    NeedsObservations(Box<Work>),
+    Blocked(String),
 }
 
 fn source_blocked_reason(work_id: &str) -> String {
     format!(
         "source observation Work {work_id} retains processing blockers; resolve or replan before candidate screening"
     )
+}
+
+/// What a screener reads beside the cards: the task's own content and review scope. It
+/// carries no target revision, configuration or Work identity, so a decision stays valid
+/// while those change around an unchanged source.
+fn source_purpose(source: &Prepared) -> Value {
+    let purpose = &source.context["purpose"];
+    json!({"task_kind":purpose["task_kind"], "target":purpose["target"],
+        "parameters":purpose["parameters"], "review_dependencies":purpose["review_dependencies"]})
+}
+
+fn retained_source(source: &Prepared) -> Value {
+    json!({"role":"complete-retained-input", "purpose":source_purpose(source),
+        "authority":source.context["authority"], "resources":source.resources})
+}
+
+fn observed_source(source: &Prepared, observation: &Value) -> Value {
+    json!({"role":"complete-bounded-source-observations", "purpose":source_purpose(source),
+        "observation":{"output":observation["output"], "evidence":observation["evidence"]}})
+}
+
+fn source_characters(source: &Prepared) -> miette::Result<usize> {
+    source.resources.iter().try_fold(0usize, |total, resource| {
+        total
+            .checked_add(resource.text.chars().count())
+            .ok_or_else(|| miette::miette!("source reading workload overflow"))
+    })
 }
 
 fn screening(
@@ -1076,154 +1116,84 @@ fn screening_with_inventory(
     let Subject::Queue {
         task_id,
         cache_hash,
-        target,
-        target_revision,
+        ..
     } = &inventory.source.subject
     else {
         return Err(miette::miette!(
             "candidate screening requires a queue subject"
         ));
     };
-    let binding = selection::SelectionBinding {
-        task_id: task_id.clone(),
-        cache_hash: cache_hash.clone(),
-        target: target.clone(),
-        target_revision: target_revision.clone(),
-        config_revision: config
-            .semantic_work_revision()
-            .unwrap_or(config_revision)
-            .into(),
-        inventory_revision: inventory.revision.clone(),
+    let (task_id, cache_hash) = (task_id.clone(), cache_hash.clone());
+    let contract_revision = selection::contract_revision(config)?;
+    let identity = selection::SelectionIdentity {
+        task_id: &task_id,
+        cache_hash: &cache_hash,
+        contract_revision: &contract_revision,
     };
     let bounds = limits(config)?;
-    let source_revision = inventory.source.revision(config_revision)?;
-    let mut context = if inventory.capture.candidates.is_empty() {
-        json!({"role":"no-candidates", "source_revision":source_revision})
-    } else {
-        json!({"role":"complete-retained-input", "source_revision":source_revision,
-            "context":inventory.source.context, "resources":inventory.source.resources})
+    let bounds = selection::ScreeningLimits {
+        max_input_bytes: bounds.max_input_bytes,
+        max_result_bytes: bounds.max_result_bytes,
     };
-    let mut source_fits = match selection::Selection::source_fits(
-        &binding,
-        &context,
-        &inventory.capture,
-        bounds.max_input_bytes,
-        bounds.max_result_bytes,
-    ) {
-        Ok(fits) => fits,
-        Err(error) => {
-            let Some(capacity) = error
-                .downcast_ref::<selection::ScreeningCapacity>()
-                .copied()
-            else {
-                return Err(error);
-            };
-            return Ok(ScreeningPreparation::Capacity {
-                inventory: Box::new(inventory),
-                capacity,
-            });
-        }
-    };
-    if source_fits
-        && !inventory.capture.candidates.is_empty()
-        && inventory
-            .source
-            .resources
-            .iter()
-            .try_fold(0usize, |total, resource| {
-                total
-                    .checked_add(resource.text.chars().count())
-                    .ok_or_else(|| miette::miette!("source reading workload overflow"))
-            })?
-            > lk_core::semantic::INSPECTION_CHARACTERS.get()
-    {
-        let retained = (|| {
-            selection::Selection::build(
-                binding.clone(),
-                context.clone(),
-                &inventory.capture,
-                bounds.max_input_bytes,
-                bounds.max_result_bytes,
-            )?
-            .prefer_saved_configuration(
-                root,
-                config_revision,
-                &inventory.source.legacy_revision(config_revision)?,
-            )?
-            .prefer_computed_receipts(root)
-        })();
-        let retained = match retained {
-            Ok(retained) => retained,
-            Err(error) => {
-                let Some(capacity) = error
-                    .downcast_ref::<selection::ScreeningCapacity>()
-                    .copied()
-                else {
-                    return Err(error);
-                };
-                return Ok(ScreeningPreparation::Capacity {
-                    inventory: Box::new(inventory),
-                    capacity,
-                });
-            }
-        };
-        if retained.is_planned(root)? {
-            return Ok(ScreeningPreparation::Candidates(Box::new(Screening {
-                selection: retained.with_absent_pages(&inventory.absent_pages),
-                inventory,
-            })));
-        }
-        source_fits = false;
-    }
-    if !source_fits {
-        let work = expected(root, &inventory.source, config, config_revision)?;
-        let observed = if work.is_planned(root)? {
-            match work.result_if_complete_with_guards(root, &inventory.source.resources) {
-                Ok(observed) => observed,
-                Err(error) => {
-                    let Some(capacity) = error.downcast_ref::<state::InputCapacity>() else {
-                        return Err(error);
-                    };
-                    let capacity = selection::ScreeningCapacity::SourceInput {
-                        required_bytes: capacity.actual_bytes,
-                        max_bytes: capacity.max_bytes,
-                    };
-                    return Ok(ScreeningPreparation::Capacity {
-                        inventory: Box::new(inventory),
-                        capacity,
-                    });
-                }
-            }
+    let prepared = (|| -> miette::Result<SourceReadiness> {
+        let rows = selection::Rows::build(&inventory.capture)?;
+        let whole = retained_source(&inventory.source);
+        let fits = rows.is_empty()
+            || source_characters(&inventory.source)?
+                <= lk_core::semantic::INSPECTION_CHARACTERS.get()
+                && selection::Selection::source_fits(&identity, &whole, &rows, bounds)?;
+        let (source, observations) = if fits {
+            (whole, None)
         } else {
-            None
+            let work = expected(root, &inventory.source, config, config_revision)?;
+            let observed = if work.is_planned(root)? {
+                work.result_if_complete_with_guards(root, &inventory.source.resources)
+                    .map_err(|error| match error.downcast_ref::<state::InputCapacity>() {
+                        Some(capacity) => selection::ScreeningCapacity::SourceInput {
+                            required_bytes: capacity.actual_bytes,
+                            max_bytes: capacity.max_bytes,
+                        }
+                        .into(),
+                        None => error,
+                    })?
+            } else {
+                None
+            };
+            let Some((result, guards)) = observed else {
+                return Ok(SourceReadiness::NeedsObservations(Box::new(work)));
+            };
+            inventory.source.pages.extend(guards);
+            if result["output"]["unresolved"]
+                .as_array()
+                .is_some_and(|values| !values.is_empty())
+            {
+                return Ok(SourceReadiness::Blocked(work.plan.id));
+            }
+            (observed_source(&inventory.source, &result), Some(result))
         };
-        let Some((result, guards)) = observed else {
-            return Ok(ScreeningPreparation::Source {
-                work: Box::new(work),
-                prepared: Box::new(inventory.source),
-            });
-        };
-        inventory.pages.extend(guards);
-        if result["output"]["unresolved"]
-            .as_array()
-            .is_some_and(|values| !values.is_empty())
-        {
-            return Ok(ScreeningPreparation::SourceBlocked {
-                inventory: Box::new(inventory),
-                work_id: work.plan.id,
-            });
+        selection::Selection::build(
+            root,
+            &identity,
+            source,
+            &inventory.capture.queries,
+            rows,
+            bounds,
+        )
+        .map(|selection| SourceReadiness::Ready(Box::new(selection), observations))
+    })();
+    Ok(match prepared {
+        Ok(SourceReadiness::Ready(selection, source_observations)) => {
+            ScreeningPreparation::Candidates(Box::new(Screening {
+                selection: *selection,
+                inventory,
+                source_observations,
+            }))
         }
-        context = json!({"role":"complete-bounded-source-observations", "source_revision":source_revision,
-            "observation":result});
-    }
-    let selection = match selection::Selection::build(
-        binding,
-        context,
-        &inventory.capture,
-        bounds.max_input_bytes,
-        bounds.max_result_bytes,
-    ) {
-        Ok(selection) => selection,
+        Ok(SourceReadiness::Blocked(work_id)) => ScreeningPreparation::SourceBlocked { work_id },
+        Ok(SourceReadiness::NeedsObservations(work)) => ScreeningPreparation::Source {
+            work,
+            prepared: Box::new(inventory.source),
+        },
         Err(error) => {
             let Some(capacity) = error
                 .downcast_ref::<selection::ScreeningCapacity>()
@@ -1231,36 +1201,9 @@ fn screening_with_inventory(
             else {
                 return Err(error);
             };
-            return Ok(ScreeningPreparation::Capacity {
-                inventory: Box::new(inventory),
-                capacity,
-            });
+            ScreeningPreparation::Capacity(capacity)
         }
-    }
-    .prefer_saved_configuration(
-        root,
-        config_revision,
-        &inventory.source.legacy_revision(config_revision)?,
-    )?;
-    let selection = match selection.prefer_computed_receipts(root) {
-        Ok(selection) => selection,
-        Err(error) => {
-            let Some(capacity) = error
-                .downcast_ref::<selection::ScreeningCapacity>()
-                .copied()
-            else {
-                return Err(error);
-            };
-            return Ok(ScreeningPreparation::Capacity {
-                inventory: Box::new(inventory),
-                capacity,
-            });
-        }
-    };
-    Ok(ScreeningPreparation::Candidates(Box::new(Screening {
-        selection: selection.with_absent_pages(&inventory.absent_pages),
-        inventory,
-    })))
+    })
 }
 
 fn current_screening(
@@ -1303,8 +1246,8 @@ impl ScreeningPreparation {
     fn into_candidates(self) -> miette::Result<Box<Screening>> {
         match self {
             Self::Candidates(screening) => Ok(screening),
-            Self::Capacity { capacity, .. } => Err(capacity.into()),
-            Self::SourceBlocked { work_id, .. } => {
+            Self::Capacity(capacity) => Err(capacity.into()),
+            Self::SourceBlocked { work_id } => {
                 Err(miette::miette!("{}", source_blocked_reason(&work_id)))
             }
             Self::Source { .. } => Err(miette::miette!(
@@ -1312,33 +1255,12 @@ impl ScreeningPreparation {
             )),
         }
     }
-
-    fn persist(
-        &self,
-        session: &lk_vault::MutationSession,
-        config: &lk_core::config::Config,
-        config_revision: &str,
-    ) -> miette::Result<()> {
-        match self {
-            Self::Capacity { capacity, .. } => return Err((*capacity).into()),
-            Self::SourceBlocked { work_id, .. } => {
-                return Err(miette::miette!("{}", source_blocked_reason(work_id)));
-            }
-            Self::Source { prepared, .. } => {
-                persist_prepared(session, config, config_revision, prepared)?;
-            }
-            Self::Candidates(screening) => screening
-                .selection
-                .create(session, &screening.inventory.pages)?,
-        }
-        Ok(())
-    }
 }
 
 pub(super) struct ScreeningTurn {
-    pub selection_id: String,
-    pub completed_batches: usize,
-    pub batches: usize,
+    pub screening_id: String,
+    pub decided: usize,
+    pub candidates: usize,
     pub state: ScreeningState,
 }
 
@@ -1349,78 +1271,35 @@ pub(super) enum ScreeningState {
 }
 
 impl Screening {
-    fn turn(&self, root: &Path) -> miette::Result<ScreeningTurn> {
-        let (progress, request) = self.selection.prepare(root)?;
-        let state = match (
-            request,
-            progress.complete,
-            progress.unknown,
-            progress.deferred,
-        ) {
-            (None, true, 0, 0) => ScreeningState::Complete,
-            (Some(request), false, unknown, _) if unknown > 0 => ScreeningState::Ready(request),
-            (None, false, 0, deferred)
-                if deferred > 0 && progress.completed_batches == progress.batches =>
-            {
-                ScreeningState::Deferred(format!(
-                    "{deferred} deferred candidate decisions remain; work retained for explicit reassessment"
-                ))
-            }
-            (None, false, _, _) if progress.processing_held_batches > 0 => {
-                ScreeningState::Deferred(format!(
-                    "{} reused screening packets require explicit reassessment; authored decisions changed",
-                    progress.processing_held_batches,
-                ))
-            }
-            _ => {
-                return Err(miette::miette!(
-                    "candidate screening progress has no consistent next state"
-                ));
-            }
-        };
-        #[cfg(unix)]
-        let state = match state {
-            ScreeningState::Ready(request) => {
-                let native = super::execution::observation::screening_request(&request)?;
-                let bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
-                let reason = if let Some(capacity) = self.selection.native_capacity(&request)? {
-                    Some(capacity.to_string())
-                } else if bytes > self.selection.max_input_bytes() {
-                    Some(
-                        selection::ScreeningCapacity::Input {
-                            required_bytes: bytes,
-                            max_bytes: self.selection.max_input_bytes(),
-                        }
-                        .to_string(),
-                    )
-                } else {
-                    self.selection.rejection_reason(
-                        root,
-                        &request,
-                        &super::execution::observation::screening_contract_revision(&request)?,
-                    )?
-                };
-                match reason {
-                    Some(reason) => ScreeningState::Deferred(reason),
-                    None => ScreeningState::Ready(request),
-                }
-            }
-            state => state,
+    /// The next thing this task's screening needs, decided from one captured roster.
+    fn turn(&self) -> miette::Result<ScreeningTurn> {
+        let progress = self.selection.progress();
+        let state = match self.selection.next_request(false)? {
+            Some(request) => match self.selection.hold_reason(&request)? {
+                Some(reason) => ScreeningState::Deferred(reason),
+                None => ScreeningState::Ready(serde_json::to_value(request).into_diagnostic()?),
+            },
+            None if progress.complete => ScreeningState::Complete,
+            None => ScreeningState::Deferred(format!(
+                "{} deferred candidate decisions remain; work retained for explicit reassessment",
+                progress.deferred
+            )),
         };
         Ok(ScreeningTurn {
             state,
-            selection_id: self.selection.id.clone(),
-            completed_batches: progress.completed_batches,
-            batches: progress.batches,
+            screening_id: progress.screening_id,
+            decided: progress.candidates - progress.unknown,
+            candidates: progress.candidates,
         })
     }
 }
 
+/// One fresh discovery traversal for several tasks, in recipe order, with the review
+/// inventory their evidence shares.
 struct ScreeningCapture {
     reviews: lk_vault::ReviewInventory,
-    captures: std::collections::BTreeMap<lk_vault::DiscoveryRecipe, lk_vault::DiscoveryCapture>,
+    captures: Vec<lk_vault::DiscoveryCapture>,
     metrics: lk_vault::DiscoveryCaptureMetrics,
-    duration_ms: u64,
 }
 
 impl ScreeningCapture {
@@ -1430,7 +1309,6 @@ impl ScreeningCapture {
         recipes: &[lk_vault::DiscoveryRecipe],
         read: &lk_vault::ReadControl,
     ) -> miette::Result<Self> {
-        let started = std::time::Instant::now();
         let mut reviews =
             lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
                 .into_diagnostic()?;
@@ -1444,9 +1322,8 @@ impl ScreeningCapture {
         .into_diagnostic()?;
         Ok(Self {
             reviews,
-            captures: recipes.iter().cloned().zip(captures).collect(),
+            captures,
             metrics,
-            duration_ms: started.elapsed().as_millis() as u64,
         })
     }
 }
@@ -1477,35 +1354,17 @@ fn map_current_screenings<T>(
     config: &lk_core::config::Config,
     config_revision: &str,
     task_ids: &[&str],
-    capture: Option<&mut ScreeningCapture>,
-    mut visit: impl FnMut(miette::Result<Screening>) -> T,
+    mut visit: impl FnMut(miette::Result<Screening>, &mut lk_vault::ReviewInventory) -> T,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<(Vec<T>, lk_vault::DiscoveryCaptureMetrics, u64)> {
     read.check().into_diagnostic()?;
     let started_at = std::time::Instant::now();
     let recipes = current_screening_recipes(root, config, task_ids)?;
-    let query_duration_ms = started_at.elapsed().as_millis() as u64;
-    let mut local;
-    let capture = match capture {
-        Some(capture) => capture,
-        None => {
-            local = ScreeningCapture::load(root, config, &recipes, read)?;
-            &mut local
-        }
-    };
-    let captures = recipes
-        .iter()
-        .map(|recipe| {
-            capture.captures.get(recipe).cloned().ok_or_else(|| {
-                miette::miette!("discovery queries changed within the recording checkpoint")
-            })
-        })
-        .collect::<miette::Result<Vec<_>>>()?;
-    let metrics = std::mem::take(&mut capture.metrics);
-    let mut duration_ms = query_duration_ms + std::mem::take(&mut capture.duration_ms);
+    let mut capture = ScreeningCapture::load(root, config, &recipes, read)?;
+    let mut duration_ms = started_at.elapsed().as_millis() as u64;
     let values = task_ids
         .iter()
-        .zip(captures)
+        .zip(std::mem::take(&mut capture.captures))
         .map(|(task_id, current)| {
             let started_at = std::time::Instant::now();
             let screening = (|| {
@@ -1523,10 +1382,10 @@ fn map_current_screenings<T>(
                     .map(|screening| *screening)
             })();
             duration_ms += started_at.elapsed().as_millis() as u64;
-            visit(screening)
+            visit(screening, &mut capture.reviews)
         })
         .collect();
-    Ok((values, metrics, duration_ms))
+    Ok((values, capture.metrics, duration_ms))
 }
 
 pub(super) struct ScreeningTurns {
@@ -1547,13 +1406,12 @@ pub(super) fn prepare_screenings(
         config,
         config_revision,
         task_ids,
-        None,
-        |screening| {
+        |screening, _| {
             let screening = screening?;
-            if let Some(reason) = screening.selection.admission_reason(config, root)? {
+            if let Some(reason) = screening.selection.admission_reason(config)? {
                 return Err(miette::miette!("{reason}"));
             }
-            screening.turn(root)
+            screening.turn()
         },
         read,
     )?;
@@ -1565,20 +1423,22 @@ pub(super) fn prepare_screenings(
 
 #[derive(Clone)]
 pub(super) enum ScreeningResponse {
-    Decisions(Value),
+    Decisions {
+        request: Value,
+        output: Value,
+    },
     InvocationFailed {
         request: Value,
-        contract_revision: String,
         failure: state::InvocationFailure,
     },
     Rejected {
         request: Value,
-        contract_revision: String,
         rejection: ScreeningRejection,
     },
 }
 
 pub(super) enum ScreeningRecordOutcome {
+    /// The number of candidate decisions this reply recorded.
     Recorded(usize),
     Deferred(String),
     InvocationFailed(String),
@@ -1589,78 +1449,59 @@ pub(super) struct ScreeningRecord {
     pub duration_ms: u64,
 }
 
-pub(super) struct RecordedScreenings {
-    pub records: Vec<ScreeningRecord>,
-    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
-    pub revalidation_duration_ms: u64,
-}
-
+/// Record each reply against the exact request it answered. A decision binds its candidate
+/// key, so recording checks the pending task and the ledger, never candidate pages.
 #[cfg(unix)]
-fn record_screenings_with_capture(
+pub(super) fn record_screenings(
     session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
     replies: Vec<(&str, ScreeningResponse)>,
-    capture: Option<&mut ScreeningCapture>,
     read: &lk_vault::ReadControl,
-) -> miette::Result<RecordedScreenings> {
-    let contract = selection::computation::resolved_contract(config)?;
-    let task_ids = replies
-        .iter()
-        .map(|(task_id, _)| *task_id)
-        .collect::<Vec<_>>();
-    let mut outputs = replies.into_iter().map(|(_, output)| output);
-    let (records, discovery_io, revalidation_duration_ms) = map_current_screenings(
-        session.root(),
-        config,
-        config_revision,
-        &task_ids,
-        capture,
-        |screening| {
-            let output = outputs.next().expect("one output per selected task");
+) -> Vec<ScreeningRecord> {
+    let root = session.root();
+    replies
+        .into_iter()
+        .map(|(task_id, response)| {
             let started_at = std::time::Instant::now();
             let result = (|| {
-                let screening = screening?;
-                match output {
-                    ScreeningResponse::InvocationFailed {
-                        request,
-                        contract_revision,
-                        failure,
-                    } => {
-                        let reason = failure.to_string();
-                        screening.selection.record_failed_attempt(
-                            session,
-                            &screening.inventory.pages,
+                read.check().into_diagnostic()?;
+                let task = super::queue::select_task_controlled(
+                    root,
+                    task_id,
+                    super::queue::TaskSelection::CurrentOrDoneExtraction,
+                    read,
+                )?;
+                let issued = |request: &Value| {
+                    let request = selection::Request::from_value(request)?;
+                    if request.task_id() != task.task_id || request.cache_hash() != task.cache_hash
+                    {
+                        return Err(miette::miette!(
+                            "selected screening task changed during execution"
+                        ));
+                    }
+                    Ok(request)
+                };
+                match response {
+                    ScreeningResponse::Decisions { request, output } => {
+                        let request = issued(&request)?;
+                        let plan = selection::plan_record(
+                            root,
                             &request,
-                            &contract_revision,
-                            failure,
+                            serde_json::from_value(output).into_diagnostic()?,
                         )?;
+                        session.apply(plan).into_diagnostic()?;
+                        Ok(ScreeningRecordOutcome::Recorded(request.candidates()))
+                    }
+                    ScreeningResponse::InvocationFailed { request, failure } => {
+                        let reason = failure.to_string();
+                        let plan =
+                            selection::plan_failed_attempt(root, &issued(&request)?, failure)?;
+                        session.apply(plan).into_diagnostic()?;
                         Ok(ScreeningRecordOutcome::InvocationFailed(reason))
                     }
-                    ScreeningResponse::Decisions(output) => Ok(ScreeningRecordOutcome::Recorded(
-                        screening
-                            .selection
-                            .record_native(
-                                session,
-                                &screening.inventory.pages,
-                                serde_json::from_value(output).into_diagnostic()?,
-                                &contract,
-                            )?
-                            .completed_batches,
-                    )),
-                    ScreeningResponse::Rejected {
-                        request,
-                        contract_revision,
-                        rejection,
-                    } => {
+                    ScreeningResponse::Rejected { request, rejection } => {
                         let reason = rejection.to_string();
-                        screening.selection.record_rejection(
-                            session,
-                            &screening.inventory.pages,
-                            &request,
-                            &contract_revision,
-                            rejection,
-                        )?;
+                        let plan = selection::plan_rejection(root, &issued(&request)?, rejection)?;
+                        session.apply(plan).into_diagnostic()?;
                         Ok(ScreeningRecordOutcome::Deferred(reason))
                     }
                 }
@@ -1669,14 +1510,8 @@ fn record_screenings_with_capture(
                 result,
                 duration_ms: started_at.elapsed().as_millis() as u64,
             }
-        },
-        read,
-    )?;
-    Ok(RecordedScreenings {
-        records,
-        discovery_io,
-        revalidation_duration_ms,
-    })
+        })
+        .collect()
 }
 
 #[cfg(unix)]
@@ -1688,7 +1523,7 @@ pub(super) enum InspectionRecording {
 
 #[cfg(unix)]
 pub(super) struct ReadWaveRecords {
-    pub screenings: Option<miette::Result<RecordedScreenings>>,
+    pub screenings: Option<Vec<ScreeningRecord>>,
     pub screening_duration_ms: u64,
     pub inspections: InspectionRecording,
     pub inspection_duration_ms: u64,
@@ -1705,42 +1540,6 @@ pub(super) fn record_read_wave(
     read: &lk_vault::ReadControl,
 ) -> ReadWaveRecords {
     let started = std::time::Instant::now();
-    let captured = (|| {
-        let tasks = screenings.iter().map(|(task, _)| *task).collect::<Vec<_>>();
-        let mut recipes = current_screening_recipes(session.root(), config, &tasks)?;
-        let inspection_recipes = inspections
-            .iter()
-            .filter(|reply| {
-                reply.request["context"]["purpose"]["extraction_scope"]["policy"]
-                    == "progressive-evidence-v1"
-            })
-            .map(|reply| {
-                reply.request["context"]["subject"]["task_id"]
-                    .as_str()
-                    .ok_or_else(|| {
-                        miette::miette!("progressive work requires a queue task subject")
-                    })
-            })
-            .collect::<miette::Result<Vec<_>>>()
-            .and_then(|tasks| current_screening_recipes(session.root(), config, &tasks));
-        if let Ok(inspection_recipes) = &inspection_recipes {
-            recipes.extend(inspection_recipes.iter().cloned());
-        }
-        let mut capture = ScreeningCapture::load(session.root(), config, &recipes, read)?;
-        capture.duration_ms = started.elapsed().as_millis() as u64;
-        Ok::<_, miette::Report>((capture, inspection_recipes.map(|_| ())))
-    })();
-    let (mut capture, inspection_recipes) = match captured {
-        Ok(captured) => captured,
-        Err(error) => {
-            return ReadWaveRecords {
-                screenings: Some(Err(error)),
-                screening_duration_ms: started.elapsed().as_millis() as u64,
-                inspections: InspectionRecording::Recapture(inspections),
-                inspection_duration_ms: 0,
-            };
-        }
-    };
     if let Err(error) = validate_context() {
         return ReadWaveRecords {
             screenings: None,
@@ -1749,34 +1548,21 @@ pub(super) fn record_read_wave(
             inspection_duration_ms: 0,
         };
     }
-    let screenings = record_screenings_with_capture(
-        session,
-        config,
-        config_revision,
-        screenings,
-        Some(&mut capture),
-        read,
-    );
+    let screenings = record_screenings(session, screenings, read);
     let screening_duration_ms = started.elapsed().as_millis() as u64;
     let started = std::time::Instant::now();
-    let inspections = if !screenings
-        .as_ref()
-        .is_ok_and(|records| records.records.iter().all(|record| record.result.is_ok()))
-    {
+    let inspections = if !screenings.iter().all(|record| record.result.is_ok()) {
         InspectionRecording::Recapture(inspections)
     } else if let Err(error) = validate_context() {
         InspectionRecording::Invalidated(error)
     } else {
-        InspectionRecording::Recorded(inspection_recipes.and_then(|()| {
-            record_inspections_with_capture(
-                session,
-                config,
-                config_revision,
-                inspections,
-                Some(&mut capture),
-                read,
-            )
-        }))
+        InspectionRecording::Recorded(record_inspections(
+            session,
+            config,
+            config_revision,
+            inspections,
+            read,
+        ))
     };
     ReadWaveRecords {
         screenings: Some(screenings),
@@ -1786,39 +1572,7 @@ pub(super) fn record_read_wave(
     }
 }
 
-#[cfg(unix)]
-pub(super) fn record_screenings(
-    session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    replies: Vec<(&str, ScreeningResponse)>,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<RecordedScreenings> {
-    record_screenings_with_capture(session, config, config_revision, replies, None, read)
-}
-
-fn record_screening(
-    session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    task_id: &str,
-    output: selection::ScreeningOutput,
-    previous_revision: Option<&str>,
-) -> miette::Result<usize> {
-    let root = session.root();
-    let screening = current_screening(root, config, config_revision, task_id)?.into_candidates()?;
-    Ok(screening
-        .selection
-        .record(
-            session,
-            &screening.inventory.pages,
-            output,
-            previous_revision,
-        )?
-        .completed_batches)
-}
-
-#[allow(clippy::too_many_arguments)]
+/// The current roster's evidence, required to carry exactly the supplied result binding.
 fn selected_task_controlled(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1826,32 +1580,37 @@ fn selected_task_controlled(
     task_id: &str,
     queries: &[lk_core::discovery::DiscoveryQuery],
     binding: &lk_queue::ExtractionSelection,
-    mutation: &mut lk_vault::MutationPlan,
     read: &lk_vault::ReadControl,
-) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
+) -> miette::Result<Prepared> {
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
     selected_task_with_screening(
         root,
+        config,
         screening_controlled(root, config, config_revision, task_id, queries, read)?,
         binding,
-        mutation,
+        &mut reviews,
+        read,
     )
 }
 
 fn selected_task_with_screening(
     root: &Path,
+    config: &lk_core::config::Config,
     preparation: ScreeningPreparation,
     binding: &lk_queue::ExtractionSelection,
-    mutation: &mut lk_vault::MutationPlan,
-) -> miette::Result<(Prepared, std::collections::BTreeSet<String>)> {
+    reviews: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
     let screening = match preparation {
         ScreeningPreparation::Candidates(screening) => screening,
-        ScreeningPreparation::Capacity { .. } => {
+        ScreeningPreparation::Capacity(_) => {
             return Err(publication_rejection(
                 RejectionKind::EvidenceScopeChanged,
                 "current candidate screening exceeds its complete packet bound; retained proposal needs explicit scope or capacity reconsideration",
             ));
         }
-        ScreeningPreparation::SourceBlocked { work_id, .. } => {
+        ScreeningPreparation::SourceBlocked { work_id } => {
             return Err(publication_rejection(
                 RejectionKind::EvidenceScopeChanged,
                 source_blocked_reason(&work_id),
@@ -1864,24 +1623,190 @@ fn selected_task_with_screening(
             ));
         }
     };
-    let ledger = screening.selection.guard(root, mutation, binding)?;
-    Ok((
-        admitted_task(&screening, binding, &ledger.selected_owners)?,
-        ledger.selected_owners,
-    ))
+    let progress = screening.selection.progress();
+    if !progress.complete {
+        return Err(publication_rejection(
+            RejectionKind::SelectionDecisionsChanged,
+            format!(
+                "candidate screening is incomplete: {} unknown, {} deferred; not-selected covers candidate cards only",
+                progress.unknown, progress.deferred,
+            ),
+        ));
+    }
+    let current = screening.selection.binding()?;
+    if current.inventory_revision != binding.inventory_revision {
+        return Err(publication_rejection(
+            RejectionKind::SelectionInventoryChanged,
+            "candidate screening: the candidate roster differs from the one this work was planned against; inspect `lore work context` and replan",
+        ));
+    }
+    if current != *binding {
+        return Err(publication_rejection(
+            RejectionKind::SelectionDecisionsChanged,
+            "candidate screening: selection decisions changed since planning",
+        ));
+    }
+    admitted_task(root, config, &screening, reviews, read)
 }
 
-fn admitted_task(
-    screening: &Screening,
+/// Record in the evidence context which roster and decisions admitted it.
+fn bind_selection(
+    prepared: &mut Prepared,
+    queries: &[lk_core::discovery::DiscoveryQuery],
     binding: &lk_queue::ExtractionSelection,
-    selected: &std::collections::BTreeSet<String>,
-) -> miette::Result<Prepared> {
-    let mut prepared = resources::task_with_selection(&screening.inventory, binding, selected)?;
-    if screening.selection.source_context()["role"] == "complete-bounded-source-observations" {
-        prepared.context["purpose"]["source_observations"] =
-            screening.selection.source_context()["observation"].clone();
+    candidates: usize,
+    source_observations: Option<&Value>,
+) {
+    let selected = prepared
+        .selected_owners
+        .as_ref()
+        .map_or(0, |owners| owners.len());
+    prepared.context["purpose"]["discovery"] = json!({
+        "queries":queries,
+        "match_count":candidates,
+        "inventory_revision":binding.inventory_revision,
+    });
+    prepared.context["purpose"]["extraction_scope"] = json!({
+        "policy":binding.policy,
+        "selection":binding,
+        "coverage":{
+            "candidate_count":candidates,
+            "full_candidate_inputs":selected,
+            "not_full_inputs":candidates.saturating_sub(selected),
+        },
+    });
+    if let Some(observation) = source_observations {
+        prepared.context["purpose"]["source_observations"] = observation.clone();
     }
+}
+
+/// Store the completely decided roster a drafter is about to bind, unless it already is.
+fn seal_roster(
+    root: &Path,
+    selection: &selection::Selection,
+) -> miette::Result<lk_queue::ExtractionSelection> {
+    let seal = selection.seal()?;
+    if !seal.is_published(root)? {
+        let session = super::publication::acquire_mutation_now(root)?;
+        let mut plan = lk_vault::MutationPlan::default();
+        seal.plan(session.root(), &mut plan)?;
+        session.apply(plan).into_diagnostic()?;
+    }
+    selection.binding()
+}
+
+/// The evidence a completely decided roster admits: the source and every selected owner.
+fn admitted_task(
+    root: &Path,
+    config: &lk_core::config::Config,
+    screening: &Screening,
+    reviews: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let binding = screening.selection.binding()?;
+    let mut prepared = resources::task_with_selected(
+        root,
+        config,
+        &screening.inventory.source,
+        &screening.selection.selected_owners(),
+        reviews,
+        read,
+    )?;
+    bind_selection(
+        &mut prepared,
+        &screening.inventory.capture.queries,
+        &binding,
+        screening.inventory.capture.candidates.len(),
+        screening.source_observations.as_ref(),
+    );
+    prepared.roster_seal = Some(screening.selection.seal()?);
     Ok(prepared)
+}
+
+/// The evidence a staged result was drafted against, with the stored state it was
+/// verified through.
+struct SealedEvidence {
+    prepared: Prepared,
+    roster: selection::SealedRoster,
+    /// The source-observation Work files read to rebuild an observed source.
+    observation_guards: std::collections::BTreeMap<PathBuf, String>,
+}
+
+/// Rebuild a staged result's evidence from its sealed roster. The roster's rows are
+/// verified through the ledger; only the source and the selected owners are read again.
+#[allow(clippy::too_many_arguments)]
+fn sealed_task_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    task: &Prepared,
+    queries: &[lk_core::discovery::DiscoveryQuery],
+    binding: &lk_queue::ExtractionSelection,
+    sealing: Option<&selection::RosterSeal>,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<SealedEvidence> {
+    let Subject::Queue {
+        task_id,
+        cache_hash,
+        ..
+    } = &task.subject
+    else {
+        return Err(miette::miette!(
+            "a sealed candidate roster requires a queue subject"
+        ));
+    };
+    let sealed = selection::load_sealed(root, task_id, cache_hash, binding, sealing)?;
+    if sealed.queries != discovery::validate_queries(queries)? {
+        return Err(publication_rejection(
+            RejectionKind::EvidenceScopeChanged,
+            "the result's discovery queries differ from its sealed candidate roster; regenerate the extraction result",
+        ));
+    }
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
+    let source =
+        resources::extraction_source_controlled(root, config, task_id, &mut reviews, read)?;
+    let mut observation_guards = std::collections::BTreeMap::new();
+    let revision = |source: &Value| {
+        Ok::<_, miette::Report>(lk_core::rss_original::digest(
+            &serde_json::to_vec(source).into_diagnostic()?,
+        ))
+    };
+    let observations = if revision(&retained_source(&source))? == sealed.source_revision {
+        None
+    } else {
+        let work = expected(root, &source, config, config_revision)?;
+        let observed = if work.is_planned(root)? {
+            work.result_if_complete_with_guards(root, &source.resources)?
+        } else {
+            None
+        };
+        let Some((observation, guards)) = observed.filter(|(observation, _)| {
+            revision(&observed_source(&source, observation))
+                .is_ok_and(|current| current == sealed.source_revision)
+        }) else {
+            return Err(publication_rejection(
+                RejectionKind::SemanticContextChanged,
+                "the extraction source changed after its candidates were screened; rescreen and regenerate the result",
+            ));
+        };
+        observation_guards = guards;
+        Some(observation)
+    };
+    let mut prepared =
+        resources::task_with_selected(root, config, &source, &sealed.selected, &mut reviews, read)?;
+    bind_selection(
+        &mut prepared,
+        &sealed.queries,
+        binding,
+        sealed.candidates,
+        observations.as_ref(),
+    );
+    Ok(SealedEvidence {
+        prepared,
+        roster: sealed,
+        observation_guards,
+    })
 }
 
 fn load_discovery(path: &Path) -> miette::Result<Vec<lk_core::discovery::DiscoveryQuery>> {
@@ -2234,7 +2159,6 @@ pub(super) fn prepare_task_controlled(
         &task,
         None,
         None,
-        None,
         read,
     ))
 }
@@ -2246,11 +2170,7 @@ pub(super) fn prepare_tasks_with_audit(
     tasks: &[lk_queue::QueueTask],
     audits: &std::collections::BTreeMap<String, lk_graph::audit::AuditCandidate>,
     read: &lk_vault::ReadControl,
-) -> miette::Result<(
-    Vec<TaskPreparation>,
-    lk_vault::DiscoveryCaptureMetrics,
-    usize,
-)> {
+) -> miette::Result<(Vec<TaskPreparation>, lk_vault::DiscoveryCaptureMetrics)> {
     read.check().into_diagnostic()?;
     let root = session.root();
     let mut recipes = Vec::new();
@@ -2285,33 +2205,26 @@ pub(super) fn prepare_tasks_with_audit(
         None => (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default()),
     };
     let mut captures = positions.into_iter().zip(captures).peekable();
-    #[cfg(unix)]
-    let native_contract = config
-        .execution
-        .selected_profile()
-        .map(|_| selection::computation::resolved_contract(config))
-        .transpose()?;
-    #[cfg(not(unix))]
-    let native_contract: Option<String> = None;
-    let mut reused = 0;
     let work = tasks
         .iter()
         .enumerate()
         .map(|(index, task)| {
             read.check().into_diagnostic()?;
             let task = super::queue::current_task_controlled(root, &task.task_id, read)?;
-            let inventory = if captures.peek().is_some_and(|(at, _)| *at == index) {
+            let screening = if captures.peek().is_some_and(|(at, _)| *at == index) {
                 let (_, capture) = captures.next().expect("indexed capture");
-                Some(resources::selection_inventory_with_capture(
+                let reviews = reviews
+                    .as_mut()
+                    .expect("discovery capture has a review inventory");
+                let inventory = resources::selection_inventory_with_capture(
                     root,
                     config,
                     &task.task_id,
                     capture,
-                    reviews
-                        .as_mut()
-                        .expect("discovery capture has a review inventory"),
+                    reviews,
                     read,
-                )?)
+                )?;
+                Some((inventory, reviews))
             } else {
                 None
             };
@@ -2321,27 +2234,25 @@ pub(super) fn prepare_tasks_with_audit(
                 config_revision,
                 &task,
                 audits.get(&task.target.vault_path),
-                inventory,
-                native_contract
-                    .as_deref()
-                    .map(|contract| (contract, &mut reused)),
+                screening,
                 read,
             ))
         })
         .collect::<miette::Result<Vec<_>>>()?;
     read.check().into_diagnostic()?;
-    Ok((work, metrics, reused))
+    Ok((work, metrics))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn prepare_task_in_session(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
     task: &lk_queue::QueueTask,
     audit: Option<&lk_graph::audit::AuditCandidate>,
-    inventory: Option<resources::SelectionInventory>,
-    native_contract: Option<(&str, &mut usize)>,
+    screening: Option<(
+        resources::SelectionInventory,
+        &mut lk_vault::ReviewInventory,
+    )>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<TaskPreparation> {
     let root = session.root();
@@ -2349,20 +2260,36 @@ fn prepare_task_in_session(
         && is_progressive(config)?
         && discovery::current(root, task)?.is_some()
     {
-        let selected = match inventory {
-            Some(inventory) => screening_with_inventory(root, config, config_revision, inventory)?,
+        let mut own_reviews;
+        let (selected, reviews) = match screening {
+            Some((inventory, reviews)) => (
+                screening_with_inventory(root, config, config_revision, inventory)?,
+                reviews,
+            ),
             None => {
-                current_screening_controlled(root, config, config_revision, &task.task_id, read)?
+                own_reviews =
+                    lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+                        .into_diagnostic()?;
+                (
+                    current_screening_controlled(
+                        root,
+                        config,
+                        config_revision,
+                        &task.task_id,
+                        read,
+                    )?,
+                    &mut own_reviews,
+                )
             }
         };
         match selected {
-            ScreeningPreparation::SourceBlocked { work_id, .. } => {
+            ScreeningPreparation::SourceBlocked { work_id } => {
                 return Ok(TaskWork::Admission {
                     reason: source_blocked_reason(&work_id),
                 }
                 .into());
             }
-            ScreeningPreparation::Capacity { capacity, .. } => {
+            ScreeningPreparation::Capacity(capacity) => {
                 return Ok(TaskWork::Admission {
                     reason: capacity.to_string(),
                 }
@@ -2376,35 +2303,24 @@ fn prepare_task_in_session(
                 return Ok(TaskWork::Source { id: work.plan.id }.into());
             }
             ScreeningPreparation::Candidates(screening) => {
-                if let Some(reason) = screening.selection.admission_reason(config, root)? {
+                if let Some(reason) = screening.selection.admission_reason(config)? {
                     return Ok(TaskWork::Admission { reason }.into());
                 }
-                if let Some((contract, reused)) = native_contract {
-                    *reused += screening.selection.create_native(
-                        session,
-                        &screening.inventory.pages,
-                        contract,
-                    )?;
-                } else {
-                    screening
-                        .selection
-                        .create(session, &screening.inventory.pages)?;
-                }
-                let ledger = screening.selection.ledger(root)?;
-                if !ledger.progress.complete {
-                    let turn = screening.turn(root)?;
-                    if let ScreeningState::Deferred(reason) = &turn.state {
-                        return Ok(TaskWork::Admission {
-                            reason: reason.clone(),
+                let turn = screening.turn()?;
+                match turn.state {
+                    ScreeningState::Complete => {
+                        admitted_task(root, config, &screening, reviews, read)?
+                    }
+                    ScreeningState::Deferred(reason) => {
+                        return Ok(TaskWork::Admission { reason }.into());
+                    }
+                    ScreeningState::Ready(_) => {
+                        return Ok(TaskWork::Screening {
+                            turn: Box::new(turn),
                         }
                         .into());
                     }
-                    return Ok(TaskWork::Screening {
-                        turn: Box::new(turn),
-                    }
-                    .into());
                 }
-                admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
             }
         }
     } else {
@@ -2955,25 +2871,26 @@ fn load_inspection_works(
     config: &lk_core::config::Config,
     config_revision: &str,
     ids: &[&str],
-    capture: Option<&mut ScreeningCapture>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<InspectionWorks> {
     let started = std::time::Instant::now();
     let mut loaded = std::collections::BTreeMap::new();
-    let mut progressive = Vec::new();
+    let mut screened = Vec::new();
+    let is_screened =
+        |work: &Work| work.context["purpose"]["extraction_scope"]["policy"] == selection::POLICY;
     for id in ids {
         read.check().into_diagnostic()?;
         if loaded.contains_key(*id) {
             continue;
         }
         let work = Work::load(root, id);
-        if work.as_ref().is_ok_and(|work| {
-            work.context["purpose"]["extraction_scope"]["policy"] == "progressive-evidence-v1"
-        }) {
-            progressive.push(work.as_ref().expect("validated work").clone());
+        if let Ok(work) = &work
+            && is_screened(work)
+        {
+            screened.push(work.clone());
         }
         let result = work.and_then(|work| {
-            if work.context["purpose"]["extraction_scope"]["policy"] == "progressive-evidence-v1" {
+            if is_screened(&work) {
                 return Ok(None);
             }
             let prepared =
@@ -2982,25 +2899,24 @@ fn load_inspection_works(
         });
         loaded.insert((*id).to_owned(), result);
     }
-    let task_ids = progressive
+    let task_ids = screened
         .iter()
         .map(|work| {
             work.context["subject"]["task_id"]
                 .as_str()
-                .ok_or_else(|| miette::miette!("progressive work requires a queue task subject"))
+                .ok_or_else(|| miette::miette!("screened work requires a queue task subject"))
         })
         .collect::<miette::Result<Vec<_>>>()?;
     let (prepared, discovery_io) = if task_ids.is_empty() {
         (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default())
     } else {
-        let mut work_iter = progressive.iter();
+        let mut work_iter = screened.iter();
         let (prepared, discovery_io, _) = map_current_screenings(
             root,
             config,
             config_revision,
             &task_ids,
-            capture,
-            |screening| {
+            |screening, reviews| {
                 let work = work_iter.next().expect("one capture per work");
                 (|| {
                     let selection = serde_json::from_value(
@@ -3009,11 +2925,12 @@ fn load_inspection_works(
                     .into_diagnostic()?;
                     let prepared = selected_task_with_screening(
                         root,
+                        config,
                         ScreeningPreparation::Candidates(Box::new(screening?)),
                         &selection,
-                        &mut Default::default(),
+                        reviews,
+                        read,
                     )?
-                    .0
                     .validate_context(&work.context)?;
                     validate_loaded_work(root, config, config_revision, work.clone(), prepared)
                 })()
@@ -3022,7 +2939,7 @@ fn load_inspection_works(
         )?;
         (prepared, discovery_io)
     };
-    for (work, prepared) in progressive.into_iter().zip(prepared) {
+    for (work, prepared) in screened.into_iter().zip(prepared) {
         loaded.insert(work.plan.id, prepared.map(Some));
     }
     let works = loaded
@@ -3067,7 +2984,6 @@ pub(super) fn prepare_inspections_batch(
         config,
         config_revision,
         &ids.into_iter().collect::<Vec<_>>(),
-        None,
         read,
     )?;
     let turns = demands
@@ -3086,24 +3002,6 @@ pub(super) fn prepare_inspections_batch(
 }
 
 #[cfg(unix)]
-fn record_inspections_with_capture(
-    session: &lk_vault::MutationSession,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    replies: Vec<InspectionReply>,
-    capture: Option<&mut ScreeningCapture>,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<RecordedInspections> {
-    let root = session.root();
-    let ids = replies
-        .iter()
-        .map(|reply| reply.work_id.as_str())
-        .collect::<Vec<_>>();
-    let loaded = load_inspection_works(root, config, config_revision, &ids, capture, read)?;
-    record_prepared_inspections(session, loaded, replies, read)
-}
-
-#[cfg(unix)]
 pub(super) fn record_inspections(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -3111,7 +3009,13 @@ pub(super) fn record_inspections(
     replies: Vec<InspectionReply>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<RecordedInspections> {
-    record_inspections_with_capture(session, config, config_revision, replies, None, read)
+    let root = session.root();
+    let ids = replies
+        .iter()
+        .map(|reply| reply.work_id.as_str())
+        .collect::<Vec<_>>();
+    let loaded = load_inspection_works(root, config, config_revision, &ids, read)?;
+    record_prepared_inspections(session, loaded, replies, read)
 }
 
 #[cfg(unix)]
@@ -4543,22 +4447,12 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             return Err(miette::miette!("native preparation retries require Unix"));
         }
         #[cfg(unix)]
-        WorkCommand::SelectRetry {
-            task_id,
-            batch_id,
-            dry_run,
-        } => {
+        WorkCommand::SelectRetry { task_id, dry_run } => {
             let prepare = |root: &Path| {
-                let ScreeningPreparation::Candidates(screening) =
-                    current_screening(root, &config, &config_revision, &task_id)?
-                else {
-                    return Err(miette::miette!(
-                        "current task requires its exact candidate selection"
-                    ));
-                };
-                screening
+                current_screening(root, &config, &config_revision, &task_id)?
+                    .into_candidates()?
                     .selection
-                    .plan_retry(root, &screening.inventory.pages, &batch_id)
+                    .plan_retry(root)
             };
             if dry_run {
                 prepare(&root)?
@@ -4568,7 +4462,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 let session = super::publication::acquire_mutation_now(&root)?;
                 session.apply(prepare(session.root())?).into_diagnostic()?;
             }
-            json!({"task_id":task_id,"batch_id":batch_id,"dry_run":dry_run})
+            json!({"task_id":task_id,"dry_run":dry_run})
         }
         #[cfg(not(unix))]
         WorkCommand::SelectRetry { .. } => {
@@ -4576,8 +4470,8 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         }
         WorkCommand::Cost { task_id } => {
             match current_screening(&root, &config, &config_revision, &task_id)? {
-                ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
-                ScreeningPreparation::SourceBlocked { work_id, .. } => {
+                ScreeningPreparation::Capacity(capacity) => return Err(capacity.into()),
+                ScreeningPreparation::SourceBlocked { work_id } => {
                     return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
                 }
                 ScreeningPreparation::Source { work, .. } => {
@@ -4586,102 +4480,78 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 "authority":"Candidate packet costs are unknown until complete source observations are available; no model call or write was made."})
                 }
                 ScreeningPreparation::Candidates(screening) => {
-                    let reason = screening.selection.admission_reason(&config, &root)?;
+                    let reason = screening.selection.admission_reason(&config)?;
                     json!({"status":if reason.is_some() {"needs-admission"} else {"admitted"},
-                    "cost":screening.selection.cost(&root, &screening.inventory.capture)?,"reason":reason,
+                    "cost":screening.selection.cost(&screening.inventory.capture)?,"reason":reason,
                     "max_screening_batches":config.execution.effective_work().into_diagnostic()?.max_screening_batches,
-                    "authority":"Compact UTF-8 JSON bytes and exact packet counts, not tokens, billed cost, latency or semantic relevance. Each query lists the pages it matched and how many the ranked roster carries; unrostered matches were not examined. Deferred and unknown candidates remain incomplete."})
+                    "authority":"Compact UTF-8 JSON bytes and exact packet counts for the undecided candidates, not tokens, billed cost, latency or semantic relevance. Each query lists the pages it matched and how many the ranked roster carries; unrostered matches were not examined. Deferred and unknown candidates remain incomplete."})
                 }
             }
         }
-        WorkCommand::Select {
-            task_id,
-            batch_id,
-            limit,
-            offset,
-        } => {
-            if !(1..=100).contains(&limit) {
-                return Err(miette::miette!("receipt limit must be in 1..100"));
-            }
-            let session = batch_id
-                .is_none()
-                .then(|| super::publication::acquire_mutation_now(&root))
-                .transpose()?;
-            let prepared = current_screening(&root, &config, &config_revision, &task_id)?;
-            if let Some(session) = &session {
-                prepared.persist(session, &config, &config_revision)?;
-            }
-            match prepared {
-                ScreeningPreparation::Capacity { capacity, .. } => return Err(capacity.into()),
-                ScreeningPreparation::SourceBlocked { work_id, .. } => {
+        WorkCommand::Select { task_id, reassess } => {
+            match current_screening(&root, &config, &config_revision, &task_id)? {
+                ScreeningPreparation::Capacity(capacity) => return Err(capacity.into()),
+                ScreeningPreparation::SourceBlocked { work_id } => {
                     return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
                 }
-                ScreeningPreparation::Source { work, prepared } => json!({
-                    "status":"needs-source-observations",
-                    "source_work":progress(&work, &root, &prepared, 20, 0)?,
-                    "plan_command":["lore","work","source-plan","--task-id",task_id],
-                }),
+                ScreeningPreparation::Source { work, prepared } => {
+                    let session = super::publication::acquire_mutation_now(&root)?;
+                    persist_prepared(&session, &config, &config_revision, &prepared)?;
+                    json!({
+                        "status":"needs-source-observations",
+                        "source_work":progress(&work, &root, &prepared, 20, 0)?,
+                        "plan_command":["lore","work","source-plan","--task-id",task_id],
+                    })
+                }
                 ScreeningPreparation::Candidates(screening) => {
-                    let admission = screening.selection.admission_reason(&config, &root)?;
-                    let (mut progress, mut request) = screening.selection.prepare(&root)?;
-                    if let Some(batch_id) = &batch_id {
-                        request = Some(screening.selection.packet(&root, batch_id)?);
-                    }
-                    if admission.is_some() {
-                        request = None;
-                    }
-                    let receipt = batch_id
+                    let admission = if reassess {
+                        None
+                    } else {
+                        screening.selection.admission_reason(&config)?
+                    };
+                    let progress = screening.selection.progress();
+                    let request = match &admission {
+                        Some(_) => None,
+                        None => screening.selection.next_request(reassess)?,
+                    };
+                    let hold = request
                         .as_ref()
-                        .and_then(|id| {
-                            progress
-                                .receipts
-                                .iter()
-                                .find(|receipt| &receipt.batch_id == id)
-                        })
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .into_diagnostic()?;
-                    let receipt_total = progress.receipts.len();
-                    progress.receipts = progress
-                        .receipts
-                        .into_iter()
-                        .skip(offset)
-                        .take(limit)
-                        .collect();
-                    let next = offset.saturating_add(progress.receipts.len());
+                        .map(|request| screening.selection.hold_reason(request))
+                        .transpose()?
+                        .flatten();
                     let status = if admission.is_some() {
                         "needs-admission"
+                    } else if request.is_some() {
+                        "screening"
                     } else if progress.complete {
                         "ready"
-                    } else if request.is_none() {
-                        "deferred"
                     } else {
-                        "screening"
+                        "deferred"
                     };
-                    json!({"status":status,"admission":admission, "progress":progress,"request":request,"receipt":receipt,
-                        "receipt_total":receipt_total,"receipt_limit":limit,"receipt_offset":offset,
-                        "receipt_next_offset":(next<receipt_total).then_some(next)})
+                    let selection = (status == "ready")
+                        .then(|| seal_roster(&root, &screening.selection))
+                        .transpose()?;
+                    json!({"status":status,"admission":admission,"progress":progress,
+                        "request":request,"hold":hold,"selection":selection})
                 }
             }
         }
-        WorkCommand::SelectRecord {
-            task_id,
-            file,
-            previous_revision,
-        } => {
+        WorkCommand::SelectRecord { task_id, file } => {
             let output: selection::ScreeningOutput =
-                serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
+                receipt::decode(&std::fs::read_to_string(file).into_diagnostic()?)
                     .into_diagnostic()?;
+            if output.task_id != task_id {
+                return Err(miette::miette!("screening output answers another task"));
+            }
             let session = super::publication::acquire_mutation_now(&root)?;
-            let completed = record_screening(
-                &session,
-                &config,
-                &config_revision,
-                &task_id,
-                output,
-                previous_revision.as_deref(),
-            )?;
-            json!({"completed_batches":completed,"next_command":["lore","work","select","--task-id",task_id]})
+            let screening = current_screening(session.root(), &config, &config_revision, &task_id)?
+                .into_candidates()?;
+            let request = screening.selection.request_for(&output)?;
+            let recorded = request.candidates();
+            session
+                .apply(selection::plan_record(session.root(), &request, output)?)
+                .into_diagnostic()?;
+            json!({"recorded_decisions":recorded,"next_command":["lore","work","select","--task-id",task_id]})
         }
         WorkCommand::SourcePlan { task_id } => {
             let session = super::publication::acquire_mutation_now(&root)?;
@@ -5045,7 +4915,9 @@ fn plan_finish_completion(
                         })
                         .transpose()
                         .into_diagnostic()?;
-                    if typed.selection != selected {
+                    if typed.selection != selected
+                        || selected.is_some() != prepared.roster_seal.is_some()
+                    {
                         return Err(miette::miette!(
                             "final extraction selection differs from its captured evidence scope"
                         ));
@@ -5111,6 +4983,9 @@ fn plan_finish_completion(
     let staged = state::load_result(session.root(), &path)?;
     let mut mutation = lk_vault::MutationPlan::default();
     prepared.guard_pages(&mut mutation);
+    if let Some(seal) = &prepared.roster_seal {
+        seal.plan(session.root(), &mut mutation)?;
+    }
     let final_before = completed.plan_seal(work, &mut mutation, session.root(), &result)?;
     if let Some((_, value)) = &staged
         && value != &result
@@ -5191,7 +5066,7 @@ mod tests {
     }
 
     #[test]
-    fn large_source_screening_preserves_exact_saved_selection_and_uses_new_reading_policy() {
+    fn large_source_is_observed_then_screened_and_sealed_against_its_observations() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let config_path = root.join("config.yaml");
@@ -5243,25 +5118,18 @@ mod tests {
             phrase: true,
             spacing: false,
         }];
-        let inventory = || {
-            resources::selection_inventory_controlled(
-                &root,
-                &config,
-                &task.task_id,
-                &queries,
-                &lk_vault::ReadControl::default(),
-            )
-            .unwrap()
-        };
-        let captured = inventory();
-        assert!(!captured.capture.candidates.is_empty());
-        let preparation =
-            screening_with_inventory(&root, &config, &config_revision, captured).unwrap();
-        let ScreeningPreparation::Source { prepared, .. } = preparation else {
+        let screen =
+            || screening(&root, &config, &config_revision, &task.task_id, &queries).unwrap();
+        let ScreeningPreparation::Source { work, prepared } = screen() else {
             panic!("large raw source requires bounded observations");
         };
         let session = MutationSession::acquire(&root).unwrap();
-        let work = persist_prepared(&session, &config, &config_revision, &prepared).unwrap();
+        let work = persist_prepared(&session, &config, &config_revision, &prepared)
+            .map(|persisted| {
+                assert_eq!(persisted, *work);
+                persisted
+            })
+            .unwrap();
         assert_eq!(
             work.plan.max_part_characters,
             Some(lk_core::semantic::INSPECTION_CHARACTERS)
@@ -5273,53 +5141,115 @@ mod tests {
             work
         );
         assert_eq!(work_snapshot(&root, &work.plan.id), before);
-        let captured = inventory();
-        let Subject::Queue {
-            task_id,
-            cache_hash,
-            target,
-            target_revision,
-        } = &captured.source.subject
-        else {
-            unreachable!()
+        assert!(matches!(screen(), ScreeningPreparation::Source { .. }));
+
+        let observe = |summary: &str| {
+            let mut last = None;
+            loop {
+                let (progress, request) =
+                    work.prepare_inspection(&root, &prepared.resources).unwrap();
+                let Some(request) = request.filter(|_| !progress.complete) else {
+                    break;
+                };
+                let output = WorkOutput {
+                    work_id: work.plan.id.clone(),
+                    node_id: request["node_id"].as_str().unwrap().into(),
+                    input_revision: request["input_revision"].as_str().unwrap().into(),
+                    summary: summary.into(),
+                    findings: vec![],
+                    source_questions: vec![],
+                    unresolved: vec![],
+                    resolutions: vec![],
+                };
+                work.record(&session, output.clone(), &prepared.resources)
+                    .unwrap();
+                last = Some(output);
+            }
+            last.unwrap()
         };
-        let context = json!({"role":"complete-retained-input","source_revision":captured.source.revision(&config_revision).unwrap(),"context":captured.source.context,"resources":captured.source.resources});
-        let binding = selection::SelectionBinding {
-            task_id: task_id.clone(),
-            cache_hash: cache_hash.clone(),
-            target: target.clone(),
-            target_revision: target_revision.clone(),
-            config_revision: config
-                .semantic_work_revision()
-                .unwrap_or(&config_revision)
-                .into(),
-            inventory_revision: captured.revision.clone(),
+        let mut root_output = observe("Attributed source observation.");
+        let ScreeningPreparation::Candidates(observed) = screen() else {
+            panic!("complete source observations admit candidate screening");
         };
-        let legacy =
-            selection::Selection::build(binding, context, &captured.capture, 262144, 32768)
-                .unwrap();
-        legacy.create(&session, &captured.pages).unwrap();
-        let original = walkdir::WalkDir::new(root.join(".lorekeeper/queue/selection"))
-            .into_iter()
-            .map(Result::unwrap)
-            .filter(|entry| entry.file_type().is_file())
-            .map(|entry| {
-                (
-                    entry.path().to_owned(),
-                    std::fs::read(entry.path()).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let ScreeningPreparation::Candidates(resumed) =
-            screening_with_inventory(&root, &config, &config_revision, inventory()).unwrap()
-        else {
-            panic!("exact retained screening must resume without paid rescreening");
+        assert!(observed.source_observations.is_some());
+        let request = observed.selection.next_request(false).unwrap().unwrap();
+        let value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            value["source"]["role"],
+            "complete-bounded-source-observations"
+        );
+        let output = serde_json::from_value(json!({
+            "task_id":value["task_id"],"request_revision":value["request_revision"],
+            "decisions":value["candidates"].as_array().unwrap().iter().map(|candidate| json!({
+                "candidate_key":candidate["candidate_key"],"decision":"inspect",
+                "reason":"Card-scoped assessment.",
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        session
+            .apply(selection::plan_record(&root, &request, output).unwrap())
+            .unwrap();
+        let read = lk_vault::ReadControl::default();
+        let mut reviews =
+            lk_vault::ReviewInventory::load_controlled(&root, &config.vault.dirs, &read).unwrap();
+        let ScreeningPreparation::Candidates(decided) = screen() else {
+            panic!("recorded decisions keep the observed source");
         };
-        assert_eq!(resumed.selection.id, legacy.id);
-        for (path, bytes) in original {
-            assert_eq!(std::fs::read(path).unwrap(), bytes);
-        }
-        assert_eq!(work_snapshot(&root, &work.plan.id), before);
+        let admitted = admitted_task(&root, &config, &decided, &mut reviews, &read).unwrap();
+        assert!(!admitted.context["purpose"]["source_observations"].is_null());
+        let binding = decided.selection.binding().unwrap();
+        let mut plan = MutationPlan::default();
+        admitted
+            .roster_seal
+            .as_ref()
+            .unwrap()
+            .plan(&root, &mut plan)
+            .unwrap();
+        session.apply(plan).unwrap();
+        let sealed = || {
+            sealed_task_controlled(
+                &root,
+                &config,
+                &config_revision,
+                &admitted,
+                &queries,
+                &binding,
+                None,
+                &read,
+            )
+        };
+        let evidence = sealed().unwrap();
+        assert_eq!(
+            evidence.prepared.revision(&config_revision).unwrap(),
+            admitted.revision(&config_revision).unwrap()
+        );
+        assert!(!evidence.observation_guards.is_empty());
+        assert!(
+            evidence
+                .observation_guards
+                .keys()
+                .all(|path| !evidence.prepared.pages.contains_key(path))
+        );
+
+        root_output.summary = "Corrected source observation.".into();
+        work.record(&session, root_output, &prepared.resources)
+            .unwrap();
+        assert_eq!(
+            sealed()
+                .err()
+                .unwrap()
+                .downcast_ref::<super::super::queue::application::PublicationRejection>()
+                .map(|rejection| rejection.kind),
+            Some(RejectionKind::SemanticContextChanged)
+        );
+        let ScreeningPreparation::Candidates(changed) = screen() else {
+            panic!("a corrected observation remains a complete source");
+        };
+        let progress = changed.selection.progress();
+        assert_eq!(
+            progress.unknown, progress.candidates,
+            "decisions made against another source do not carry over"
+        );
     }
     #[cfg(unix)]
     #[test]
@@ -6646,22 +6576,29 @@ mod tests {
                 },
             )
             .unwrap();
-            let screening = current_screening(&root, &config, &revision, &task.task_id)
-                .unwrap()
-                .into_candidates()
-                .unwrap();
-            screening
-                .selection
-                .create(&session, &screening.inventory.pages)
-                .unwrap();
-            let request = screening.selection.prepare(&root).unwrap().1.unwrap();
+            let screening = || {
+                current_screening(&root, &config, &revision, &task.task_id)
+                    .unwrap()
+                    .into_candidates()
+                    .unwrap()
+            };
+            let request =
+                serde_json::to_value(screening().selection.next_request(false).unwrap().unwrap())
+                    .unwrap();
+            assert!(
+                !root.join(".lorekeeper/queue/screening").exists(),
+                "issuing a request writes nothing"
+            );
             let decisions = request["candidates"].as_array().unwrap().iter().map(|card| json!({
                 "candidate_key":card["candidate_key"],"decision":"not-selected","reason":"Card-scoped exclusion."
             })).collect::<Vec<_>>();
-            let screen = ScreeningResponse::Decisions(json!({
-                "selection_id":request["selection_id"],"batch_id":request["batch_id"],
-                "input_revision":request["input_revision"],"decisions":decisions,
-            }));
+            let screen = ScreeningResponse::Decisions {
+                output: json!({
+                    "task_id":request["task_id"],"request_revision":request["request_revision"],
+                    "decisions":decisions,
+                }),
+                request,
+            };
             let prepared = resources::audit(&root, &config, "wiki/documents/audit.md").unwrap();
             let work = Work::create(
                 &session,
@@ -6719,9 +6656,8 @@ mod tests {
             if phase == 1 {
                 assert!(records.screenings.is_none());
             } else {
-                let records = records.screenings.unwrap().unwrap();
                 assert!(matches!(
-                    records.records[0].result,
+                    records.screenings.unwrap()[0].result,
                     Ok(ScreeningRecordOutcome::Recorded(1))
                 ));
             }
@@ -6741,15 +6677,7 @@ mod tests {
                 ));
                 assert_ne!(work_snapshot(&root, &work.plan.id), before);
             }
-            assert_eq!(
-                screening
-                    .selection
-                    .ledger(&root)
-                    .unwrap()
-                    .progress
-                    .completed_batches,
-                usize::from(phase != 1)
-            );
+            assert_eq!(screening().selection.progress().complete, phase != 1);
             assert!(std::fs::read_dir(&alternate).unwrap().next().is_none());
             assert!(!root.join(".lorekeeper/mutation/pending.json").exists());
         }
@@ -6892,13 +6820,6 @@ mod tests {
             .to_string()
             .contains("screening is incomplete")
         );
-        {
-            let session = MutationSession::acquire(&root).unwrap();
-            current_screening(&root, &config, &config_revision, &task.task_id)
-                .unwrap()
-                .persist(&session, &config, &config_revision)
-                .unwrap();
-        }
         let turn = prepare_screenings(
             &MutationSession::acquire(&root).unwrap(),
             &config,
@@ -6916,8 +6837,7 @@ mod tests {
             &config,
             &config_revision,
             &[&task.task_id, &task.task_id],
-            None,
-            |screening| {
+            |screening, _| {
                 let accepted = screening.is_ok();
                 cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                 accepted
@@ -6926,37 +6846,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attempts, [true, false]);
+        assert_eq!((turn.decided, turn.candidates), (0, 2));
         let ScreeningState::Ready(request) = turn.state else {
             panic!("unrecorded screening must be ready");
         };
-        let decisions = request["candidates"].as_array().unwrap().iter().map(|candidate| {
-            json!({"candidate_key":candidate["candidate_key"],
-                "decision":if candidate["candidate_key"] == selected {"inspect"} else {"not-selected"},
+        assert!(
+            !root.join(".lorekeeper/queue/screening").exists(),
+            "preparing a request writes nothing"
+        );
+        let decisions = request["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| {
+                json!({"candidate_key":candidate["candidate_key"],
+                "decision":if candidate["owner"] == selected {"inspect"} else {"not-selected"},
                 "reason":"Decide this source-scoped card before reading selected evidence."})
-        }).collect::<Vec<_>>();
-        record_screening(
-            &MutationSession::acquire(&root).unwrap(),
-            &config,
-            &config_revision,
-            &task.task_id,
-            serde_json::from_value(json!({
-                "selection_id":request["selection_id"],"batch_id":request["batch_id"],
-                "input_revision":request["input_revision"],"decisions":decisions,
-            }))
-            .unwrap(),
-            None,
-        )
-        .unwrap();
-        let ready = task_context(
+            })
+            .collect::<Vec<_>>();
+        MutationSession::acquire(&root)
+            .unwrap()
+            .apply(
+                selection::plan_record(
+                    &root,
+                    &selection::Request::from_value(&request).unwrap(),
+                    serde_json::from_value(json!({
+                        "task_id":request["task_id"],
+                        "request_revision":request["request_revision"],
+                        "decisions":decisions,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let context = || {
+            task_context(
+                &root,
+                &config,
+                &config_revision,
+                &task.task_id,
+                Some(&queries),
+                None,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            context()["status"],
+            "needs-screening",
+            "a decided roster is not ready until it is sealed"
+        );
+        let binding = seal_roster(
             &root,
-            &config,
-            &config_revision,
-            &task.task_id,
-            Some(&queries),
-            None,
+            &current_screening(&root, &config, &config_revision, &task.task_id)
+                .unwrap()
+                .into_candidates()
+                .unwrap()
+                .selection,
         )
         .unwrap();
+        let ready = context();
         assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["selection"], serde_json::to_value(&binding).unwrap());
         assert_eq!(ready["requires_bounded_work"], true);
         let session = MutationSession::acquire(&root).unwrap();
         let prepared = task_for_plan(
@@ -6984,7 +6935,10 @@ mod tests {
                 .iter()
                 .any(|resource| resource.address == excluded)
         );
-        assert!(prepared.pages.contains_key(Path::new(excluded)));
+        assert!(
+            !prepared.pages.contains_key(Path::new(excluded)),
+            "a candidate that was not selected is bound by its judged card"
+        );
         let work = Work::create(
             &session,
             &prepared.resources,
@@ -7098,7 +7052,6 @@ mod tests {
                     &config,
                     &config_revision,
                     &[&id],
-                    None,
                     &lk_vault::ReadControl::default(),
                 )
                 .unwrap()

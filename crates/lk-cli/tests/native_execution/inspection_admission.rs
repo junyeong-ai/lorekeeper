@@ -62,7 +62,7 @@ fn partitioned_action_admission_preserves_paid_scope_without_replanning_on_both_
         assert_eq!(repeated["queue_planning"]["attempts"], 1, "{repeated}");
         assert_eq!(repeated["evidence_preparation_io"]["captures"], 0);
         assert_eq!(before, work_files(&fixture));
-        assert_eq!(screening_receipts(&fixture), 2);
+        assert_eq!(screening_packets(&fixture), 2);
     }
 }
 

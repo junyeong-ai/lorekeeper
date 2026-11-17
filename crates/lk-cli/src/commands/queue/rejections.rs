@@ -221,14 +221,14 @@ fn observe_scope_controlled(
     let mut destinations = BTreeSet::new();
     for snapshot in snapshots {
         read.check().into_diagnostic()?;
-        let (queries, bodies) = if snapshot
+        let (queries, selection, bodies) = if snapshot
             .proposal
             .path
             .ends_with(lk_queue::SECTION_RESULT_SUFFIX)
         {
             let result: lk_queue::SectionResult =
                 serde_json::from_str(&snapshot.raw).into_diagnostic()?;
-            (Vec::new(), vec![result.body])
+            (Vec::new(), None, vec![result.body])
         } else if snapshot
             .proposal
             .path
@@ -238,6 +238,7 @@ fn observe_scope_controlled(
                 serde_json::from_str(&snapshot.raw).into_diagnostic()?;
             (
                 Vec::new(),
+                None,
                 std::iter::once(result.synthesis)
                     .chain(result.related)
                     .collect(),
@@ -245,18 +246,21 @@ fn observe_scope_controlled(
         } else {
             let result: lk_queue::TaskResult =
                 serde_json::from_str(&snapshot.raw).into_diagnostic()?;
-            (result.discovery, Vec::new())
+            (result.discovery, result.selection, Vec::new())
         };
         for body in bodies {
             read.check().into_diagnostic()?;
             destinations.extend(lk_core::link::extract_dests(&body));
         }
-        recipes.insert(serde_json::to_vec(&queries).into_diagnostic()?, queries);
+        recipes.insert(
+            serde_json::to_vec(&(&queries, &selection)).into_diagnostic()?,
+            (queries, selection),
+        );
     }
     let mut revisions = Vec::new();
     let mut owners = BTreeSet::new();
     let mut pages = BTreeMap::new();
-    for (recipe, queries) in recipes {
+    for (recipe, (queries, selection)) in recipes {
         read.check().into_diagnostic()?;
         let scope = crate::commands::work::publication_scope_controlled(
             root,
@@ -264,6 +268,7 @@ fn observe_scope_controlled(
             config_revision,
             &task.task_id,
             &queries,
+            selection.as_ref(),
             read,
         )?;
         revisions.push((recipe, scope.revision));

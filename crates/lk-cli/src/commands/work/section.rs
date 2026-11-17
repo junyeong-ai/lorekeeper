@@ -279,6 +279,7 @@ pub(in crate::commands) fn finish(
                 config_revision,
                 &result.task_id,
                 value.clone(),
+                None,
                 &mut plan,
                 &read,
             )?;

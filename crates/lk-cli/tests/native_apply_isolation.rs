@@ -439,13 +439,18 @@ fn corrected_source_blocker_is_local_to_staged_extraction_and_keeps_independent_
     let selection = fixture.json(&["work", "select", "--task-id", &rejected.task_id]);
     let request = &selection["request"];
     let path = fixture.root().join("screening.json");
-    std::fs::write(&path, serde_json::to_vec(&json!({
-        "selection_id":request["selection_id"],"batch_id":request["batch_id"],"input_revision":request["input_revision"],
-        "decisions":request["candidates"].as_array().unwrap().iter().map(|candidate| json!({
-            "candidate_key":candidate["candidate_key"],"decision":"not-selected",
-            "reason":"Card-only fixture scope; no full-body negative finding.",
-        })).collect::<Vec<_>>(),
-    })).unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "task_id":request["task_id"],"request_revision":request["request_revision"],
+            "decisions":request["candidates"].as_array().unwrap().iter().map(|candidate| json!({
+                "candidate_key":candidate["candidate_key"],"decision":"not-selected",
+                "reason":"Card-only fixture scope; no full-body negative finding.",
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     fixture.success(&[
         "work",
         "select-record",
@@ -454,7 +459,10 @@ fn corrected_source_blocker_is_local_to_staged_extraction_and_keeps_independent_
         "--file",
         path.to_str().unwrap(),
     ]);
+    let sealed = fixture.json(&["work", "select", "--task-id", &rejected.task_id]);
+    assert_eq!(sealed["status"], "ready", "{sealed}");
     let context = fixture.json(&["work", "context", "--task-id", &rejected.task_id]);
+    assert_eq!(context["selection"], sealed["selection"]);
     let plan = fixture.json(&["work", "plan", "--task-id", &rejected.task_id]);
     fixture.complete_observations(&plan);
     let answer = lk_queue::TaskResult {
@@ -540,7 +548,7 @@ fn corrected_source_blocker_is_local_to_staged_extraction_and_keeps_independent_
 }
 
 #[test]
-fn changed_screening_capacity_retains_staged_extraction_and_allows_independent_work() {
+fn staged_extraction_publishes_despite_a_later_unscreened_candidate() {
     let fixture = Fixture::new("codex");
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
@@ -556,8 +564,8 @@ fn changed_screening_capacity_retains_staged_extraction_and_allows_independent_w
     std::fs::write(&fixture.config, config).unwrap();
     let independent = fixture.add_summary("b-independent");
     let client = QueueLlmClient::new(fixture.vault().join(".lorekeeper/queue"));
-    let rejected = client.build_task(
-        "a-rejected",
+    let staged = client.build_task(
+        "a-staged",
         TaskKind::ExtractConcepts,
         lk_queue::ExtractConceptsRequest {
             text: "A retained Candidate observation.".into(),
@@ -570,19 +578,19 @@ fn changed_screening_capacity_retains_staged_extraction_and_allows_independent_w
             rss_original: None,
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
             target: lk_queue::TaskTarget {
-                vault_path: "wiki/documents/a-rejected.md".into(),
+                vault_path: "wiki/documents/a-staged.md".into(),
                 kind: lk_queue::TargetKind::DocumentConcepts,
                 anchor: "## Related Concepts".into(),
             },
         },
     );
     fixture.write(
-        &rejected.target.vault_path,
-        &format!("---\ntype: document\ntitle: Retained source\nllm_inputs:\n  concepts: {}\n---\n# Retained source\n\n## Summary\nA retained source observation.\n\n## Content\nA retained Candidate observation.\n\n## Related Concepts\n", rejected.cache_hash),
+        &staged.target.vault_path,
+        &format!("---\ntype: document\ntitle: Retained source\nllm_inputs:\n  concepts: {}\n---\n# Retained source\n\n## Summary\nA retained source observation.\n\n## Content\nA retained Candidate observation.\n\n## Related Concepts\n", staged.cache_hash),
     );
     fixture.write(
-        ".lorekeeper/queue/a-rejected.jsonl",
-        &(serde_json::to_string(&rejected).unwrap() + "\n"),
+        ".lorekeeper/queue/a-staged.jsonl",
+        &(serde_json::to_string(&staged).unwrap() + "\n"),
     );
     let queries = vec![lk_core::discovery::DiscoveryQuery {
         query: "Candidate".into(),
@@ -593,7 +601,7 @@ fn changed_screening_capacity_retains_staged_extraction_and_allows_independent_w
     std::fs::write(
         &discovery,
         serde_json::to_vec(&json!({
-            "target_revision":fixture.target_revision(&rejected),"queries":queries,
+            "target_revision":fixture.target_revision(&staged),"queries":queries,
         }))
         .unwrap(),
     )
@@ -602,83 +610,70 @@ fn changed_screening_capacity_retains_staged_extraction_and_allows_independent_w
         "work",
         "discover",
         "--task-id",
-        &rejected.task_id,
+        &staged.task_id,
         "--file",
         discovery.to_str().unwrap(),
     ]);
-    let selection = fixture.json(&["work", "select", "--task-id", &rejected.task_id]);
+    let selection = fixture.json(&["work", "select", "--task-id", &staged.task_id]);
     assert_eq!(selection["status"], "ready");
-    let context = fixture.json(&["work", "context", "--task-id", &rejected.task_id]);
+    let context = fixture.json(&["work", "context", "--task-id", &staged.task_id]);
     let answer = lk_queue::TaskResult {
-        task_id: rejected.task_id.clone(),
-        cache_hash: rejected.cache_hash.clone(),
-        target_revision: fixture.target_revision(&rejected),
+        task_id: staged.task_id.clone(),
+        cache_hash: staged.cache_hash.clone(),
+        target_revision: fixture.target_revision(&staged),
         context_revision: context["context_revision"].as_str().unwrap().into(),
         selection: Some(serde_json::from_value(context["selection"].clone()).unwrap()),
         discovery: queries,
         concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
-        target: rejected.target.clone(),
+        target: staged.target.clone(),
         date: jiff::civil::date(2026, 10, 23),
         concepts: vec![],
     };
     let original = serde_json::to_vec(&answer).unwrap();
     assert!(original.len() <= 1024);
     let result = fixture.write(
-        &format!(".lorekeeper/queue/results/{}.json", rejected.task_id),
+        &format!(".lorekeeper/queue/results/{}.json", staged.task_id),
         std::str::from_utf8(&original).unwrap(),
     );
-    let target = fixture.vault().join(&rejected.target.vault_path);
+    let target = fixture.vault().join(&staged.target.vault_path);
     let target_before = std::fs::read(&target).unwrap();
-    let address = format!(
-        "wiki/documents/{}candidate.md",
-        format!("{}/", "owner".repeat(40)).repeat(4)
-    );
     let added = fixture.write(
-        &address,
+        "wiki/documents/later-candidate.md",
         "---\ntype: document\ntitle: Candidate\n---\nA new matching Candidate observation.\n",
     );
+    let current = fixture.json(&["work", "context", "--task-id", &staged.task_id]);
+    assert_eq!(
+        current["status"], "needs-screening",
+        "a fresh draft would have to judge the added card first: {current}"
+    );
     let before = fixture.snapshot();
-    let preview = fixture
-        .command()
-        .args(["queue", "apply", "--json", "--dry-run"])
-        .output()
-        .unwrap();
-    assert!(!preview.status.success());
-    let preview: Value = serde_json::from_slice(&preview.stdout).unwrap();
+    let preview = fixture.json(&["queue", "apply", "--json", "--dry-run"]);
     assert!(preview["fatal"].is_null(), "{preview}");
-    assert_eq!(preview["rejected"], 1, "{preview}");
+    assert_eq!(preview["applied"], 1, "{preview}");
     assert_eq!(fixture.snapshot(), before);
-
-    let (output, report) = fixture.run("process");
-    assert!(!output.status.success(), "{report}");
-    assert_eq!(report["semantic_calls"], 1, "{report}");
-    assert!(fixture.is_completed(&independent), "{report}");
-    assert!(!fixture.is_completed(&rejected));
     assert_eq!(std::fs::read(&result).unwrap(), original);
     assert_eq!(std::fs::read(&target).unwrap(), target_before);
-    let calls = fixture.calls();
-    assert!(
-        calls
-            .iter()
-            .all(|call| call["target"] == independent.target.vault_path)
-    );
-    let (output, report) = fixture.run("process");
-    assert!(!output.status.success(), "{report}");
-    assert_eq!(report["semantic_calls"], 0, "{report}");
-    assert_eq!(fixture.calls(), calls);
-    assert_eq!(std::fs::read(&result).unwrap(), original);
 
-    std::fs::remove_file(added).unwrap();
     let (output, report) = fixture.run("process");
     assert!(
         output.status.success(),
         "{report}\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(report["semantic_calls"], 0, "{report}");
-    assert!(fixture.is_completed(&rejected));
+    assert_eq!(report["semantic_calls"], 1, "{report}");
+    assert!(fixture.is_completed(&independent), "{report}");
+    assert!(
+        fixture.is_completed(&staged),
+        "the sealed roster binds the result; the later card was never part of it"
+    );
     assert!(!result.exists());
-    assert_eq!(fixture.calls(), calls);
+    assert!(added.exists());
+    assert!(
+        fixture
+            .calls()
+            .iter()
+            .all(|call| call["target"] == independent.target.vault_path)
+    );
 }
 
 #[test]

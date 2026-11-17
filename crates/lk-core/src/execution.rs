@@ -354,6 +354,24 @@ impl ExecutionConfig {
             .ok_or_else(|| ConfigError::Validation(format!("unknown execution profile '{name}'")))
     }
 
+    /// The profile that answers candidate screening: the screening stage of the selected
+    /// job, or of the default profile when a standalone command selects no job.
+    pub fn screening_profile(&self) -> Result<Option<&ExecutionProfile>, ConfigError> {
+        let Some(name) = self
+            .stages
+            .get(&ExecutionStage::Screening)
+            .map(String::as_str)
+            .or(self.selected_profile())
+            .or(self.default_profile.as_deref())
+        else {
+            return Ok(None);
+        };
+        self.profiles
+            .get(name)
+            .map(Some)
+            .ok_or_else(|| ConfigError::Validation(format!("unknown execution profile '{name}'")))
+    }
+
     pub fn resolve_stage_profile(
         &self,
         stage: ExecutionStage,
@@ -451,7 +469,30 @@ fn validate_text(field: &str, value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// The settings that decide which model answers a profile's requests, apart from where
+/// it runs and how long it may take.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelIdentity<'a> {
+    pub engine: AgentEngine,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
+    /// Codex's named CLI profile, which can itself select a model.
+    pub profile: Option<&'a str>,
+}
+
 impl ExecutionProfile {
+    pub fn model_identity(&self) -> ModelIdentity<'_> {
+        ModelIdentity {
+            engine: self.engine(),
+            model: self.model(),
+            effort: self.requested_effort(),
+            profile: match self {
+                Self::ClaudeCode { .. } => None,
+                Self::Codex { profile, .. } => profile.as_deref(),
+            },
+        }
+    }
+
     fn work_overrides(&self) -> &SemanticWorkOverrides {
         match self {
             Self::ClaudeCode { work, .. } | Self::Codex { work, .. } => work,
@@ -636,6 +677,46 @@ mod tests {
         };
         work.max_calls = Some(10);
         assert!(config.select_profile("main").is_err());
+    }
+
+    #[test]
+    fn screening_profile_follows_the_stage_then_the_job_then_the_default() {
+        let config = |body: &str| -> ExecutionConfig { crate::yaml::from_str(body).unwrap() };
+        let profiles = "profiles:\n  main: {engine: claude-code, model: sonnet, effort: high, timeout_seconds: 30}\n  screener: {engine: codex, model: terra, model_reasoning_effort: low, profile: fast, executable: /opt/codex, timeout_seconds: 60}\n  twin: {engine: codex, model: terra, model_reasoning_effort: low, profile: fast, timeout_seconds: 900}\n";
+        assert!(config("{}").screening_profile().unwrap().is_none());
+        assert!(config(profiles).screening_profile().unwrap().is_none());
+        let mut job = config(&format!("default_profile: main\n{profiles}"));
+        assert_eq!(
+            job.screening_profile().unwrap().unwrap().model_identity(),
+            ModelIdentity {
+                engine: AgentEngine::ClaudeCode,
+                model: Some("sonnet"),
+                effort: Some("high"),
+                profile: None,
+            }
+        );
+        job.select_profile("screener").unwrap();
+        let selected = ModelIdentity {
+            engine: AgentEngine::Codex,
+            model: Some("terra"),
+            effort: Some("low"),
+            profile: Some("fast"),
+        };
+        assert_eq!(
+            job.screening_profile().unwrap().unwrap().model_identity(),
+            selected
+        );
+        let staged = config(&format!(
+            "default_profile: main\nstages: {{screening: twin}}\n{profiles}"
+        ));
+        assert_eq!(
+            staged
+                .screening_profile()
+                .unwrap()
+                .unwrap()
+                .model_identity(),
+            selected
+        );
     }
 
     #[test]

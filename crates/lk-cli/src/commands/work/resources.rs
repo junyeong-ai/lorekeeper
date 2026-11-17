@@ -32,20 +32,18 @@ pub(super) struct Prepared {
     pub context: Value,
     pub resources: Vec<SemanticResource>,
     pub pages: BTreeMap<PathBuf, String>,
-    pub(super) absent_pages: BTreeSet<PathBuf>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
     pub(super) selected_owners: Option<BTreeSet<String>>,
+    /// The roster this extraction evidence was admitted from, sealed when a result finishes.
+    pub(super) roster_seal: Option<super::selection::RosterSeal>,
 }
 
+/// One extraction task's candidate roster beside its source: the retained input, the
+/// target and the target's scoped reviews. Candidate pages are not guarded here; a
+/// screening decision binds the card it judged.
 pub(super) struct SelectionInventory {
-    pub revision: String,
     pub capture: lk_vault::DiscoveryCapture,
-    pub pages: BTreeMap<PathBuf, String>,
-    pub(super) absent_pages: BTreeSet<PathBuf>,
     pub source: Prepared,
-    resources: BTreeMap<String, SemanticResource>,
-    review_resources: BTreeMap<String, BTreeSet<String>>,
-    reviews: BTreeMap<String, Vec<lk_graph::audit::AuditReviewDependency>>,
 }
 
 impl Prepared {
@@ -146,9 +144,6 @@ impl Prepared {
         for (path, content) in &self.pages {
             plan.require_unchanged(path, content.clone());
         }
-        for path in &self.absent_pages {
-            plan.require_absent(path);
-        }
     }
 }
 
@@ -157,7 +152,6 @@ struct Capture<'a> {
     read: lk_vault::ReadControl,
     root: &'a Path,
     pages: BTreeMap<PathBuf, String>,
-    absent_pages: BTreeSet<PathBuf>,
     resources: BTreeMap<String, SemanticResource>,
 }
 
@@ -168,8 +162,23 @@ impl<'a> Capture<'a> {
             rss: None,
             read: read.clone(),
             pages: BTreeMap::new(),
-            absent_pages: BTreeSet::new(),
             resources: BTreeMap::new(),
+        }
+    }
+
+    /// Continue a finished capture with its pages and resources as the starting state.
+    fn resume(root: &'a Path, prepared: &Prepared) -> Self {
+        Self {
+            root,
+            rss: None,
+            read: prepared.read.clone(),
+            pages: prepared.pages.clone(),
+            resources: prepared
+                .resources
+                .iter()
+                .cloned()
+                .map(|resource| (resource.address.clone(), resource))
+                .collect(),
         }
     }
 
@@ -304,9 +313,9 @@ impl<'a> Capture<'a> {
             context,
             resources: self.resources.into_values().collect(),
             pages: self.pages,
-            absent_pages: self.absent_pages,
             audit_reviews: None,
             selected_owners: None,
+            roster_seal: None,
         }
     }
 }
@@ -365,17 +374,7 @@ pub(super) fn section_task_controlled(
     let reviews =
         lk_graph::audit::review_dependencies_controlled(root, &config.vault.dirs, &subjects, read)
             .into_diagnostic()?;
-    let mut captured = Capture {
-        rss: None,
-        read: read.clone(),
-        root,
-        pages: std::mem::take(&mut prepared.pages),
-        absent_pages: std::mem::take(&mut prepared.absent_pages),
-        resources: std::mem::take(&mut prepared.resources)
-            .into_iter()
-            .map(|resource| (resource.address.clone(), resource))
-            .collect(),
-    };
+    let mut captured = Capture::resume(root, &prepared);
     capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
     Ok(captured.finish(prepared.subject, prepared.context, config))
 }
@@ -471,21 +470,9 @@ pub(super) fn source_task_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
     read.check().into_diagnostic()?;
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
-    let mut prepared = with_discovery_controlled(
-        root,
-        config,
-        capture_task_with_audit_controlled(root, config, task, None, read)?,
-        &[],
-        read,
-    )?;
-    prepared.context["purpose"]["extraction_scope"] = json!({"policy":"source-proposals-v1"});
-    Ok(prepared)
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
+    extraction_source_controlled(root, config, task_id, &mut reviews, read)
 }
 
 #[cfg(test)]
@@ -561,6 +548,34 @@ pub(super) fn selection_inventory_with_capture(
     reviews: &mut lk_vault::ReviewInventory,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectionInventory> {
+    let source = extraction_source_controlled(root, config, task_id, reviews, read)?;
+    let Subject::Queue { target, .. } = &source.subject else {
+        return Err(miette::miette!(
+            "extraction inventory requires a queue subject"
+        ));
+    };
+    let target_owner = lk_vault::resolve_page_owner(root, Path::new(target)).into_diagnostic()?;
+    if capture
+        .candidates
+        .iter()
+        .any(|candidate| Path::new(&candidate.owner) == target_owner.as_path())
+    {
+        return Err(miette::miette!(
+            "extraction capture lists its own target as a candidate"
+        ));
+    }
+    Ok(SelectionInventory { capture, source })
+}
+
+/// The source an extraction is judged against: its retained input, its target and the
+/// target's scoped reviews, without any candidate.
+pub(super) fn extraction_source_controlled(
+    root: &Path,
+    config: &Config,
+    task_id: &str,
+    reviews: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
     let task = super::super::queue::select_task_controlled(
         root,
         task_id,
@@ -576,283 +591,86 @@ pub(super) fn selection_inventory_with_capture(
             "discovery recipes require concept extraction"
         ));
     }
-    let target = match &source.subject {
-        Subject::Queue { target, .. } => target.clone(),
-        _ => {
-            return Err(miette::miette!(
-                "extraction inventory requires a queue subject"
-            ));
-        }
-    };
-    let target_owner = lk_vault::resolve_page_owner(root, Path::new(&target)).into_diagnostic()?;
-    if capture
-        .candidates
-        .iter()
-        .any(|candidate| Path::new(&candidate.owner) == target_owner.as_path())
-    {
-        return Err(miette::miette!(
-            "extraction capture lists its own target as a candidate"
-        ));
-    }
-    let target_raw = source
-        .pages
-        .get(&target_owner)
-        .ok_or_else(|| miette::miette!("captured extraction target is missing"))?;
-    let mut subjects = BTreeMap::from([(
-        target.clone(),
-        lk_vault::parse_page(target_raw).map_err(|error| miette::miette!("{target}: {error}"))?,
-    )]);
-    for candidate in &capture.candidates {
-        let raw = capture
-            .guarded_pages()
-            .get(Path::new(&candidate.owner))
-            .ok_or_else(|| miette::miette!("candidate owner is outside the exact capture"))?;
-        if file_revision(raw) != candidate.file_revision {
-            return Err(miette::miette!(
-                "candidate file revision changed during capture"
-            ));
-        }
-        let page = lk_vault::parse_page(raw)
-            .map_err(|error| miette::miette!("{}: {error}", candidate.owner))?;
-        if source_revision(&page) != candidate.source_revision {
-            return Err(miette::miette!(
-                "candidate source revision changed during capture"
-            ));
-        }
-        subjects.insert(candidate.owner.clone(), page);
-    }
-    let card_reviews = lk_graph::audit::review_card_dependencies_with_inventory(
-        root,
-        &capture
-            .candidates
-            .iter()
-            .map(|candidate| candidate.owner.clone())
-            .collect(),
-        reviews,
-        read,
-    )
-    .into_diagnostic()?;
-    let reviews =
+    let (target, subjects) = review_subjects(root, &source, &BTreeSet::new())?;
+    let mut reviews =
         lk_graph::audit::review_dependencies_with_inventory(root, &subjects, reviews, read)
             .into_diagnostic()?;
-    let target_reviews = BTreeMap::from([(
-        target.clone(),
-        reviews.get(&target).cloned().unwrap_or_default(),
-    )]);
-    let mut source_capture = Capture {
-        rss: None,
-        read: read.clone(),
-        root,
-        pages: std::mem::take(&mut source.pages),
-        absent_pages: std::mem::take(&mut source.absent_pages),
-        resources: std::mem::take(&mut source.resources)
-            .into_iter()
-            .map(|resource| (resource.address.clone(), resource))
-            .collect(),
-    };
-    capture_reviews(&mut source_capture, &mut source.context, &target_reviews)?;
+    let target_reviews =
+        BTreeMap::from([(target.clone(), reviews.remove(&target).unwrap_or_default())]);
+    let mut captured = Capture::resume(root, &source);
+    capture_reviews(&mut captured, &mut source.context, &target_reviews)?;
     source.context["purpose"]["discovery"] = json!({
         "queries":[],
         "match_count":0,
         "match_revision":lk_core::concept::citation_digest(&[]),
     });
     source.context["purpose"]["extraction_scope"] = json!({"policy":"source-proposals-v1"});
-    source = source_capture.finish(source.subject, source.context, config);
-    let mut guarded = Capture {
-        rss: None,
-        read: read.clone(),
-        root,
-        pages: source.pages.clone(),
-        absent_pages: source.absent_pages.clone(),
-        resources: source
-            .resources
-            .iter()
-            .cloned()
-            .map(|resource| (resource.address.clone(), resource))
-            .collect(),
-    };
-    for (path, raw) in capture.guarded_pages() {
-        let owner = lk_vault::resolve_page_owner(root, path).into_diagnostic()?;
-        if owner != *path {
-            return Err(miette::miette!("candidate owner changed during capture"));
-        }
-        guarded.insert_page(owner, raw.as_str().to_owned(), SemanticAuthority::Context)?;
-    }
-    let mut card_capture = Capture::new(root, read);
-    for review in &card_reviews {
-        card_capture.review(review)?;
-        for evidence in &review.evidence {
-            if evidence.current.is_none() {
-                card_capture
-                    .absent_pages
-                    .insert(PathBuf::from(&evidence.recorded.path));
-            }
-        }
-    }
-    for (path, content) in card_capture.pages {
-        if guarded
-            .pages
-            .insert(path, content.clone())
-            .is_some_and(|before| before != content)
-        {
-            return Err(miette::miette!("card review input changed during capture"));
-        }
-    }
-    guarded.absent_pages.extend(card_capture.absent_pages);
-    let mut review_resources = BTreeMap::new();
-    let mut seen_reviews = BTreeSet::new();
-    for (subject, dependencies) in &reviews {
-        let mut owners = BTreeSet::new();
-        for review in dependencies {
-            if seen_reviews.insert(review.path.clone()) {
-                guarded.review(review)?;
-            }
-            for path in std::iter::once(review.path.as_str()).chain(
-                review.evidence.iter().flat_map(|evidence| {
-                    evidence
-                        .current
-                        .iter()
-                        .chain(&evidence.archived)
-                        .map(|current| current.path.as_str())
-                }),
-            ) {
-                let owner =
-                    lk_vault::resolve_page_owner(root, Path::new(path)).into_diagnostic()?;
-                let owner = owner
-                    .to_str()
-                    .ok_or_else(|| miette::miette!("review owner is not UTF-8"))?;
-                owners.insert(lk_core::vault_path::address(Path::new(owner)));
-            }
-        }
-        review_resources.insert(subject.clone(), owners);
-    }
-    let guards = guarded
-        .pages
-        .iter()
-        .map(|(path, raw)| (path, file_revision(raw)))
-        .collect::<Vec<_>>();
-    let revision = file_revision(
-        &serde_json::to_string(&(
-            "progressive-evidence-inventory-v1",
-            &capture.revision,
-            &target_owner,
-            guards,
-            &reviews,
-        ))
-        .into_diagnostic()?,
-    );
-    Ok(SelectionInventory {
-        revision,
-        capture,
-        pages: guarded.pages,
-        absent_pages: guarded.absent_pages,
-        source,
-        resources: guarded.resources,
-        review_resources,
-        reviews,
-    })
+    Ok(captured.finish(source.subject, source.context, config))
 }
 
-pub(super) fn task_with_selection(
-    inventory: &SelectionInventory,
-    selection: &lk_queue::ExtractionSelection,
+/// The target and the selected owners as review subjects, parsed from captured bytes.
+fn review_subjects(
+    root: &Path,
+    prepared: &Prepared,
     selected: &BTreeSet<String>,
-) -> miette::Result<Prepared> {
-    if selection.inventory_revision != inventory.revision {
-        return Err(super::publication_rejection(
-            super::RejectionKind::SelectionInventoryChanged,
-            "extraction candidate inventory changed; reselect evidence",
+) -> miette::Result<(String, BTreeMap<String, lk_vault::VaultPage>)> {
+    let Subject::Queue { target, .. } = &prepared.subject else {
+        return Err(miette::miette!(
+            "extraction evidence requires a queue subject"
         ));
+    };
+    let mut subjects = BTreeMap::new();
+    for address in std::iter::once(target).chain(selected) {
+        let owner = lk_vault::resolve_page_owner(root, Path::new(address)).into_diagnostic()?;
+        let raw = prepared
+            .pages
+            .get(&owner)
+            .ok_or_else(|| miette::miette!("captured extraction page is missing: {address}"))?;
+        subjects.insert(
+            address.clone(),
+            lk_vault::parse_page(raw).map_err(|error| miette::miette!("{address}: {error}"))?,
+        );
     }
-    let candidates = inventory
-        .capture
-        .candidates
-        .iter()
-        .map(|candidate| (candidate.owner.as_str(), candidate))
-        .collect::<BTreeMap<_, _>>();
-    let mut resources = inventory
-        .source
-        .resources
-        .iter()
-        .cloned()
-        .map(|resource| (resource.address.clone(), resource))
-        .collect::<BTreeMap<_, _>>();
+    Ok((target.clone(), subjects))
+}
+
+/// The evidence an extraction reads: its source plus each selected owner and the scoped
+/// reviews of those owners, captured from current bytes. Only these pages are guarded;
+/// a candidate that was not selected stays bound to the card it was judged from.
+pub(super) fn task_with_selected(
+    root: &Path,
+    config: &Config,
+    source: &Prepared,
+    selected: &BTreeSet<String>,
+    reviews: &mut lk_vault::ReviewInventory,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let mut captured = Capture::resume(root, source);
     for owner in selected {
-        let candidate = candidates.get(owner.as_str()).ok_or_else(|| {
-            super::publication_rejection(
-                super::RejectionKind::EvidenceScopeChanged,
-                "selected owner is outside the complete candidate inventory",
-            )
-        })?;
-        let mut resource = inventory
-            .resources
-            .get(owner)
-            .ok_or_else(|| miette::miette!("selected candidate input is missing"))?
-            .clone();
-        if resource.revision != candidate.file_revision {
+        let exists = lk_vault::page_path(root, Path::new(owner))
+            .into_diagnostic()?
+            .try_exists()
+            .into_diagnostic()?;
+        if !exists
+            || lk_vault::resolve_page_owner(root, Path::new(owner)).into_diagnostic()?
+                != Path::new(owner)
+        {
             return Err(super::publication_rejection(
                 super::RejectionKind::EvidenceScopeChanged,
-                "selected candidate input revision changed",
+                "a selected candidate owner is missing or was retargeted; rescreen and regenerate the extraction result",
             ));
         }
-        resource.authority = SemanticAuthority::Context;
-        resources.entry(owner.clone()).or_insert(resource);
-        if let Some(dependencies) = inventory.review_resources.get(owner) {
-            for address in dependencies {
-                let resource = inventory
-                    .resources
-                    .get(address)
-                    .ok_or_else(|| miette::miette!("selected review input is missing"))?;
-                resources
-                    .entry(address.clone())
-                    .or_insert_with(|| resource.clone());
-            }
-        }
+        captured.page(owner, None, None, SemanticAuthority::Context)?;
     }
-    let mut prepared = inventory.source.clone();
-    prepared.pages.clone_from(&inventory.pages);
-    prepared.absent_pages.clone_from(&inventory.absent_pages);
-    prepared.resources = resources.into_values().collect();
+    let mut prepared = captured.finish(source.subject.clone(), source.context.clone(), config);
+    let (_, subjects) = review_subjects(root, &prepared, selected)?;
+    let reviews =
+        lk_graph::audit::review_dependencies_with_inventory(root, &subjects, reviews, read)
+            .into_diagnostic()?;
+    let mut captured = Capture::resume(root, &prepared);
+    capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
+    let mut prepared = captured.finish(prepared.subject, prepared.context, config);
     prepared.selected_owners = Some(selected.clone());
-    prepared.context["purpose"]["discovery"] = json!({
-        "queries":inventory.capture.queries,
-        "match_count":inventory.capture.candidates.len(),
-        "inventory_revision":inventory.revision,
-    });
-    let target = match &prepared.subject {
-        Subject::Queue { target, .. } => target,
-        _ => {
-            return Err(miette::miette!(
-                "extraction selection requires a queue subject"
-            ));
-        }
-    };
-    let reviews = inventory
-        .reviews
-        .iter()
-        .filter(|(subject, _)| *subject == target || selected.contains(*subject))
-        .collect::<BTreeMap<_, _>>();
-    let review_count = reviews
-        .values()
-        .flat_map(|reviews| reviews.iter())
-        .map(|review| &review.path)
-        .collect::<BTreeSet<_>>()
-        .len();
-    prepared.context["purpose"]["review_dependencies"] = json!({
-        "subject_count":reviews.len(),
-        "review_count":review_count,
-        "revision":file_revision(&serde_json::to_string(&reviews).into_diagnostic()?),
-    });
-    prepared.context["purpose"]["extraction_scope"] = json!({
-        "policy":selection.policy,
-        "selection":selection,
-        "coverage":{
-            "inventory_complete":true,
-            "candidate_count":inventory.capture.candidates.len(),
-            "full_candidate_inputs":selected.len(),
-            "not_full_inputs":inventory.capture.candidates.len().saturating_sub(selected.len()),
-        },
-    });
     Ok(prepared)
 }
 
@@ -895,17 +713,7 @@ pub(super) fn with_discovery_controlled(
     }
     selected.sort();
     selected.dedup();
-    let mut captured = Capture {
-        rss: None,
-        read: read.clone(),
-        root,
-        pages: std::mem::take(&mut prepared.pages),
-        absent_pages: std::mem::take(&mut prepared.absent_pages),
-        resources: std::mem::take(&mut prepared.resources)
-            .into_iter()
-            .map(|resource| (resource.address.clone(), resource))
-            .collect(),
-    };
+    let mut captured = Capture::resume(root, &prepared);
     let mut review_subjects = BTreeMap::from([(
         target_address,
         lk_vault::parse_page(
@@ -1249,8 +1057,7 @@ pub(super) fn refresh_controlled(
         Subject::Queue { task_id, .. } => {
             if context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
                 source_task_controlled(root, config, task_id, read)?
-            } else if context["purpose"]["extraction_scope"]["policy"] == "progressive-evidence-v1"
-            {
+            } else if context["purpose"]["extraction_scope"]["policy"] == super::selection::POLICY {
                 let queries: Vec<lk_core::discovery::DiscoveryQuery> =
                     serde_json::from_value(context["purpose"]["discovery"]["queries"].clone())
                         .into_diagnostic()?;
@@ -1258,20 +1065,23 @@ pub(super) fn refresh_controlled(
                     context["purpose"]["extraction_scope"]["selection"].clone(),
                 )
                 .into_diagnostic()?;
-                super::selected_task_with_screening(
+                super::selected_task_controlled(
                     root,
-                    super::screening_controlled(
-                        root,
-                        config,
-                        config_revision,
-                        task_id,
-                        &queries,
-                        read,
-                    )?,
+                    config,
+                    config_revision,
+                    task_id,
+                    &queries,
                     &selection,
-                    &mut Default::default(),
+                    read,
                 )?
-                .0
+            } else if context["purpose"]["extraction_scope"]
+                .get("selection")
+                .is_some()
+            {
+                return Err(super::publication_rejection(
+                    super::RejectionKind::SemanticContextChanged,
+                    "this Work was planned under the retired packet selection; replan it from current screening decisions",
+                ));
             } else if let Some(discovery) = context["purpose"].get("discovery") {
                 let queries: Vec<lk_core::discovery::DiscoveryQuery> =
                     serde_json::from_value(discovery["queries"].clone()).into_diagnostic()?;
@@ -1336,226 +1146,7 @@ mod tests {
     }
 
     #[test]
-    fn progressive_card_review_inputs_guard_recording_and_selected_publication() {
-        for native in [false, true] {
-            for change in ["review", "evidence", "restore"] {
-                let directory = tempfile::tempdir().unwrap();
-                let root = directory.path().canonicalize().unwrap();
-                let config_path = root.join("config.yaml");
-                std::fs::write(&config_path, "vault: {root: ., locale: en}\nidentity: {name: Test, email: test@example.com}\nsources:\n  notes: {type: manual, params: {inbox_dir: inbox}, concept_policy: supported-new}\n").unwrap();
-                let config = Config::load(&config_path).unwrap();
-                let target = "wiki/documents/source.md";
-                let candidate = "wiki/concepts/candidate.md";
-                let evidence = "wiki/documents/evidence.md";
-                let other = "wiki/documents/other.md";
-                let review = "wiki/explorations/evidence-review.md";
-                let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
-                    "ext", lk_queue::TaskKind::ExtractConcepts,
-                    serde_json::from_value::<lk_queue::ExtractConceptsRequest>(json!({
-                        "text":"A retained source statement.","source_id":"notes","source_type":"manual",
-                        "date":"2026-10-22","locale":"en","concept_policy":"supported-new",
-                        "target":{"vault_path":target,"kind":"document-concepts","anchor":"## Related Concepts"}
-                    })).unwrap(),
-                );
-                write(
-                    &root,
-                    target,
-                    &format!(
-                        "---\ntype: document\nllm_inputs: {{concepts: {}}}\n---\n## Content\nSource.\n\n## Related Concepts\n",
-                        task.cache_hash
-                    ),
-                );
-                write(
-                    &root,
-                    candidate,
-                    "---\ntype: concept\ntitle: Candidate\n---\nA declared scope.\n",
-                );
-                let evidence_raw = "---\ntype: document\ntitle: Supporting source\n---\nAn independent condition.\n";
-                write(&root, evidence, evidence_raw);
-                write(
-                    &root,
-                    other,
-                    "---\ntype: document\ntitle: Other subject\n---\nA different claim.\n",
-                );
-                let candidate_raw = std::fs::read_to_string(root.join(candidate)).unwrap();
-                let candidate_revision =
-                    source_revision(&lk_vault::parse_page(&candidate_raw).unwrap());
-                let evidence_revision =
-                    source_revision(&lk_vault::parse_page(evidence_raw).unwrap());
-                let review_raw = format!(
-                    "---\ntype: exploration\ntitle: Evidence association\nreview:\n  status: open\n  subjects: [{other}]\n  evidence: [{{path: {candidate}, revision: {candidate_revision}}}, {{path: {evidence}, revision: {evidence_revision}}}]\n  resolution: The declared question was resolved.\n---\nA scoped assessment.\n"
-                );
-                write(&root, review, &review_raw);
-                if change == "restore" {
-                    lk_vault::archive_evidence(&root, &[evidence.into()]).unwrap();
-                    std::fs::remove_file(root.join(evidence)).unwrap();
-                }
-                write(
-                    &root,
-                    ".lorekeeper/queue/fixture.jsonl",
-                    &serde_json::to_string(&task).unwrap(),
-                );
-                let inventory = selection_inventory(
-                    &root,
-                    &config,
-                    &task.task_id,
-                    &[lk_core::discovery::DiscoveryQuery {
-                        query: "Candidate".into(),
-                        phrase: true,
-                        spacing: false,
-                    }],
-                )
-                .unwrap();
-                assert_eq!(inventory.capture.candidates.len(), 1);
-                assert!(
-                    inventory.reviews[candidate].is_empty(),
-                    "evidence association is not subject authority"
-                );
-                let screening = super::super::screening_with_inventory(
-                    &root,
-                    &config,
-                    "config-revision",
-                    inventory,
-                )
-                .unwrap()
-                .into_candidates()
-                .unwrap();
-                let session = lk_vault::MutationSession::acquire(&root).unwrap();
-                let contract = "a".repeat(64);
-                if native {
-                    screening
-                        .selection
-                        .create_native(&session, &screening.inventory.pages, &contract)
-                        .unwrap();
-                } else {
-                    screening
-                        .selection
-                        .create(&session, &screening.inventory.pages)
-                        .unwrap();
-                }
-                let request = screening.selection.prepare(&root).unwrap().1.unwrap();
-                let output: super::super::selection::ScreeningOutput = serde_json::from_value(json!({
-                    "selection_id":request["selection_id"],"batch_id":request["batch_id"],"input_revision":request["input_revision"],
-                    "decisions":request["candidates"].as_array().unwrap().iter().map(|card| json!({
-                        "candidate_key":card["candidate_key"],"decision":"inspect","reason":"Inspect the declared scope."
-                    })).collect::<Vec<_>>()
-                })).unwrap();
-                if native {
-                    screening
-                        .selection
-                        .record_native(
-                            &session,
-                            &screening.inventory.pages,
-                            output.clone(),
-                            &contract,
-                        )
-                        .unwrap();
-                } else {
-                    screening
-                        .selection
-                        .record(&session, &screening.inventory.pages, output.clone(), None)
-                        .unwrap();
-                }
-                let binding = screening
-                    .selection
-                    .ledger(&root)
-                    .unwrap()
-                    .binding()
-                    .unwrap();
-                let mut publication = lk_vault::MutationPlan::default();
-                let ledger = screening
-                    .selection
-                    .guard(&root, &mut publication, &binding)
-                    .unwrap();
-                let admitted =
-                    task_with_selection(&screening.inventory, &binding, &ledger.selected_owners)
-                        .unwrap();
-                for path in [review, evidence] {
-                    assert!(
-                        !admitted
-                            .resources
-                            .iter()
-                            .any(|resource| resource.address == path),
-                        "card guards must not become semantic subject inputs"
-                    );
-                }
-                assert_eq!(
-                    admitted.context["purpose"]["review_dependencies"]["review_count"],
-                    0
-                );
-                let refreshed = refresh_controlled(
-                    &root,
-                    &config,
-                    "config-revision",
-                    &admitted.context,
-                    &lk_vault::ReadControl::default(),
-                )
-                .unwrap();
-                refreshed.guard_pages(&mut publication);
-                publication.create(
-                    "card-review-publication.md",
-                    "This must remain unpublished.".into(),
-                );
-                let paid = screening
-                    .selection
-                    .ledger(&root)
-                    .unwrap()
-                    .progress
-                    .receipts
-                    .into_iter()
-                    .map(|receipt| {
-                        let path = root.join(receipt.path);
-                        (path.clone(), std::fs::read(path).unwrap())
-                    })
-                    .collect::<Vec<_>>();
-                match change {
-                    "review" => write(
-                        &root,
-                        review,
-                        &review_raw.replace("status: open", "status: resolved"),
-                    ),
-                    "evidence" => write(
-                        &root,
-                        evidence,
-                        &format!("{evidence_raw}\nA changed condition.\n"),
-                    ),
-                    "restore" => write(&root, evidence, evidence_raw),
-                    _ => unreachable!(),
-                }
-                let recorded = if native {
-                    screening.selection.record_native(
-                        &session,
-                        &screening.inventory.pages,
-                        output,
-                        &contract,
-                    )
-                } else {
-                    screening
-                        .selection
-                        .record(&session, &screening.inventory.pages, output, None)
-                };
-                assert!(
-                    recorded.is_err(),
-                    "{native}: {change} changed after exact screening capture"
-                );
-                assert!(
-                    session.apply(publication).is_err(),
-                    "{native}: {change} changed after publication capture"
-                );
-                assert!(!root.join("card-review-publication.md").exists());
-                assert_eq!(
-                    std::fs::read_to_string(root.join(candidate)).unwrap(),
-                    candidate_raw
-                );
-                for (path, raw) in paid {
-                    assert_eq!(std::fs::read(path).unwrap(), raw);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn progressive_capture_keeps_all_guards_and_only_admitted_semantic_inputs() {
+    fn selected_evidence_reads_and_guards_only_the_source_and_selected_owners() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let config_path = root.join("config.yaml");
@@ -1632,45 +1223,50 @@ mod tests {
             phrase: true,
             spacing: false,
         }];
+        let has = |prepared: &Prepared, path: &str| {
+            prepared
+                .resources
+                .iter()
+                .any(|resource| resource.address == path)
+        };
         let source = source_task(&root, &config, &task.task_id).unwrap();
         assert_eq!(
             source.context["purpose"]["extraction_scope"]["policy"],
             "source-proposals-v1"
         );
         for path in [&review_paths[0], &evidence_paths[0]] {
-            assert!(
-                source
-                    .resources
-                    .iter()
-                    .any(|resource| &resource.address == path)
-            );
+            assert!(has(&source, path));
         }
         for path in [selected, excluded, &review_paths[1], &review_paths[2]] {
-            assert!(
-                !source
-                    .resources
-                    .iter()
-                    .any(|resource| resource.address == path)
-            );
+            assert!(!has(&source, path));
         }
         let inventory = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
         assert_same_prepared(&source, &inventory.source);
-        assert_eq!(inventory.capture.candidates.len(), 2);
-        assert!(
-            !inventory
+        assert_eq!(
+            inventory
                 .capture
                 .candidates
                 .iter()
-                .any(|candidate| candidate.owner == target)
+                .map(|candidate| candidate.owner.as_str())
+                .collect::<Vec<_>>(),
+            [selected, excluded],
+            "the target is never its own candidate"
         );
-        let selection = lk_queue::ExtractionSelection {
-            policy: lk_queue::ExtractionSelectionPolicy::ProgressiveV1,
-            inventory_revision: inventory.revision.clone(),
-            decisions_revision: "reviewed-decisions".into(),
+        let admit = |owners: &[&str]| {
+            let read = lk_vault::ReadControl::default();
+            let mut reviews =
+                lk_vault::ReviewInventory::load_controlled(&root, &config.vault.dirs, &read)
+                    .into_diagnostic()?;
+            task_with_selected(
+                &root,
+                &config,
+                &source_task(&root, &config, &task.task_id)?,
+                &owners.iter().map(|owner| (*owner).to_owned()).collect(),
+                &mut reviews,
+                &read,
+            )
         };
-        let admitted =
-            task_with_selection(&inventory, &selection, &BTreeSet::from([selected.into()]))
-                .unwrap();
+        let admitted = admit(&[selected]).unwrap();
         #[cfg(unix)]
         {
             let roster = |prepared: &Prepared| {
@@ -1703,103 +1299,66 @@ mod tests {
             });
             assert_eq!(roster(&extra), owners);
         }
-        for path in [target, selected, excluded] {
-            assert!(admitted.pages.contains_key(Path::new(path)));
-        }
-        for path in review_paths.iter().chain(&evidence_paths) {
-            assert!(admitted.pages.contains_key(Path::new(path)));
-        }
         for path in [
+            target,
             selected,
             &review_paths[0],
             &evidence_paths[0],
             &review_paths[1],
             &evidence_paths[1],
         ] {
-            assert!(
-                admitted
-                    .resources
-                    .iter()
-                    .any(|resource| resource.address == path)
-            );
+            assert!(has(&admitted, path) || path == target);
+            assert!(admitted.pages.contains_key(Path::new(path)));
         }
         for path in [excluded, &review_paths[2], &evidence_paths[2]] {
+            assert!(!has(&admitted, path));
             assert!(
-                !admitted
-                    .resources
-                    .iter()
-                    .any(|resource| resource.address == path)
+                !admitted.pages.contains_key(Path::new(path)),
+                "a candidate that was not selected is bound by its judged card, not its page"
             );
         }
-        assert!(
-            admitted
-                .resources
-                .iter()
-                .any(|resource| resource.address == selected
-                    && resource.authority == SemanticAuthority::Context)
-        );
-        assert_eq!(
-            admitted.context["purpose"]["extraction_scope"]["coverage"]["not_full_inputs"],
-            1
-        );
-        let legacy = task_with_discovery(&root, &config, &task.task_id, &queries).unwrap();
-        assert!(
-            legacy
-                .resources
-                .iter()
-                .any(|resource| resource.address == excluded)
-        );
-        assert!(
-            task_with_selection(
-                &inventory,
-                &selection,
-                &BTreeSet::from([evidence_paths[0].clone()])
-            )
-            .is_err()
-        );
+        assert!(admitted.resources.iter().any(|resource| {
+            resource.address == selected && resource.authority == SemanticAuthority::Context
+        }));
+        assert!(has(
+            &task_with_discovery(&root, &config, &task.task_id, &queries).unwrap(),
+            excluded
+        ));
 
+        let revision = admitted.revision("config").unwrap();
         for path in [excluded, &review_paths[2], &evidence_paths[2]] {
             let raw = std::fs::read_to_string(root.join(path)).unwrap();
             write(&root, path, &format!("{raw}\nExternally edited.\n"));
-            let changed = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
-            assert_ne!(inventory.revision, changed.revision);
-            assert!(task_with_selection(&changed, &selection, &BTreeSet::new()).is_err());
+            assert_eq!(
+                admit(&[selected]).unwrap().revision("config").unwrap(),
+                revision
+            );
+        }
+        for path in [selected, &review_paths[1], &evidence_paths[1]] {
+            let raw = std::fs::read_to_string(root.join(path)).unwrap();
+            write(&root, path, &format!("{raw}\nExternally edited.\n"));
+            assert_ne!(
+                admit(&[selected]).unwrap().revision("config").unwrap(),
+                revision
+            );
             write(&root, path, &raw);
         }
-        write(&root, "wiki/documents/new.md", excluded_raw);
-        let added = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
-        assert_ne!(inventory.revision, added.revision);
-        assert!(task_with_selection(&added, &selection, &BTreeSet::new()).is_err());
+        assert_eq!(
+            admit(&[selected]).unwrap().revision("config").unwrap(),
+            revision
+        );
+        let missing = admit(&[selected, "wiki/concepts/retired.md"])
+            .err()
+            .unwrap();
+        assert_eq!(
+            missing
+                .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+                .map(|rejection| rejection.kind),
+            Some(super::super::RejectionKind::EvidenceScopeChanged)
+        );
 
         let selected_raw = std::fs::read_to_string(root.join(selected)).unwrap();
         let selected_revision = source_revision(&lk_vault::parse_page(&selected_raw).unwrap());
-        write(
-            &root,
-            &review_paths[0],
-            &format!(
-                "---\ntype: exploration\nreview:\n  status: open\n  subjects: [{target}]\n  evidence: [{{path: {selected}, revision: {selected_revision}}}]\n---\nA mandatory source assessment.\n"
-            ),
-        );
-        let mandatory = selection_inventory(&root, &config, &task.task_id, &queries).unwrap();
-        assert_same_prepared(
-            &source_task(&root, &config, &task.task_id).unwrap(),
-            &mandatory.source,
-        );
-        let selection = lk_queue::ExtractionSelection {
-            inventory_revision: mandatory.revision.clone(),
-            ..selection
-        };
-        let admitted =
-            task_with_selection(&mandatory, &selection, &BTreeSet::from([selected.into()]))
-                .unwrap();
-        assert!(
-            admitted
-                .resources
-                .iter()
-                .any(|resource| resource.address == selected
-                    && resource.authority == SemanticAuthority::Page)
-        );
-
         write(
             &root,
             &review_paths[0],
@@ -1824,7 +1383,6 @@ mod tests {
             &source_task(&root, &config, &task.task_id).unwrap(),
             &shared.source,
         );
-        assert_eq!(shared.reviews[selected].len(), 2);
         let card = &shared
             .capture
             .candidates
@@ -1834,24 +1392,21 @@ mod tests {
             .card;
         assert_eq!(card.reviews.invalid, 1);
         assert_eq!(card.reviews.needs_reassessment, 1);
-        assert!(shared.reviews[selected].iter().any(|review| {
-            review.path == review_paths[1]
-                && review.state == lk_graph::audit::AuditReviewState::Invalid
-        }));
         let archived = lk_vault::evidence_archive_path(&archive.citations[0].revision).unwrap();
         assert!(shared.source.resources.iter().any(|resource| {
             resource.address == lk_core::vault_path::address(&archived)
                 && resource.authority == SemanticAuthority::Archive
         }));
-        let binding = lk_queue::ExtractionSelection {
-            inventory_revision: shared.revision.clone(),
-            ..selection
-        };
-        let admitted =
-            task_with_selection(&shared, &binding, &BTreeSet::from([selected.into()])).unwrap();
-        assert!(admitted.resources.iter().any(|resource| {
-            resource.address == selected && resource.authority == SemanticAuthority::Page
-        }));
+        assert!(
+            admit(&[selected])
+                .unwrap()
+                .resources
+                .iter()
+                .any(|resource| {
+                    resource.address == selected && resource.authority == SemanticAuthority::Page
+                }),
+            "a selected owner that is also mandatory source evidence keeps its page authority"
+        );
         let empty = selection_inventory(&root, &config, &task.task_id, &[]).unwrap();
         assert!(empty.capture.candidates.is_empty());
         assert_same_prepared(&shared.source, &empty.source);
@@ -1872,7 +1427,7 @@ mod tests {
             context: json!({"purpose":{"review_dependencies":[review]}}),
             resources: Vec::new(),
             pages: BTreeMap::new(),
-            absent_pages: BTreeSet::new(),
+            roster_seal: None,
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
                 path: review.into(),
                 file_revision: None,

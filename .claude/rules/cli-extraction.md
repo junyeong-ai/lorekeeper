@@ -14,38 +14,56 @@ paths:
 
 - Each discovery query contributes its identity matches and at most
   `execution.work.max_query_candidates` other pages in search order; the task's target
-  is never its own candidate. That ranked roster is the screened and guarded inventory.
-  Ranks never enter cards, revisions or keys. `work cost` discloses per query how many
+  is never its own candidate. That ranked roster is the inventory progressive extraction
+  screens. Ranks never enter cards, revisions or keys. `work cost` discloses per query how many
   pages matched and how many are rostered; unrostered matches are unexamined, not judged.
   `full-context` extraction keeps the complete match set.
-- Progressive extraction separates complete source observations, bounded candidate-card
-  screening and admitted full-body evidence. All candidate and scoped-review guards
-  remain pinned; unknown or deferred decisions block completion, and card-only rejection
-  is not a full-body assessment. Continue unrecorded packets even when earlier cards
-  defer.
-- A fully recorded ledger with deferred cards holds only that target for explicit
-  reassessment; fresh validated state must not become a missing-request failure or
-  repeat paid screening. Corrupt ledgers remain fatal. Reused owners must be selected
-  and read in full. New computed selections may reuse only an entire equal semantic
-  packet under fresh complete inventory/ownership/review guards. Bind ordered cards,
-  source context, queries, limits and resolved screening contract; opaque closure
-  identities are not semantic input. Preserve saved legacy layout/receipts/contracts.
-- Reserve full direct-origin provenance inside the result bound. Validate and guard
-  direct same-owner origins at every current use; known reassessment holds dependent
-  packets without calls, while missing/corrupt/indirect origins refuse. The latest
-  computed-selection head is only a bounded lookup hint. Retention protects all proofs
-  for pending/staged owners and removes completed owners together.
+- Progressive extraction separates complete source observations, candidate-card screening
+  and admitted full-body evidence. A screening decision belongs to one candidate. Its
+  key binds the screening contract (reply schema, instruction and the screening
+  profile's engine, model and effort), the exact source the screener reads and the exact
+  row shown: public path, matched queries by value and the card without locators.
+  Packing, order, byte limits, target and configuration revisions and other candidates
+  never enter a key, so an unchanged card under an unchanged source keeps its decision
+  while the roster around it changes. A packet is only transport for undecided rows in
+  owner order; screeners judge each card independently of the others.
+- `.lorekeeper/queue/screening/<digest(task_id, cache_hash)>/` holds immutable `packets/`
+  (request and decisions), `ledger.json` (key to packet row, including keys that left
+  the roster), immutable `rosters/` and `rejections.json`. Nothing is written before a
+  host call. Recording journals the packet and ledger in one plan guarded by the ledger
+  bytes it read and the pending task identity, never by candidate pages. Stored state
+  decodes only from canonical bytes; corrupt, ambiguous or foreign state remains fatal.
+- Unknown or deferred decisions block completion, and card-only rejection is not a
+  full-body assessment. A decision other than `defer` is final for its key. A fully
+  decided roster with deferred cards holds only that target until `work select
+  --reassess` issues those rows with their `previous` reference; fresh validated state
+  must not become a missing-request failure or repeat paid screening. Continue undecided
+  rows even when earlier cards defer.
+- A result binds one sealed roster: the exact rows of a completely decided roster.
+  `work select` seals it before a manual session reads evidence and result completion
+  seals it with the result; `work context` is ready only for a sealed current roster.
+  Publication verifies every sealed row through the ledger and guards the source, the
+  selected owners, their scoped reviews and the stored roster, ledger and packets. It
+  captures no discovery: a candidate that was not selected stays bound to the card it
+  was judged from. Reused owners must be selected and read in full. A result under the
+  retired `progressive-evidence-v1` policy is recognized and refused with a typed
+  request to regenerate. Retention keeps a task's whole screening store while the task
+  is pending or has a staged result and removes it together otherwise.
 - Source work never finishes extraction independently: canonical extraction publication
   journals its exact supporting-consumption receipt with the knowledge edits. Retention
   validates that receipt and preserves live queue/reuse references before removing
   expired source work.
-- `work cost` reports complete candidate/packet counts and compact JSON bytes without
-  persisting plans or reading candidate bodies through a host. Optional positive
-  `max_screening_batches` defers oversized incomplete ledgers before new screening
-  calls; complete ledgers remain usable. No clipping, implicit recipe rewrite,
-  token/price claim or completion from capacity admission. Unknown packet costs await
-  source observations. An indivisible packet's typed byte-capacity failure defers only
-  its target; malformed inputs and corrupt saved manifests remain integrity failures.
-- Capture capacity and typed source-observation blockers with their complete inventory
-  and source guards for staged proposal rejection too; known incomplete scope defers
-  only its work.
+- `work cost` reports the roster's candidates, the packets its undecided candidates
+  still need and compact JSON bytes without persisting anything or reading candidate
+  bodies through a host. Optional positive `max_screening_batches` bounds those remaining
+  packets and defers a larger demand before new screening calls; a completely decided
+  roster remains usable. No clipping, implicit recipe rewrite, token/price claim or
+  completion from capacity admission. Unknown packet costs await source observations.
+  One candidate that cannot fit a packet alone is a typed byte-capacity failure that
+  defers only its target; malformed inputs and corrupt stored state remain integrity
+  failures.
+- A staged proposal's rejection scope is what deterministic application reads. For a
+  result bound to a sealed roster that is the source, the selected owners and the stored
+  roster and ledger; a typed refusal keeps the source and that stored state, so the
+  proposal stays held until one of them changes. Results without `selection` keep the
+  recorded-recipe scope.

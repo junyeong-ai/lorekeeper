@@ -7,10 +7,8 @@ use lk_core::discovery::DiscoveryQuery;
 use miette::IntoDiagnostic;
 use serde_json::json;
 
-use super::{
-    ScreeningPreparation, admitted_task, discovery, is_progressive, resources,
-    screening_with_inventory,
-};
+use super::{Prepared, discovery, resources, sealed_task_controlled, selection};
+use crate::commands::queue::application::PublicationRejection;
 
 pub(in crate::commands) struct PublicationScope {
     pub revision: String,
@@ -25,6 +23,7 @@ pub(in crate::commands) fn publication_scope(
     config_revision: &str,
     task_id: &str,
     queries: &[DiscoveryQuery],
+    selection: Option<&lk_queue::ExtractionSelection>,
 ) -> miette::Result<PublicationScope> {
     publication_scope_controlled(
         root,
@@ -32,18 +31,77 @@ pub(in crate::commands) fn publication_scope(
         config_revision,
         task_id,
         queries,
+        selection,
         &lk_vault::ReadControl::default(),
     )
 }
 
-/// Current inputs for retry admission, including an unplanned replacement selection.
-/// This observation never authorizes publication or replaces deterministic application.
+struct Evidence {
+    prepared: Prepared,
+    owners: BTreeSet<PathBuf>,
+    pages: BTreeMap<PathBuf, String>,
+    phase: serde_json::Value,
+}
+
+/// What deterministic application reads for a result bound to a sealed roster: the source,
+/// the selected owners and the stored screening state. A typed refusal keeps the source
+/// and that stored state, so the proposal stays held until one of them changes.
+fn sealed_evidence(
+    root: &Path,
+    config: &Config,
+    config_revision: &str,
+    task: &lk_queue::QueueTask,
+    queries: &[DiscoveryQuery],
+    binding: &lk_queue::ExtractionSelection,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Evidence> {
+    let source = resources::task_for_publication_controlled(root, config, &task.task_id, read)?;
+    let stored = selection::sealed_inputs(root, &task.task_id, &task.cache_hash, binding)?;
+    let sealed = sealed_task_controlled(
+        root,
+        config,
+        config_revision,
+        &source,
+        queries,
+        binding,
+        None,
+        read,
+    );
+    let (prepared, observation_guards, refusal) = match sealed {
+        Ok(sealed) => (sealed.prepared, sealed.observation_guards, None),
+        Err(error) => match error.downcast_ref::<PublicationRejection>() {
+            Some(rejection) => (source, BTreeMap::new(), Some(rejection.kind)),
+            None => return Err(error),
+        },
+    };
+    let owners = prepared.pages.keys().cloned().collect();
+    let mut pages = prepared.pages.clone();
+    merge_pages(&mut pages, observation_guards)?;
+    let mut state = Vec::with_capacity(stored.len());
+    for (path, raw) in stored {
+        state.push((path.clone(), raw.as_deref().map(file_revision)));
+        if let Some(raw) = raw {
+            merge_pages(&mut pages, BTreeMap::from([(path, raw)]))?;
+        }
+    }
+    Ok(Evidence {
+        prepared,
+        owners,
+        pages,
+        phase: json!({"selection":binding, "stored":state, "refusal":refusal}),
+    })
+}
+
+/// Current inputs for retry admission: everything deterministic application would read
+/// for a proposal carrying these recipes and this selection. This observation never
+/// authorizes publication or replaces deterministic application.
 pub(in crate::commands) fn publication_scope_controlled(
     root: &Path,
     config: &Config,
     config_revision: &str,
     task_id: &str,
     queries: &[DiscoveryQuery],
+    selection: Option<&lk_queue::ExtractionSelection>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<PublicationScope> {
     read.check().into_diagnostic()?;
@@ -55,145 +113,54 @@ pub(in crate::commands) fn publication_scope_controlled(
         read,
     )?;
     let supplied = discovery::validate_queries(queries)?;
-    let recorded = if task.kind == lk_queue::TaskKind::ExtractConcepts {
+    let extraction = task.kind == lk_queue::TaskKind::ExtractConcepts;
+    let recorded = if extraction {
         discovery::current(&root, &task)?
     } else {
         None
     };
-    let (prepared, owners, pages, phase) = if task.kind == lk_queue::TaskKind::ExtractConcepts
-        && is_progressive(config)?
-    {
-        let inventory = resources::selection_inventory_controlled(
+    let Evidence {
+        prepared,
+        owners,
+        pages,
+        phase,
+    } = match selection.filter(|_| extraction) {
+        Some(binding) => sealed_evidence(
             &root,
             config,
-            task_id,
-            recorded.as_deref().unwrap_or(&supplied),
+            config_revision,
+            &task,
+            &supplied,
+            binding,
             read,
-        )?;
-        let inventory_revision = inventory.revision.clone();
-        let mut owners = inventory.pages.keys().cloned().collect::<BTreeSet<_>>();
-        let mut pages = inventory.pages.clone();
-        let supplied_revision = if recorded
-            .as_ref()
-            .is_some_and(|queries| *queries != supplied)
-        {
-            let supplied_inventory =
-                resources::selection_inventory_controlled(&root, config, task_id, &supplied, read)?;
-            owners.extend(supplied_inventory.pages.keys().cloned());
-            merge_pages(&mut pages, supplied_inventory.pages)?;
-            Some(supplied_inventory.revision)
-        } else {
-            None
-        };
-        match screening_with_inventory(&root, config, config_revision, inventory)? {
-            ScreeningPreparation::SourceBlocked { inventory, work_id } => {
-                merge_pages(&mut pages, inventory.pages.clone())?;
-                let phase = json!({
-                    "inventory_revision":inventory_revision,
-                    "supplied_inventory_revision":supplied_revision,
-                    "source_work":work_id,
-                    "source_blocked":true,
-                });
-                (inventory.source, owners, pages, phase)
-            }
-            ScreeningPreparation::Capacity {
-                inventory,
-                capacity,
-            } => {
-                merge_pages(&mut pages, inventory.pages.clone())?;
-                let capacity = match capacity {
-                    super::selection::ScreeningCapacity::Input {
-                        required_bytes,
-                        max_bytes,
-                    } => {
-                        json!({"kind":"input","required_bytes":required_bytes,"max_bytes":max_bytes})
-                    }
-                    super::selection::ScreeningCapacity::Result {
-                        required_bytes,
-                        max_bytes,
-                    } => {
-                        json!({"kind":"result","required_bytes":required_bytes,"max_bytes":max_bytes})
-                    }
-                    super::selection::ScreeningCapacity::SourceInput {
-                        required_bytes,
-                        max_bytes,
-                    } => {
-                        json!({"kind":"source-input","required_bytes":required_bytes,"max_bytes":max_bytes})
-                    }
-                };
-                let phase = json!({
-                    "inventory_revision":inventory_revision,
-                    "supplied_inventory_revision":supplied_revision,
-                    "capacity":capacity,
-                });
-                (inventory.source, owners, pages, phase)
-            }
-            ScreeningPreparation::Source { work, prepared } => {
-                let planned = work.is_planned(&root)?;
-                let progress = if planned {
-                    let (progress, guards) = work.capture_progress(&root, &prepared.resources)?;
-                    merge_pages(&mut pages, guards)?;
-                    Some(progress)
-                } else {
-                    None
-                };
-                let phase = json!({
-                    "inventory_revision":inventory_revision,
-                    "supplied_inventory_revision":supplied_revision,
-                    "source_work":work.plan.id,
-                    "planned":planned,
-                    "progress":progress,
-                });
-                (*prepared, owners, pages, phase)
-            }
-            ScreeningPreparation::Candidates(screening) => {
-                merge_pages(&mut pages, screening.inventory.pages.clone())?;
-                let state = screening.selection.publication_state(&root)?;
-                let ledger = state.as_ref().map(|(ledger, _)| ledger);
-                let prepared = match ledger.filter(|ledger| ledger.progress.complete) {
-                    Some(ledger) => {
-                        admitted_task(&screening, &ledger.binding()?, &ledger.selected_owners)?
-                    }
-                    None => screening.inventory.source.clone(),
-                };
-                let phase = json!({
-                    "inventory_revision":inventory_revision,
-                    "supplied_inventory_revision":supplied_revision,
-                    "selection_id":screening.selection.id,
-                    "ledger":ledger,
-                });
-                if let Some((_, guards)) = state {
-                    merge_pages(&mut pages, guards)?;
+        )?,
+        None => {
+            let prepared = if extraction {
+                resources::task_with_discovery_controlled(&root, config, task_id, &supplied, read)?
+            } else {
+                resources::task_for_publication_controlled(&root, config, task_id, read)?
+            };
+            let mut owners = prepared.pages.keys().cloned().collect::<BTreeSet<_>>();
+            let mut pages = prepared.pages.clone();
+            let recorded_revision = match &recorded {
+                Some(queries) if *queries != supplied => {
+                    let current = resources::task_with_discovery_controlled(
+                        &root, config, task_id, queries, read,
+                    )?;
+                    owners.extend(current.pages.keys().cloned());
+                    let revision = current.revision(config_revision)?;
+                    merge_pages(&mut pages, current.pages)?;
+                    Some(revision)
                 }
-                (prepared, owners, pages, phase)
+                _ => None,
+            };
+            Evidence {
+                prepared,
+                owners,
+                pages,
+                phase: json!({"recorded_context_revision":recorded_revision}),
             }
         }
-    } else {
-        let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts {
-            resources::task_with_discovery_controlled(&root, config, task_id, &supplied, read)?
-        } else {
-            resources::task_for_publication_controlled(&root, config, task_id, read)?
-        };
-        let mut owners = prepared.pages.keys().cloned().collect::<BTreeSet<_>>();
-        let mut pages = prepared.pages.clone();
-        let recorded_revision = match &recorded {
-            Some(queries) if *queries != supplied => {
-                let current = resources::task_with_discovery_controlled(
-                    &root, config, task_id, queries, read,
-                )?;
-                owners.extend(current.pages.keys().cloned());
-                let revision = current.revision(config_revision)?;
-                merge_pages(&mut pages, current.pages)?;
-                Some(revision)
-            }
-            _ => None,
-        };
-        (
-            prepared,
-            owners,
-            pages,
-            json!({"recorded_context_revision":recorded_revision}),
-        )
     };
     read.check().into_diagnostic()?;
     let guards = pages
@@ -241,7 +208,6 @@ fn merge_pages(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::queue::application::PublicationRejection;
 
     struct Fixture {
         _directory: tempfile::TempDir,
@@ -322,14 +288,63 @@ mod tests {
         }
 
         fn scope(&self) -> PublicationScope {
+            self.scope_of(None).unwrap()
+        }
+
+        fn scope_of(
+            &self,
+            selection: Option<&lk_queue::ExtractionSelection>,
+        ) -> miette::Result<PublicationScope> {
             publication_scope(
                 &self.root,
                 &self.config,
                 &self.config_revision,
                 &self.task.task_id,
                 &self.queries,
+                selection,
             )
-            .unwrap()
+        }
+
+        /// Screen every candidate, inspecting only `selected`, and seal that roster.
+        fn seal(&self, selected: &str) -> lk_queue::ExtractionSelection {
+            let screen = || {
+                super::super::screening(
+                    &self.root,
+                    &self.config,
+                    &self.config_revision,
+                    &self.task.task_id,
+                    &self.queries,
+                )
+                .unwrap()
+                .into_candidates()
+                .unwrap()
+            };
+            let request = screen().selection.next_request(false).unwrap().unwrap();
+            let value = serde_json::to_value(&request).unwrap();
+            let output = serde_json::from_value(json!({
+                "task_id":value["task_id"],
+                "request_revision":value["request_revision"],
+                "decisions":value["candidates"].as_array().unwrap().iter().map(|candidate| json!({
+                    "candidate_key":candidate["candidate_key"],
+                    "decision":if candidate["owner"] == selected { "inspect" } else { "not-selected" },
+                    "reason":"Card-scoped assessment.",
+                })).collect::<Vec<_>>(),
+            }))
+            .unwrap();
+            let session = lk_vault::MutationSession::acquire(&self.root).unwrap();
+            session
+                .apply(selection::plan_record(&self.root, &request, output).unwrap())
+                .unwrap();
+            let screening = screen();
+            let mut plan = lk_vault::MutationPlan::default();
+            screening
+                .selection
+                .seal()
+                .unwrap()
+                .plan(&self.root, &mut plan)
+                .unwrap();
+            session.apply(plan).unwrap();
+            screening.selection.binding().unwrap()
         }
 
         fn record_queries(&self, queries: &[DiscoveryQuery]) {
@@ -355,216 +370,36 @@ mod tests {
             atomic::{AtomicBool, Ordering},
         };
 
-        for mode in ["progressive", "full-context"] {
-            let fixture = Fixture::build(mode);
-            let expected = fixture.scope();
+        let fixture = Fixture::build("progressive");
+        let binding = fixture.seal("wiki/documents/candidate.md");
+        for selection in [None, Some(&binding)] {
+            let expected = fixture.scope_of(selection).unwrap();
             let cancelled = Arc::new(AtomicBool::new(false));
             let read = lk_vault::ReadControl::new(cancelled.clone());
-            let current = publication_scope_controlled(
-                &fixture.root,
-                &fixture.config,
-                &fixture.config_revision,
-                &fixture.task.task_id,
-                &fixture.queries,
-                &read,
-            )
-            .unwrap();
-            assert_eq!(current.revision, expected.revision);
-            assert_eq!(current.owners, expected.owners);
-            assert_eq!(current.pages, expected.pages);
-            cancelled.store(true, Ordering::Relaxed);
-            assert!(
+            let scope = || {
                 publication_scope_controlled(
                     &fixture.root,
                     &fixture.config,
                     &fixture.config_revision,
                     &fixture.task.task_id,
                     &fixture.queries,
+                    selection,
                     &read,
                 )
-                .is_err()
-            );
-            assert_eq!(fixture.scope().pages, expected.pages);
+            };
+            let current = scope().unwrap();
+            assert_eq!(current.revision, expected.revision);
+            assert_eq!(current.owners, expected.owners);
+            assert_eq!(current.pages, expected.pages);
+            cancelled.store(true, Ordering::Relaxed);
+            assert!(scope().is_err());
+            assert_eq!(fixture.scope_of(selection).unwrap().pages, expected.pages);
         }
     }
 
     #[test]
-    fn publication_scope_retains_readable_capacity_inputs_and_refuses_unreadable_pages() {
-        let mut fixture = Fixture::build("progressive");
-        let config_path = fixture.root.join("config.yaml");
-        let config = std::fs::read_to_string(&config_path)
-            .unwrap()
-            .replace("max_result_bytes: 4096", "max_result_bytes: 1024");
-        std::fs::write(&config_path, config).unwrap();
-        (fixture.config, fixture.config_revision) =
-            Config::load_with_revision(&config_path).unwrap();
-        fixture.record_queries(&fixture.queries);
-        let before = fixture.scope();
-        let address = format!(
-            "wiki/concepts/{}candidate.md",
-            format!("{}/", "owner".repeat(40)).repeat(4)
-        );
-        let original =
-            "---\ntype: concept\ntitle: Candidate\n---\nA scoped Candidate observation.\n";
-        write(&fixture.root, &address, original);
-        let capacity = fixture.scope();
-        assert_ne!(capacity.revision, before.revision);
-        assert!(capacity.owners.contains(Path::new(&address)));
-        assert_eq!(capacity.pages[Path::new(&address)], original);
-        assert_eq!(capacity.revision, fixture.scope().revision);
-
-        let changed = format!("{original}\nChanged scoped evidence.\n");
-        write(&fixture.root, &address, &changed);
-        assert_ne!(capacity.revision, fixture.scope().revision);
-        std::fs::write(fixture.root.join(&address), [0xff]).unwrap();
-        let error = publication_scope(
-            &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .err()
-        .expect("unreadable current evidence must remain fatal");
-        assert!(error.downcast_ref::<PublicationRejection>().is_none());
-        assert!(
-            error
-                .downcast_ref::<super::super::selection::ScreeningCapacity>()
-                .is_none()
-        );
-        std::fs::remove_file(fixture.root.join(&address)).unwrap();
-        assert_eq!(before.revision, fixture.scope().revision);
-    }
-
-    #[test]
-    fn source_observation_scope_preserves_guards_when_capacity_or_blockers_prevent_screening() {
-        let mut fixture = Fixture::build_with_text(
-            "progressive",
-            &"Candidate attributed source observation.\n\n".repeat(2000),
-        );
-        fixture
-            .queries
-            .extend((b'A'..=b'C').map(|character| DiscoveryQuery {
-                query: char::from(character).to_string().repeat(4096),
-                phrase: true,
-                spacing: false,
-            }));
-        fixture.record_queries(&fixture.queries);
-        let ScreeningPreparation::Source { work, prepared } = super::super::screening(
-            &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .unwrap() else {
-            panic!("large retained source requires bounded observations");
-        };
-        {
-            let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-            super::super::persist_prepared(
-                &session,
-                &fixture.config,
-                &fixture.config_revision,
-                &prepared,
-            )
-            .unwrap();
-            loop {
-                let (progress, request) = work
-                    .prepare_inspection(&fixture.root, &prepared.resources)
-                    .unwrap();
-                if progress.complete {
-                    break;
-                }
-                let request = request.unwrap();
-                work.record(
-                    &session,
-                    super::super::WorkOutput {
-                        work_id: work.plan.id.clone(),
-                        node_id: request["node_id"].as_str().unwrap().into(),
-                        input_revision: request["input_revision"].as_str().unwrap().into(),
-                        summary: "S".repeat(2500),
-                        findings: vec![],
-                        source_questions: vec![],
-                        unresolved: vec![],
-                        resolutions: vec![],
-                    },
-                    &prepared.resources,
-                )
-                .unwrap();
-            }
-        }
-        let inventory = resources::selection_inventory(
-            &fixture.root,
-            &fixture.config,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .unwrap();
-        assert!(matches!(
-            screening_with_inventory(
-                &fixture.root,
-                &fixture.config,
-                &fixture.config_revision,
-                inventory,
-            )
-            .unwrap(),
-            ScreeningPreparation::Capacity {
-                capacity: super::super::selection::ScreeningCapacity::Input { .. },
-                ..
-            }
-        ));
-        let (result, guards) = work
-            .result_with_guards(&fixture.root, &prepared.resources)
-            .unwrap();
-        assert!(guards.len() > 1);
-        let before = fixture.scope();
-        for (path, raw) in &guards {
-            assert_eq!(before.pages.get(path), Some(raw));
-            assert!(!before.owners.contains(path));
-        }
-        let mut output: super::super::WorkOutput =
-            serde_json::from_value(result["output"].clone()).unwrap();
-        output.summary = "T".repeat(2500);
-        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        work.record(&session, output.clone(), &prepared.resources)
-            .unwrap();
-        drop(session);
-        assert_ne!(before.revision, fixture.scope().revision);
-
-        output.unresolved.push(super::super::state::WorkQuestion {
-            id: "source:missing-required-read".into(),
-            question: "A required supporting read remains unavailable.".into(),
-            evidence: vec![work.plan.parts[0].ranges[0].clone()],
-        });
-        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        work.record(&session, output, &prepared.resources).unwrap();
-        drop(session);
-        assert!(
-            work.progress(&fixture.root, &prepared.resources)
-                .unwrap()
-                .complete
-        );
-        let (blocked_result, guards) = work
-            .result_with_guards(&fixture.root, &prepared.resources)
-            .unwrap();
-        assert_eq!(
-            blocked_result["output"]["unresolved"]
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        let blocked = fixture.scope();
-        for (path, raw) in guards {
-            assert_eq!(blocked.pages.get(&path), Some(&raw));
-            assert!(!blocked.owners.contains(&path));
-        }
-    }
-
-    #[test]
-    fn publication_scope_tracks_unplanned_membership_reviews_and_configuration() {
-        let fixture = Fixture::build("progressive");
+    fn unbound_scope_tracks_membership_reviews_and_configuration() {
+        let fixture = Fixture::build("full-context");
         let initial = fixture.scope();
         assert_eq!(initial.revision, fixture.scope().revision);
         assert!(
@@ -572,13 +407,13 @@ mod tests {
                 .owners
                 .contains(Path::new("wiki/documents/candidate.md"))
         );
-        assert!(!fixture.root.join(".lorekeeper/queue/selection").exists());
         let changed_config = publication_scope(
             &fixture.root,
             &fixture.config,
             "different-config-revision",
             &fixture.task.task_id,
             &fixture.queries,
+            None,
         )
         .unwrap();
         assert_ne!(initial.revision, changed_config.revision);
@@ -614,123 +449,107 @@ mod tests {
             "---\ntype: document\n---\nA separate observation.\n",
         );
         assert_eq!(reviewed.revision, fixture.scope().revision);
-        assert!(!fixture.root.join(".lorekeeper/queue/selection").exists());
         std::fs::write(fixture.root.join("wiki/documents/candidate.md"), [0xff]).unwrap();
-        let error = publication_scope(
-            &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .err()
-        .unwrap();
+        let error = fixture.scope_of(None).err().unwrap();
         assert!(error.downcast_ref::<PublicationRejection>().is_none());
     }
 
     #[test]
-    fn publication_scope_tracks_current_decisions_and_refuses_corrupt_receipts() {
+    fn sealed_scope_tracks_the_source_selected_owners_and_stored_decisions() {
         let fixture = Fixture::build("progressive");
-        fixture.record_queries(&fixture.queries);
-        let unplanned = fixture.scope();
-        let ScreeningPreparation::Candidates(screening) = super::super::screening(
-            &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .unwrap() else {
-            panic!("small fixture requires candidate screening")
-        };
-        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        screening
-            .selection
-            .create(&session, &screening.inventory.pages)
-            .unwrap();
-        let planned = fixture.scope();
-        assert_ne!(unplanned.revision, planned.revision);
-        let (_, request) = screening.selection.prepare(&fixture.root).unwrap();
-        let request = request.unwrap();
-        let output = super::super::selection::ScreeningOutput {
-            selection_id: screening.selection.id.clone(),
-            batch_id: request["batch_id"].as_str().unwrap().into(),
-            input_revision: request["input_revision"].as_str().unwrap().into(),
-            decisions: screening
-                .inventory
-                .capture
-                .candidates
-                .iter()
-                .map(|candidate| super::super::selection::CandidateDecision {
-                    candidate_key: candidate.owner.clone(),
-                    decision: super::super::selection::ScreeningDecision::NotSelected,
-                    reason: "The candidate card is unrelated to this source scope.".into(),
-                })
-                .collect(),
-        };
-        screening
-            .selection
-            .record(&session, &screening.inventory.pages, output, None)
-            .unwrap();
-        let completed = fixture.scope();
-        assert_ne!(planned.revision, completed.revision);
-        assert!(
-            completed
-                .pages
-                .keys()
-                .any(|path| path.starts_with(".lorekeeper/queue/selection"))
+        let (selected, excluded) = ("wiki/documents/candidate.md", "wiki/documents/excluded.md");
+        let excluded_raw =
+            "---\ntype: document\ntitle: Excluded observation\n---\nCandidate excluded context.\n";
+        write(&fixture.root, excluded, excluded_raw);
+        let binding = fixture.seal(selected);
+        let scope = || fixture.scope_of(Some(&binding));
+        let sealed = scope().unwrap();
+        assert_eq!(
+            sealed.owners,
+            BTreeSet::from([
+                PathBuf::from(&fixture.task.target.vault_path),
+                selected.into()
+            ])
         );
-        assert!(
-            completed
-                .owners
-                .iter()
-                .all(|path| !path.starts_with(".lorekeeper"))
-        );
-        let receipt = screening
-            .selection
-            .ledger(&fixture.root)
-            .unwrap()
-            .progress
-            .receipts
-            .remove(0)
-            .path;
-        std::fs::write(fixture.root.join(receipt), "{").unwrap();
-        let error = publication_scope(
+        let stored = sealed
+            .pages
+            .keys()
+            .filter(|path| path.starts_with(".lorekeeper/queue/screening"))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(stored.len(), 2, "the ledger and the sealed roster");
+
+        write(
             &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .err()
-        .unwrap();
-        assert!(error.downcast_ref::<PublicationRejection>().is_none());
+            excluded,
+            &format!("{excluded_raw}\nEdited afterwards.\n"),
+        );
+        write(
+            &fixture.root,
+            "wiki/documents/new.md",
+            "---\ntype: document\n---\nCandidate added afterwards.\n",
+        );
+        assert_eq!(scope().unwrap().revision, sealed.revision);
+
+        let selected_raw = std::fs::read_to_string(fixture.root.join(selected)).unwrap();
+        write(
+            &fixture.root,
+            selected,
+            &format!("{selected_raw}\nEdited afterwards.\n"),
+        );
+        assert_ne!(scope().unwrap().revision, sealed.revision);
+        write(&fixture.root, selected, &selected_raw);
+        assert_eq!(scope().unwrap().revision, sealed.revision);
+
+        let unsealed = lk_queue::ExtractionSelection {
+            inventory_revision: "e".repeat(64),
+            ..binding.clone()
+        };
+        let refused = fixture.scope_of(Some(&unsealed)).unwrap();
+        assert_ne!(refused.revision, sealed.revision);
+        assert_eq!(
+            refused.owners,
+            BTreeSet::from([PathBuf::from(&fixture.task.target.vault_path)])
+        );
+        assert_eq!(
+            refused.revision,
+            fixture.scope_of(Some(&unsealed)).unwrap().revision
+        );
+
+        for path in stored {
+            let raw = std::fs::read_to_string(fixture.root.join(&path)).unwrap();
+            std::fs::write(fixture.root.join(&path), "{").unwrap();
+            let error = scope()
+                .err()
+                .expect("corrupt stored screening state is fatal");
+            assert!(error.downcast_ref::<PublicationRejection>().is_none());
+            std::fs::write(fixture.root.join(&path), raw).unwrap();
+        }
+        assert_eq!(scope().unwrap().revision, sealed.revision);
     }
 
     #[test]
-    fn publication_scope_keeps_supplied_and_recorded_recipe_inputs_distinct() {
-        for mode in ["progressive", "full-context"] {
-            let fixture = Fixture::build(mode);
-            let initial = fixture.scope();
-            fixture.record_queries(&[DiscoveryQuery {
-                query: "Other".into(),
-                phrase: true,
-                spacing: false,
-            }]);
-            let recorded = fixture.scope();
-            assert_ne!(initial.revision, recorded.revision);
-            assert!(
-                recorded
-                    .owners
-                    .contains(Path::new("wiki/documents/candidate.md"))
-            );
-            write(
-                &fixture.root,
-                "wiki/documents/candidate.md",
-                "---\ntype: document\n---\nCandidate context changed.\n",
-            );
-            assert_ne!(recorded.revision, fixture.scope().revision);
-        }
+    fn unbound_scope_keeps_supplied_and_recorded_recipe_inputs_distinct() {
+        let fixture = Fixture::build("full-context");
+        let initial = fixture.scope();
+        fixture.record_queries(&[DiscoveryQuery {
+            query: "Other".into(),
+            phrase: true,
+            spacing: false,
+        }]);
+        let recorded = fixture.scope();
+        assert_ne!(initial.revision, recorded.revision);
+        assert!(
+            recorded
+                .owners
+                .contains(Path::new("wiki/documents/candidate.md"))
+        );
+        write(
+            &fixture.root,
+            "wiki/documents/candidate.md",
+            "---\ntype: document\n---\nCandidate context changed.\n",
+        );
+        assert_ne!(recorded.revision, fixture.scope().revision);
     }
 
     #[test]
@@ -773,6 +592,7 @@ mod tests {
                 &fixture.config_revision,
                 &task.task_id,
                 &[],
+                None,
             )
             .unwrap()
         };
@@ -861,70 +681,6 @@ mod tests {
                 .unwrap()
                 .downcast_ref::<PublicationRejection>()
                 .is_none()
-        );
-    }
-
-    #[test]
-    fn partial_source_observation_changes_scope_without_changing_progress() {
-        let fixture = Fixture::build_with_text(
-            "progressive",
-            &"Candidate attributed source observation.\n\n".repeat(2000),
-        );
-        fixture.record_queries(&fixture.queries);
-        let unplanned = fixture.scope();
-        let ScreeningPreparation::Source { work, prepared } = super::super::screening(
-            &fixture.root,
-            &fixture.config,
-            &fixture.config_revision,
-            &fixture.task.task_id,
-            &fixture.queries,
-        )
-        .unwrap() else {
-            panic!("large source requires observations")
-        };
-        let session = lk_vault::MutationSession::acquire(&fixture.root).unwrap();
-        let work = work.persist(&session).unwrap();
-        assert_ne!(unplanned.revision, fixture.scope().revision);
-        let (_, request) = work
-            .prepare_inspection(&fixture.root, &prepared.resources)
-            .unwrap();
-        let request = request.unwrap();
-        let mut output = super::super::state::WorkOutput {
-            work_id: work.plan.id.clone(),
-            node_id: request["node_id"].as_str().unwrap().into(),
-            input_revision: request["input_revision"].as_str().unwrap().into(),
-            summary: "First attributed source observation.".into(),
-            findings: vec![],
-            source_questions: vec![],
-            unresolved: vec![],
-            resolutions: vec![],
-        };
-        work.record(&session, output.clone(), &prepared.resources)
-            .unwrap();
-        let before = fixture.scope();
-        let progress =
-            serde_json::to_value(work.progress(&fixture.root, &prepared.resources).unwrap())
-                .unwrap();
-        output.summary = "Corrected attributed source observation.".into();
-        work.record(&session, output, &prepared.resources).unwrap();
-        assert_eq!(
-            progress,
-            serde_json::to_value(work.progress(&fixture.root, &prepared.resources).unwrap())
-                .unwrap()
-        );
-        let after = fixture.scope();
-        assert_ne!(before.revision, after.revision);
-        assert!(
-            after
-                .pages
-                .keys()
-                .any(|path| path.starts_with(".lorekeeper/work"))
-        );
-        assert!(
-            after
-                .owners
-                .iter()
-                .all(|path| !path.starts_with(".lorekeeper"))
         );
     }
 }

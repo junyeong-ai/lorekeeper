@@ -220,9 +220,9 @@ Positive `max_consecutive_calls` defaults to 4. An admitted exact queue Work or
 screening phase can use this many fresh attempts before another fair turn. It uses
 the same total call budget; publication, deferral, changed phases and writer-wait
 replanning end that admission. Restart/cancellation keeps the durable next target.
-Optional positive `max_screening_batches` limits the complete candidate-card
-selection's packet count. Omission is unlimited; exceeding it preserves the full
-scope and paid decisions, defers that task before invocation and permits independent
+Optional positive `max_screening_batches` limits the packets a task's undecided
+candidate cards still need. Omission is unlimited; exceeding it keeps every candidate
+and paid decision, defers that task before invocation and permits independent
 work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without writes.
 Positive `max_query_candidates` defaults to 50. Each extraction discovery query
 contributes the pages it names by identity plus that many best other matches in search
@@ -231,11 +231,13 @@ rostered. Unrostered matches are not examined. Audit discovery keeps every match
 The same scope limit covers fresh audit discovery; `lore wiki audit-candidates SUBJECT`
 reports its current packet, progress and admission without writes. Existing legacy
 audit recipes retain full-context reading, and completed screening needs no new calls.
-For new Work and extraction candidate selections, call/parallel/consecutive-call/screening-packet limits,
+For new Work and extraction screening decisions, call/parallel/consecutive-call/screening-packet limits,
 the per-query candidate bound and profile timeouts can change between workflows without
-discarding paid observations.
+discarding paid observations or decisions.
 Every configuration byte is still pinned during execution. Model/effort, input/result
-limits and semantic policies remain identity inputs. Legacy byte-bound work requires
+limits and semantic policies remain identity inputs of Work. A screening decision is
+kept while its card, its source and the screening profile's engine, model and effort
+are unchanged; byte limits only change how cards are packed. Legacy byte-bound work requires
 its exact original configuration; changing operational settings does not migrate it.
 `execution.work.extraction_context` defaults to `progressive`: examine bounded cards
 for the ranked candidate roster, then read selected bodies and their required
@@ -271,7 +273,7 @@ execution:
 | Stage | Native invocation |
 |---|---|
 | `discovery` | Separately selected search-recipe discovery |
-| `screening` | Complete candidate-card packet decisions |
+| `screening` | Candidate-card decisions for one packet |
 | `inspect` | An assigned evidence range, including bounded audit evidence |
 | `reduce` | Combining child observations and their open questions |
 | `section` | Summary, event refinement or theme generation |
@@ -296,9 +298,11 @@ Unknown explicit profile/stage names and conflicting limits refuse; there is no 
 inheritance, automatic model choice, host fallback or transport retry.
 
 Adding profiles, including unused ones, or a nonempty stage map changes the existing
-global semantic policy. Current guards then require fresh derived Work and selections;
+global semantic policy. Current guards then require fresh derived Work;
 old paid artifacts remain untouched, never relabeled as another model's work. This can
-require substantial new analysis. Omitted settings preserve old behavior; empty-map
+require substantial new analysis. Candidate screening decisions follow only the
+screening profile's own engine, model and effort: routing `screening` to another model
+has that model judge every card again, while other profile edits keep recorded decisions. Omitted settings preserve old behavior; empty-map
 normalization preserves semantic-policy identities, but legacy byte-bound Work still
 requires its exact original configuration. Every configuration edit invalidates an
 active workflow, including a semantically empty edit.

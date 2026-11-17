@@ -551,6 +551,7 @@ pub(in crate::commands) fn finish_selected_controlled(
                 config_revision,
                 &task.task_id,
                 result.clone(),
+                prepared.roster_seal.as_ref(),
                 &mut guards,
                 prepared.read_control(),
             ) {
@@ -693,7 +694,7 @@ mod tests {
             target: task.target.vault_path.clone(),
             target_revision: "b".repeat(64),
         };
-        let selection = json!({"policy":"progressive-evidence-v1","inventory_revision":"c".repeat(64),"decisions_revision":"d".repeat(64)});
+        let selection = json!({"policy":"independent-screening-v1","inventory_revision":"c".repeat(64),"decisions_revision":"d".repeat(64)});
         let context = json!({"purpose":{"discovery":{"queries":[{"query":"Protocol","phrase":true,"spacing":false}]},"extraction_scope":{"selection":selection}}});
         let revision = "e".repeat(64);
         let owners = Owners(vec![lk_queue::ConceptOwner {

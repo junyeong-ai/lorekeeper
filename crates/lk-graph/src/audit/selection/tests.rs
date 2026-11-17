@@ -1183,13 +1183,16 @@ fn card_review_guards_reject_review_and_other_evidence_drift() {
             std::fs::remove_file(fixture.root.join("wiki/documents/review-evidence.md")).unwrap();
         }
         let mut inventory = lk_vault::ReviewInventory::load(&fixture.root, &fixture.dirs).unwrap();
-        let dependencies = crate::audit::review_card_dependencies_with_inventory(
+        let mut index = crate::audit::ReviewDependencyIndex::from_inventory(
             &fixture.root,
-            &BTreeSet::from(["wiki/documents/candidate-000.md".into()]),
             &mut inventory,
             &ReadControl::default(),
         )
         .unwrap();
+        index
+            .card_dependencies(&fixture.root, "wiki/documents/candidate-000.md")
+            .unwrap();
+        let dependencies = index.card_dependencies.into_values().collect::<Vec<_>>();
         assert_eq!(dependencies.len(), 1);
         assert_eq!(dependencies[0].state, crate::audit::AuditReviewState::Open);
         fixture

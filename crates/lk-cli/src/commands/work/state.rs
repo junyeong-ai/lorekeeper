@@ -1469,15 +1469,6 @@ impl Work {
         Ok(read_optional(root, &output_path(&self.plan.id, &node.id)?)?.is_some())
     }
 
-    pub(super) fn capture_progress(
-        &self,
-        root: &Path,
-        resources: &[SemanticResource],
-    ) -> miette::Result<(WorkProgress, BTreeMap<PathBuf, String>)> {
-        let evaluated = self.evaluate(root, resources)?;
-        Ok((evaluated.progress()?, evaluated.raw))
-    }
-
     pub fn prepare_inspection(
         &self,
         root: &Path,

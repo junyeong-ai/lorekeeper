@@ -231,11 +231,16 @@ pub struct TaskResult {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExtractionSelectionPolicy {
+    /// Decisions recorded per candidate against a sealed ranked roster.
+    #[serde(rename = "independent-screening-v1")]
+    IndependentV1,
+    /// The retired packet-bound selection. Still recognized so a staged result is
+    /// refused with its reason instead of becoming an unparseable file.
     #[serde(rename = "progressive-evidence-v1")]
     ProgressiveV1,
 }
 
-/// The exact complete candidate inventory and reviewed admission decisions.
+/// The sealed candidate roster a result was drafted against and its admission decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtractionSelection {
@@ -815,6 +820,14 @@ mod tests {
         assert_eq!(
             result.selection.as_ref().unwrap().policy,
             ExtractionSelectionPolicy::ProgressiveV1,
+        );
+        assert_eq!(serde_json::to_value(result).unwrap(), progressive);
+
+        progressive["selection"]["policy"] = serde_json::json!("independent-screening-v1");
+        let result: TaskResult = serde_json::from_value(progressive.clone()).unwrap();
+        assert_eq!(
+            result.selection.as_ref().unwrap().policy,
+            ExtractionSelectionPolicy::IndependentV1,
         );
         assert_eq!(serde_json::to_value(result).unwrap(), progressive);
 

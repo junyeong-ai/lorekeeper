@@ -185,15 +185,15 @@ const EXEMPT: &[(&[&str], &str)] = &[
     ),
     (
         &["work", "select"],
-        "requires a retained extraction and revision-bound runtime screening ledger; native_execution tests complete candidate coverage, deferred resumption and excluded-input guards",
+        "requires a retained extraction with recorded discovery; native_execution tests complete candidate coverage, deferred reassessment, roster sealing and selected-owner guards",
     ),
     (
         &["work", "select-record"],
-        "requires exact runtime packet and receipt revisions; selection tests validate assigned coverage and reassessment, and native_execution verifies guarded publication",
+        "requires the exact current request revision; selection tests validate assigned coverage and reassessment, and native_execution verifies guarded publication",
     ),
     (
         &["work", "select-retry"],
-        "requires an exact current failed candidate packet; native_execution verifies dry-run, explicit clearing, retained decisions and call accounting",
+        "requires a current candidate packet with an operational hold; native_execution verifies dry-run, explicit clearing, retained decisions and call accounting",
     ),
     (
         &["work", "retry-preparation"],

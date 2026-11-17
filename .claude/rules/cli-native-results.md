@@ -80,30 +80,29 @@ paths:
   erases that ambiguity. Malformed remote replies never become semantic values;
   tool-free roles may retain an exact operational failure. Corrupt stored state refuses.
 - Evidence observers return only a typed observation body or processing-action reason.
-  Rust binds native work/node/input and screening selection/batch/input identities from
+  Rust binds native work/node/input and screening task/request identities from
   the supervised invocation; reject model-supplied identity fields without adopting or
   repairing them. Fixed schemas and exact reply allowances reserve stored identity
   bytes.
 - Native screening assigns a short `candidate_ref` to each exact card. Validate
-  complete, unique reference coverage before mapping decisions to canonical paths; reply
-  order is irrelevant. Canonical requests retain full owner/source revisions while the
-  native presentation leaves those opaque guard hashes to Rust. Reserve path expansion
-  in the reply allowance. Reference-coverage or blank/oversized decision-reason
-  rejection journals an exact request/contract-bound receipt, records no decisions and
-  defers only that task; unchanged requests spend no calls. Reasons obey compact UTF-8
-  JSON string bytes, including quotes/escapes, not character count. Read existing
-  screening-rejections-v1/v2 without rewriting them; new receipts use strict v3 with
-  separate semantic dispositions and per-packet operational attempts. Earlier readers
-  refuse v3. Semantic rejections match their request/contract; operational failures
-  match the canonical packet across contract changes. Confirmed numeric nonzero exits
-  and unusable tool-free replies hold the selection at that packet; unknown candidates
-  remain incomplete and independent targets continue. Successful current receipts take
-  precedence. `work select-retry --task-id ID --batch-id BATCH` clears only its current
-  operational attempt, with fresh scope/page guards; `--dry-run` writes nothing. Failures
-  earn no semantic progress; failed-only waves end this run without an operation pause.
-  Corrupt receipts, signal/cleanup errors and failed fresh scope validation stay fatal.
-  Standalone full-path `select-record`,
-  selection identities and existing paid decisions remain unchanged.
+  complete, unique reference coverage before mapping decisions to candidate keys; reply
+  order is irrelevant. The canonical request carries each row's key and owner; the
+  native presentation leaves both to Rust. Reserve key expansion in the reply
+  allowance. Reference-coverage or blank/oversized decision-reason rejection journals a
+  hold naming that exact request revision, records no decisions and defers only that
+  task; the unchanged request spends no calls. Reasons obey compact UTF-8 JSON string
+  bytes, including quotes/escapes, not character count. `rejections.json` keeps the
+  latest semantic hold, matched by request revision, and the latest operational hold,
+  matched by the request's contract-independent input revision so it outlives contract
+  changes. Confirmed numeric nonzero exits and unusable tool-free replies hold the task
+  at that packet; undecided candidates remain incomplete and independent targets
+  continue. A hold no longer applies once the undecided rows change. `work select-retry
+  --task-id ID` clears only the current packet's operational hold, guarded by the ledger
+  it read; `--dry-run` writes nothing. Failures earn no semantic progress; failed-only
+  waves end this run without an operation pause. Corrupt holds, signal/cleanup errors
+  and failed fresh scope validation stay fatal. Standalone `select-record` answers the
+  current request for undecided rows, or for deferred rows under reassessment, by its
+  exact request revision.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
   contract. Progressive membership is explicit, including an empty selection; legacy

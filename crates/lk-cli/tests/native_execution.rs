@@ -9,8 +9,8 @@ mod stage_profiles;
 #[path = "native_execution/host_diagnostics.rs"]
 mod host_diagnostics;
 
-#[path = "native_execution/packet_computation.rs"]
-mod packet_computation;
+#[path = "native_execution/candidate_decisions.rs"]
+mod candidate_decisions;
 
 #[path = "native_execution/inspection_refinement.rs"]
 mod inspection_refinement;
@@ -3450,20 +3450,22 @@ if result_role:
 native=('--output-schema' in sys.argv and '--output-last-message' not in sys.argv) or '--safe-mode' in sys.argv
 if native:
     request=json.loads((root/'native-request.txt').read_text().split('\nNative request:\n',1)[1])
-    assert request['policy'] in ['progressive-evidence-v1','progressive-evidence-v2']
+    assert request['policy']=='independent-screening-v1'
     assert request['examination_scope']=='candidate-card-only'
-    assert request['source_context']['role']=='complete-retained-input'
-    assert request['discovery']==[{'query':'transactional outbox','phrase':True,'spacing':False}]
+    assert request['source']['role']=='complete-retained-input'
+    assert all(candidate['queries']==[{'query':'transactional outbox','phrase':True,'spacing':False}]
+        and 'candidate_key' not in candidate and 'owner' not in candidate
+        for candidate in request['candidates'])
     assert len(request['candidates'])<120
     output={}
     output['decisions']=[{'candidate_ref':candidate['candidate_ref'],
-        'decision':'inspect' if candidate['candidate_key'].endswith('/candidate-000.md') else 'not-selected',
+        'decision':'inspect' if candidate['path'].endswith('/candidate-000.md') else 'not-selected',
         'reason':'This assigned card has a fixture-defined scope; not-selected is not a full-body judgment.'}
         for candidate in request['candidates']]
-    log({'action':'screen','selection_id':request['selection_id'],'batch_id':request['batch_id'],
+    log({'action':'screen','task_id':request['task_id'],'request_revision':request['request_revision'],
          'input_bytes':len(json.dumps(request, ensure_ascii=False, separators=(',', ':')).encode()),
          'output_bytes':len(json.dumps(output, ensure_ascii=False, separators=(',', ':')).encode()),
-         'keys':[candidate['candidate_key'] for candidate in request['candidates']]})
+         'paths':[candidate['path'] for candidate in request['candidates']]})
     if '--safe-mode' in sys.argv:
         print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
     else:
@@ -3520,6 +3522,9 @@ for task_id in ids:
 PROGRESSIVE
 "#;
 
+/// Ranked places beyond a fixture's own candidates, so a page a test adds is rostered.
+const ROSTER_HEADROOM: usize = 8;
+
 fn progressive_extraction_fixture(
     engine: &str,
     behavior: &str,
@@ -3536,7 +3541,7 @@ fn progressive_extraction_fixture(
         )
         .replace(
             "  default_profile: primary\n",
-            &format!("  default_profile: primary\n  work: {{max_input_bytes: {input_bytes}, max_result_bytes: {result_bytes}, max_calls: 64, max_query_candidates: {}}}\n", candidates.max(1)),
+            &format!("  default_profile: primary\n  work: {{max_input_bytes: {input_bytes}, max_result_bytes: {result_bytes}, max_calls: 64, max_query_candidates: {}}}\n", candidates + ROSTER_HEADROOM),
         );
     std::fs::write(&fixture.config, config).unwrap();
     let root = fixture.root().join("vault");
@@ -3595,11 +3600,10 @@ fn execution_json(fixture: &Fixture, arguments: &[&str]) -> serde_json::Value {
 
 fn screening_decisions(request: &serde_json::Value, defer: bool) -> serde_json::Value {
     serde_json::json!({
-        "selection_id":request["selection_id"],
-        "batch_id":request["batch_id"],
-        "input_revision":request["input_revision"],
+        "task_id":request["task_id"],
+        "request_revision":request["request_revision"],
         "decisions":request["candidates"].as_array().unwrap().iter().map(|candidate| {
-            let selected = candidate["candidate_key"] == "wiki/documents/candidate-000.md";
+            let selected = candidate["owner"] == "wiki/documents/candidate-000.md";
             serde_json::json!({"candidate_key":candidate["candidate_key"],
                 "decision":if selected {if defer {"defer"} else {"inspect"}} else {"not-selected"},
                 "reason":"Card-scoped fixture assessment; unexamined bodies are not negative evidence."})
@@ -3673,7 +3677,12 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
             ],
         );
         let selection = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
-        assert_eq!(selection["progress"]["batches"], 1);
+        assert_eq!(selection["status"], "screening");
+        assert_eq!(selection["progress"]["candidates"], 4);
+        assert!(
+            !queue.join("screening").exists(),
+            "issuing a packet writes nothing"
+        );
         let decisions = fixture.root().join("defer-decisions.json");
         std::fs::write(
             &decisions,
@@ -3691,8 +3700,8 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
                 decisions.to_str().unwrap(),
             ],
         );
-        let selection_files = || {
-            walkdir::WalkDir::new(queue.join("selection"))
+        let screening_files = || {
+            walkdir::WalkDir::new(queue.join("screening"))
                 .into_iter()
                 .map(Result::unwrap)
                 .filter(|entry| entry.file_type().is_file())
@@ -3704,7 +3713,8 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
                 })
                 .collect::<std::collections::BTreeMap<_, _>>()
         };
-        let retained = selection_files();
+        let retained = screening_files();
+        assert_eq!(retained.len(), 2, "one packet and the ledger");
         let source = std::fs::read(root.join(&task.target.vault_path)).unwrap();
         let output = fixture
             .command()
@@ -3724,23 +3734,15 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
         let current = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
         assert_eq!(current["status"], "deferred");
         assert_eq!(
-            current["progress"]["selection_id"],
-            selection["progress"]["selection_id"]
+            current["progress"]["screening_id"],
+            selection["progress"]["screening_id"]
         );
         assert_eq!(current["progress"]["deferred"], 1);
         assert_eq!(current["progress"]["unknown"], 0);
         assert_eq!(current["progress"]["complete"], false);
         assert!(current["request"].is_null());
-        let after = selection_files();
-        for (path, bytes) in &retained {
-            assert_eq!(after.get(path), Some(bytes));
-        }
-        assert!(
-            after
-                .keys()
-                .filter(|path| !retained.contains_key(*path))
-                .all(|path| path.file_name().unwrap() == "current.json")
-        );
+        assert!(current["selection"].is_null());
+        assert_eq!(screening_files(), retained);
         assert_eq!(
             std::fs::read(root.join(&task.target.vault_path)).unwrap(),
             source
@@ -3760,14 +3762,28 @@ fn terminal_screening_defer_preserves_receipts_and_allows_independent_publicatio
         assert!(!output.status.success());
         assert_eq!(repeated["halted"], false, "{repeated}");
         assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
-        assert_eq!(selection_files(), after);
-        let receipt = current["progress"]["receipts"][0]["path"].as_str().unwrap();
-        std::fs::write(root.join(receipt), b"{").unwrap();
+        assert_eq!(screening_files(), retained);
+        let reassessment = execution_json(
+            &fixture,
+            &["work", "select", "--task-id", &task.task_id, "--reassess"],
+        );
+        assert_eq!(reassessment["status"], "screening");
+        assert_eq!(reassessment["request"]["reassess"], true);
+        let candidates = reassessment["request"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 1, "only the deferred row returns");
+        assert_eq!(candidates[0]["owner"], "wiki/documents/candidate-000.md");
+        assert!(candidates[0]["previous"].is_object());
+        assert_eq!(screening_files(), retained);
+        let ledger = retained
+            .keys()
+            .find(|path| path.file_name().unwrap() == "ledger.json")
+            .unwrap();
+        std::fs::write(ledger, b"{").unwrap();
         let (output, corrupt) = fixture.run("process");
         assert!(!output.status.success());
         assert_eq!(corrupt["halted"], true, "{corrupt}");
         assert_eq!(corrupt["semantic_calls"], 0, "{corrupt}");
-        assert_eq!(std::fs::read(root.join(receipt)).unwrap(), b"{");
+        assert_eq!(std::fs::read(ledger).unwrap(), b"{");
     }
 }
 
@@ -3825,7 +3841,8 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
         assert_eq!(bytes(), before);
         assert_eq!(cost["status"], "needs-admission", "{cost}");
         assert_eq!(cost["cost"]["candidates"], 32);
-        assert!(cost["cost"]["batches"].as_u64().unwrap() > 1);
+        assert!(cost["cost"]["remaining_packets"].as_u64().unwrap() > 1);
+        assert_eq!(cost["cost"]["unknown_candidates"], 32);
         let queries = cost["cost"]["queries"].as_array().unwrap();
         let broad = queries
             .iter()
@@ -3842,7 +3859,7 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
         let complete = std::fs::read_to_string(&fixture.config).unwrap();
         std::fs::write(
             &fixture.config,
-            complete.replace("max_query_candidates: 32", "max_query_candidates: 20"),
+            complete.replace("max_query_candidates: 40", "max_query_candidates: 20"),
         )
         .unwrap();
         let ranked = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
@@ -3883,11 +3900,7 @@ fn screening_cost_is_read_only_and_capacity_defers_without_clipping_independent_
             );
         }
         let repeated = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
-        assert_eq!(repeated["cost"]["candidates"], 32);
-        assert_eq!(
-            repeated["cost"]["inventory_revision"],
-            cost["cost"]["inventory_revision"]
-        );
+        assert_eq!(repeated["cost"], cost["cost"]);
         let (output, report) = fixture.run("process");
         assert!(!output.status.success());
         assert_eq!(
@@ -3983,7 +3996,8 @@ fn indivisible_screening_envelope_defers_only_its_task_before_invocation() {
 }
 
 #[test]
-fn partial_screening_retains_exact_paid_packets_across_operational_configuration_changes() {
+fn partial_screening_keeps_paid_decisions_across_operational_changes_and_rekeys_on_contract_change()
+{
     let (fixture, task) = progressive_extraction_fixture("codex", "exit 97", 32, 16384, 4096);
     let target = fixture.root().join("vault/wiki/documents/source.md");
     let discovery = fixture.root().join("discovery.json");
@@ -4003,6 +4017,8 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
         ],
     );
     let first = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    let packed = first["request"]["candidates"].as_array().unwrap().len();
+    assert!(packed < 32, "the fixture needs several packets");
     let response = fixture.root().join("response.json");
     std::fs::write(
         &response,
@@ -4020,9 +4036,9 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
             response.to_str().unwrap(),
         ],
     );
-    let selection_root = fixture.root().join("vault/.lorekeeper/queue/selection");
+    let screening_root = fixture.root().join("vault/.lorekeeper/queue/screening");
     let bytes = || {
-        walkdir::WalkDir::new(&selection_root)
+        walkdir::WalkDir::new(&screening_root)
             .into_iter()
             .map(Result::unwrap)
             .filter(|entry| entry.file_type().is_file())
@@ -4046,10 +4062,11 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
     let blocked = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
     assert_eq!(blocked["status"], "needs-admission");
     assert_eq!(
-        blocked["cost"]["selection_id"],
-        first["request"]["selection_id"]
+        blocked["cost"]["screening_id"],
+        first["progress"]["screening_id"]
     );
-    assert_eq!(blocked["cost"]["completed_batches"], 1);
+    assert_eq!(blocked["cost"]["unknown_candidates"], 32 - packed);
+    assert!(blocked["cost"]["remaining_packets"].as_u64().unwrap() > 1);
     assert_eq!(bytes(), recorded);
     std::fs::write(
         &fixture.config,
@@ -4057,12 +4074,16 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
     )
     .unwrap();
     let resumed = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
-    assert_eq!(
-        resumed["request"]["selection_id"],
-        first["request"]["selection_id"]
-    );
-    assert_eq!(resumed["progress"]["completed_batches"], 1);
-    assert_ne!(resumed["request"]["batch_id"], first["request"]["batch_id"]);
+    assert_eq!(resumed["progress"]["unknown"], 32 - packed);
+    let owners = |request: &serde_json::Value| {
+        request["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|candidate| candidate["owner"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert!(owners(&resumed["request"]).is_disjoint(&owners(&first["request"])));
     assert_eq!(bytes(), recorded);
     std::fs::write(
         &fixture.config,
@@ -4073,11 +4094,10 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
     )
     .unwrap();
     let changed_policy = execution_json(&fixture, &["work", "cost", "--task-id", &task.task_id]);
-    assert_ne!(
-        changed_policy["cost"]["selection_id"],
-        first["request"]["selection_id"]
+    assert_eq!(
+        changed_policy["cost"]["unknown_candidates"], 32,
+        "another screening model judges every card itself"
     );
-    assert_eq!(changed_policy["cost"]["completed_batches"], 0);
     assert_eq!(bytes(), recorded);
     assert!(
         !fixture.root().join("arguments").exists(),
@@ -4086,7 +4106,7 @@ fn partial_screening_retains_exact_paid_packets_across_operational_configuration
 }
 
 #[test]
-fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted_bodies() {
+fn progressive_native_screening_decides_the_whole_roster_and_reads_only_admitted_bodies() {
     for engine in ["claude-code", "codex"] {
         let (fixture, _) = progressive_extraction_fixture(
             engine,
@@ -4124,8 +4144,8 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
         );
         for (step, batch) in steps.iter().zip(&batches) {
             assert_eq!(step["role"], "screening");
-            assert_eq!(step["selection_id"], batch["selection_id"]);
-            assert_eq!(step["batch_id"], batch["batch_id"]);
+            assert!(step["screening_id"].is_string());
+            assert_eq!(step["request_revision"], batch["request_revision"]);
             assert!(step["work_id"].is_null());
             assert!(step["node_id"].is_null());
             assert_eq!(step["request_json_bytes"], batch["input_bytes"]);
@@ -4138,14 +4158,15 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
             assert!(step["revalidation_record_duration_ms"].as_u64().is_some());
             assert_eq!(step["outcome"], "recorded");
         }
-        let keys = batches
+        let paths = batches
             .iter()
-            .flat_map(|batch| batch["keys"].as_array().unwrap())
-            .map(|key| key.as_str().unwrap())
+            .flat_map(|batch| batch["paths"].as_array().unwrap())
+            .map(|path| path.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(keys.len(), 120);
+        assert_eq!(paths.len(), 120);
         assert_eq!(
-            keys.iter()
+            paths
+                .iter()
                 .copied()
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
@@ -4153,7 +4174,7 @@ fn progressive_native_screening_keeps_complete_inventory_and_reads_only_admitted
         );
         let finalizer = calls.iter().find(|call| call["action"] == "final").unwrap();
         assert_eq!(finalizer["resources"].as_array().unwrap().len(), 2);
-        assert_eq!(finalizer["selection"]["policy"], "progressive-evidence-v1");
+        assert_eq!(finalizer["selection"]["policy"], "independent-screening-v1");
         let source =
             std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source.md")).unwrap();
         assert!(source.contains("concepts_done:"));
@@ -4182,13 +4203,13 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
     for engine in ["claude-code", "codex"] {
         for deleted in [false, true] {
             let supplied = if deleted {
-                "request['selection_id'][:40]+request['selection_id'][42:]"
+                "request['request_revision'][:40]+request['request_revision'][42:]"
             } else {
-                "request['selection_id']"
+                "request['request_revision']"
             };
             let behavior = RECORD_PROGRESSIVE_EXTRACTION.replace(
                 "    output={}",
-                &format!("    output={{'selection_id':{supplied}}}"),
+                &format!("    output={{'request_revision':{supplied}}}"),
             );
             let (fixture, task) = progressive_extraction_fixture(engine, &behavior, 6, 65536, 4096);
             let target = fixture.root().join("vault/wiki/documents/source.md");
@@ -4208,7 +4229,7 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
                     .is_some_and(|size| size > 0)
             );
             assert!(step["revalidation_record_duration_ms"].is_u64());
-            let selection = step["selection_id"].as_str().unwrap();
+            let revision = step["request_revision"].as_str().unwrap();
             let detail = report["stages"]
                 .as_array()
                 .unwrap()
@@ -4221,10 +4242,10 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
                 .unwrap();
             assert!(detail.contains("unusable response"), "{detail}");
             assert_eq!(step["host_failure"]["phase"], "response");
-            assert!(!detail.contains(selection));
+            assert!(!detail.contains(revision));
             let progress =
                 execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
-            assert_eq!(progress["progress"]["completed_batches"], 0, "{progress}");
+            assert_eq!(progress["progress"]["unknown"], 6, "{progress}");
             assert_eq!(std::fs::read(target).unwrap(), original);
             let checked = fixture.command().args(["queue", "check"]).output().unwrap();
             assert!(
@@ -4244,7 +4265,7 @@ fn native_screening_refuses_model_owned_identity_without_rebinding_or_losing_met
 }
 
 #[test]
-fn progressive_cli_defers_resume_exact_packets_and_publication_rechecks_excluded_inputs() {
+fn progressive_cli_reassesses_deferred_cards_and_publication_guards_only_selected_owners() {
     let (fixture, task) = progressive_extraction_fixture("codex", "exit 0", 6, 16384, 4096);
     let root = fixture.root().join("vault");
     let target = root.join("wiki/documents/source.md");
@@ -4283,12 +4304,12 @@ fn progressive_cli_defers_resume_exact_packets_and_publication_rechecks_excluded
             assert_eq!(status["progress"]["complete"], false);
             break;
         }
-        assert!(recorded.insert(request["batch_id"].as_str().unwrap().to_owned()));
+        assert!(recorded.insert(request["request_revision"].as_str().unwrap().to_owned()));
         if request["candidates"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|candidate| candidate["candidate_key"] == "wiki/documents/candidate-000.md")
+            .any(|candidate| candidate["owner"] == "wiki/documents/candidate-000.md")
         {
             first = Some(request.clone());
         }
@@ -4314,62 +4335,58 @@ fn progressive_cli_defers_resume_exact_packets_and_publication_rechecks_excluded
     assert_eq!(pending["status"], "needs-screening");
     assert!(pending["resources"].is_null());
     let first = first.unwrap();
-    let batch_id = first["batch_id"].as_str().unwrap();
-    let reread = execution_json(
-        &fixture,
-        &[
-            "work",
-            "select",
-            "--task-id",
-            &task.task_id,
-            "--batch-id",
-            batch_id,
-        ],
-    );
-    assert_eq!(reread["request"], first);
-    let revision = reread["receipt"]["revision"].as_str().unwrap();
-    std::fs::write(
-        &path,
-        serde_json::to_vec(&screening_decisions(&first, false)).unwrap(),
-    )
-    .unwrap();
-    let refused = fixture
-        .command()
-        .args([
-            "work",
-            "select-record",
-            "--task-id",
-            &task.task_id,
-            "--file",
-            path.to_str().unwrap(),
-        ])
-        .output()
+    let record = |request: &serde_json::Value| {
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&screening_decisions(request, false)).unwrap(),
+        )
         .unwrap();
+        fixture
+            .command()
+            .args([
+                "work",
+                "select-record",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+    };
     assert!(
-        !refused.status.success(),
-        "conflicting receipts need an exact previous revision"
+        !record(&first).status.success(),
+        "a recorded packet is not rewritten; only its deferred row can be reassessed"
     );
-    execution_json(
+    let reassessment = execution_json(
         &fixture,
-        &[
-            "work",
-            "select-record",
-            "--task-id",
-            &task.task_id,
-            "--file",
-            path.to_str().unwrap(),
-            "--previous-revision",
-            revision,
-        ],
+        &["work", "select", "--task-id", &task.task_id, "--reassess"],
     );
+    let deferred = reassessment["request"]["candidates"].as_array().unwrap();
+    assert_eq!(deferred.len(), 1);
+    assert_eq!(deferred[0]["owner"], "wiki/documents/candidate-000.md");
+    assert!(deferred[0]["previous"].is_object());
+    let reassessed = record(&reassessment["request"]);
+    assert!(
+        reassessed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reassessed.stderr)
+    );
+    let unsealed = execution_json(&fixture, &["work", "context", "--task-id", &task.task_id]);
+    assert_eq!(unsealed["status"], "needs-screening");
+    assert_eq!(unsealed["progress"]["complete"], true);
+    let sealed = execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
+    assert_eq!(sealed["status"], "ready");
+    assert_eq!(sealed["selection"]["policy"], "independent-screening-v1");
     let context = execution_json(&fixture, &["work", "context", "--task-id", &task.task_id]);
     assert_eq!(context["status"], "ready");
     assert_eq!(context["resource_count"], 2);
+    assert_eq!(context["selection"], sealed["selection"]);
     let result = serde_json::json!({
         "task_id":task.task_id,"cache_hash":task.cache_hash,
         "target_revision":context["subject"]["target_revision"],
         "context_revision":context["context_revision"],"selection":context["selection"],
-        "discovery":context["context"]["purpose"]["discovery"]["queries"],
+        "discovery":[{"query":"transactional outbox","phrase":true,"spacing":false}],
         "concept_policy":"supported-new","target":task.target,"date":"2026-10-20","concepts":[],
     });
     let results = root.join(".lorekeeper/queue/results");
@@ -4379,33 +4396,39 @@ fn progressive_cli_defers_resume_exact_packets_and_publication_rechecks_excluded
         serde_json::to_vec(&result).unwrap(),
     )
     .unwrap();
-    let excluded = root.join("wiki/documents/candidate-005.md");
-    let excluded_before = std::fs::read_to_string(&excluded).unwrap();
+    let selected = root.join("wiki/documents/candidate-000.md");
+    let selected_before = std::fs::read_to_string(&selected).unwrap();
     std::fs::write(
-        &excluded,
-        format!("{excluded_before}\nAn excluded full body changed.\n"),
+        &selected,
+        format!("{selected_before}\nThe selected full body changed.\n"),
     )
     .unwrap();
     let refused = fixture.command().args(["queue", "apply"]).output().unwrap();
     assert!(
         !refused.status.success(),
-        "excluded bodies remain complete-inventory guards"
+        "a selected owner's body is evidence the result must have read"
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
-    std::fs::write(&excluded, excluded_before).unwrap();
-    let added = root.join("wiki/documents/new-match.md");
-    std::fs::write(&added, "---\ntype: document\ntitle: New candidate\n---\nA transactional outbox has new scoped evidence.\n").unwrap();
-    let refused = fixture.command().args(["queue", "apply"]).output().unwrap();
-    assert!(
-        !refused.status.success(),
-        "new complete-inventory matches invalidate the old result"
+    std::fs::write(&selected, selected_before).unwrap();
+    let excluded = root.join("wiki/documents/candidate-005.md");
+    let excluded_before = std::fs::read_to_string(&excluded).unwrap();
+    std::fs::write(
+        &excluded,
+        excluded_before.replace("title: Candidate 005", "title: Candidate 005 revised")
+            + "\nAn excluded full body changed.\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("wiki/documents/new-match.md"), "---\ntype: document\ntitle: New candidate\n---\nA transactional outbox has new scoped evidence.\n").unwrap();
+    let stale = execution_json(&fixture, &["work", "context", "--task-id", &task.task_id]);
+    assert_eq!(
+        stale["status"], "needs-screening",
+        "a fresh draft would have to judge the changed and added cards"
     );
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
-    std::fs::remove_file(added).unwrap();
+    assert_eq!(stale["progress"]["unknown"], 2);
     let applied = fixture.command().args(["queue", "apply"]).output().unwrap();
     assert!(
         applied.status.success(),
-        "{}",
+        "candidates that were not selected stay bound to their judged cards: {}",
         String::from_utf8_lossy(&applied.stderr)
     );
     assert!(
@@ -4435,7 +4458,7 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
     )
     .replace(
         "    context=request['context']['purpose']",
-        "    context=request['context']['purpose']\n    assert context['extraction_scope']['policy']=='progressive-evidence-v1'\n    assert context['source_observations']['work_id']==(root/'source-work-id').read_text()",
+        "    context=request['context']['purpose']\n    assert context['extraction_scope']['policy']=='independent-screening-v1'\n    assert context['source_observations']['work_id']==(root/'source-work-id').read_text()",
     )
     .replace(
         "    result.update(context_revision=cli('work','status',work_id)['context_revision'],",
@@ -4566,12 +4589,14 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
             break;
         }
         let packet = &screening["request"];
-        assert!(recorded.insert(packet["batch_id"].as_str().unwrap().to_owned()));
+        assert!(recorded.insert(packet["request_revision"].as_str().unwrap().to_owned()));
         assert_eq!(
-            packet["source_context"]["role"],
+            packet["source"]["role"],
             "complete-bounded-source-observations"
         );
-        assert_eq!(packet["source_context"]["observation"], observations);
+        for part in ["output", "evidence"] {
+            assert_eq!(packet["source"]["observation"][part], observations[part]);
+        }
         std::fs::write(
             &file,
             serde_json::to_vec(&screening_decisions(packet, false)).unwrap(),
@@ -6246,7 +6271,7 @@ fn native_queue_keeps_global_unreadable_refusal_outside_prepared_window() {
 }
 
 #[test]
-fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() {
+fn native_queue_shares_discovery_across_distinct_task_screenings() {
     for (parallel, calls, prepared) in [(1, 1, 1), (2, 2, 2)] {
         let (fixture, task) = progressive_extraction_fixture(
             "codex",
@@ -6316,13 +6341,13 @@ fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() 
             let selected =
                 execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
             expected.insert(
-                selected["request"]["selection_id"]
+                selected["progress"]["screening_id"]
                     .as_str()
                     .unwrap()
                     .to_owned(),
             );
         }
-        assert_eq!(expected.len(), 2, "task purposes remain distinct");
+        assert_eq!(expected.len(), 2, "each task owns its screening store");
         let (output, report) = fixture.run("process");
         assert!(
             !output.status.success(),
@@ -6332,8 +6357,8 @@ fn native_queue_shares_discovery_without_changing_existing_task_selection_ids() 
         assert_eq!(report["queue_planning"]["discovery_captures"], 1);
         assert_eq!(report["queue_planning"]["prepared_targets"], prepared);
         assert!(
-            expected.contains(report["work_steps"][0]["selection_id"].as_str().unwrap()),
-            "existing selection IDs remain valid: {report}"
+            expected.contains(report["work_steps"][0]["screening_id"].as_str().unwrap()),
+            "{report}"
         );
     }
 }
@@ -7019,7 +7044,7 @@ import json, os, sys, time
 from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 request=json.loads(Path(os.environ['TEST_SCREENING_REQUEST']).read_text().split('\nNative request:\n',1)[1])
-identity=request['selection_id']
+identity=request['request_revision']
 mode=(root/'screening-mode').read_text()
 expected=int((root/'screening-expected').read_text())
 marker=root/('screening-start-'+identity+'.json')
@@ -7146,15 +7171,18 @@ fn screening_settlement(fixture: &Fixture) -> serde_json::Value {
     report
 }
 
-fn screening_receipts(fixture: &Fixture) -> usize {
-    let directory = fixture.root().join("vault/.lorekeeper/queue/selection");
+/// Recorded screening packets across every task; nothing is stored before a reply records.
+fn screening_packets(fixture: &Fixture) -> usize {
+    let directory = fixture.root().join("vault/.lorekeeper/queue/screening");
+    if !directory.exists() {
+        return 0;
+    }
     std::fs::read_dir(directory)
         .unwrap()
-        .flat_map(|task| std::fs::read_dir(task.unwrap().path()).unwrap())
-        .map(|selection| {
-            let directory = selection.unwrap().path().join("batches");
-            if directory.exists() {
-                std::fs::read_dir(directory).unwrap().count()
+        .map(|task| {
+            let packets = task.unwrap().path().join("packets");
+            if packets.exists() {
+                std::fs::read_dir(packets).unwrap().count()
             } else {
                 0
             }
@@ -7255,7 +7283,7 @@ fn native_evidence_wave_shares_fresh_discovery_for_distinct_work_on_both_hosts()
             report["evidence_revalidation_io"]["captures"], 1,
             "{report}"
         );
-        assert_eq!(screening_receipts(&fixture), 2);
+        assert_eq!(screening_packets(&fixture), 2);
         for step in steps {
             let status = execution_json(
                 &fixture,
@@ -7432,6 +7460,26 @@ fn native_read_only_queue_wave_fills_mixed_roles_in_fair_prefix_order() {
             )
             .unwrap();
             std::fs::write(fixture.root().join("mixed-fail"), failed_role.unwrap_or("")).unwrap();
+            if failed_role == Some("corrupt-screening") {
+                let ids = tasks[..2]
+                    .iter()
+                    .map(|task| {
+                        let selected = execution_json(
+                            &fixture,
+                            &["work", "select", "--task-id", &task.task_id],
+                        );
+                        (
+                            task.task_id.clone(),
+                            selected["progress"]["screening_id"].clone(),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+                std::fs::write(
+                    fixture.root().join("screening-ids.json"),
+                    serde_json::to_vec(&ids).unwrap(),
+                )
+                .unwrap();
+            }
             let behavior = r#"
 export TEST_READ_ONLY_INPUT="$TEST_EXECUTION_ROOT/read-only-request-$$"
 /bin/cat > "$TEST_READ_ONLY_INPUT"
@@ -7441,7 +7489,7 @@ from pathlib import Path
 root=Path(os.environ['TEST_EXECUTION_ROOT'])
 request=json.loads(Path(os.environ['TEST_READ_ONLY_INPUT']).read_text().split('\nNative request:\n',1)[1])
 screen='candidates' in request
-identity=request['selection_id'] if screen else request['work_id']
+identity=request['request_revision'] if screen else request['work_id']
 marker=root/('mixed-'+identity+'.json')
 staged=marker.with_suffix('.tmp')
 staged.write_text(json.dumps(request))
@@ -7453,15 +7501,15 @@ while len(list(root.glob('mixed-*.json')))<int((root/'mixed-expected').read_text
 failed=(root/'mixed-fail').read_text()
 if failed==('screening' if screen else 'evidence'):
     peers=[json.loads(path.read_text()) for path in root.glob('mixed-*.json')]
-    identities=sorted(peer['selection_id'] for peer in peers if 'candidates' in peer)
+    identities=sorted(peer['request_revision'] for peer in peers if 'candidates' in peer)
     if not screen or identity==identities[0]: raise SystemExit(51)
 if failed=='corrupt-screening' and screen:
     peers=[json.loads(path.read_text()) for path in root.glob('mixed-*.json')]
-    identities=sorted(peer['selection_id'] for peer in peers if 'candidates' in peer)
+    identities=sorted(peer['request_revision'] for peer in peers if 'candidates' in peer)
     if identity==identities[0]:
-        manifests=list((root/'vault/.lorekeeper/queue/selection').glob('*/'+identity+'/manifest.json'))
-        assert len(manifests)==1
-        manifests[0].write_text('{}\n')
+        store=root/'vault/.lorekeeper/queue/screening'/json.loads((root/'screening-ids.json').read_text())[request['task_id']]
+        store.mkdir(parents=True)
+        (store/'ledger.json').write_text('{}\n')
 if screen:
     output={'decisions':[{'candidate_ref':card['candidate_ref'],'decision':'not-selected','reason':'Card-scoped exclusion.'} for card in request['candidates']]}
 else:
@@ -7618,20 +7666,10 @@ MIXED
                 },
                 "{report}"
             );
-            let captures = report["screening_revalidation_io"]["captures"]
-                .as_u64()
-                .unwrap()
-                + report["evidence_revalidation_io"]["captures"]
-                    .as_u64()
-                    .unwrap();
             assert_eq!(
-                captures,
-                if failed_role == Some("corrupt-screening") {
-                    2
-                } else {
-                    1
-                },
-                "{report}"
+                report["evidence_revalidation_io"]["captures"],
+                u64::from(progressive),
+                "screened evidence Work shares one fresh capture: {report}"
             );
             assert_eq!(
                 screening_settlement(&fixture)["data"]["pending_mutation"],
@@ -7647,17 +7685,16 @@ fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_bot
         let fixture = parallel_screening_fixture(engine, "good", 2);
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 2, "{report}");
-        assert_eq!(screening_receipts(&fixture), 2, "{report}");
+        assert_eq!(screening_packets(&fixture), 2, "{report}");
         assert_eq!(report["queue_planning"]["discovery_captures"], 1);
         assert_eq!(
             report["queue_planning"]["discovery_io"]["knowledge"]["files"],
             14
         );
         assert_eq!(report["screening_preparation_io"]["captures"], 0);
-        assert_eq!(report["screening_revalidation_io"]["captures"], 1);
-        assert_eq!(
-            report["screening_revalidation_io"]["knowledge"]["files"],
-            14
+        assert!(
+            report.get("screening_revalidation_io").is_none(),
+            "decisions bind candidate keys; recording reads no candidate page"
         );
         for step in report["work_steps"].as_array().unwrap() {
             assert_eq!(step["outcome"], "recorded");
@@ -7666,7 +7703,7 @@ fn native_screening_wave_overlaps_distinct_tasks_and_shares_fresh_capture_on_bot
             let peers: Vec<String> = serde_json::from_slice(
                 &std::fs::read(fixture.root().join(format!(
                     "screening-overlap-{}.json",
-                    step["selection_id"].as_str().unwrap()
+                    step["request_revision"].as_str().unwrap()
                 )))
                 .unwrap(),
             )
@@ -7698,7 +7735,7 @@ fn native_screening_ambiguous_remote_fields_are_held_and_preserve_independent_pe
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 2, "{report}");
         assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(screening_receipts(&fixture), 1, "{report}");
+        assert_eq!(screening_packets(&fixture), 1, "{report}");
         assert_eq!(
             report["work_steps"]
                 .as_array()
@@ -7722,7 +7759,7 @@ fn native_screening_wave_preserves_independent_response_when_a_peer_fails() {
             let fixture = parallel_screening_fixture(engine, mode, 2);
             let (_, report) = fixture.run("process");
             assert_eq!(report["semantic_calls"], 2);
-            assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
+            assert_eq!(screening_packets(&fixture), 1, "{mode}: {report}");
             assert_eq!(report["halted"], false, "{report}");
             assert_eq!(
                 report["retained_progress"]["action_receipts"], 0,
@@ -7770,7 +7807,7 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
                 report["retained_progress"]["action_receipts"], 0,
                 "{report}"
             );
-            assert_eq!(screening_receipts(&fixture), 0);
+            assert_eq!(screening_packets(&fixture), 0);
             let steps = report["work_steps"].as_array().unwrap();
             assert_eq!(steps.len(), 2, "{report}");
             for step in steps {
@@ -7791,7 +7828,12 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
             let status = execution_json(&fixture, &["queue", "status", "--json"]);
             let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();
             let selected = execution_json(&fixture, &["work", "select", "--task-id", task]);
-            let batch = selected["request"]["batch_id"].as_str().unwrap();
+            assert!(
+                selected["hold"]
+                    .as_str()
+                    .is_some_and(|hold| hold.contains("select-retry")),
+                "{selected}"
+            );
             let before = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/queue"))
                 .into_iter()
                 .map(Result::unwrap)
@@ -7805,44 +7847,22 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
                 .collect::<Vec<_>>();
             execution_json(
                 &fixture,
-                &[
-                    "work",
-                    "select-retry",
-                    "--task-id",
-                    task,
-                    "--batch-id",
-                    batch,
-                    "--dry-run",
-                ],
+                &["work", "select-retry", "--task-id", task, "--dry-run"],
             );
             for (path, bytes) in &before {
                 assert_eq!(&std::fs::read(path).unwrap(), bytes);
             }
-            execution_json(
-                &fixture,
-                &[
-                    "work",
-                    "select-retry",
-                    "--task-id",
-                    task,
-                    "--batch-id",
-                    batch,
-                ],
-            );
+            execution_json(&fixture, &["work", "select-retry", "--task-id", task]);
+            let released = execution_json(&fixture, &["work", "select", "--task-id", task]);
+            assert!(released["hold"].is_null(), "{released}");
+            assert_eq!(released["request"], selected["request"]);
             let rejected = fixture
                 .command()
-                .args([
-                    "work",
-                    "select-retry",
-                    "--task-id",
-                    task,
-                    "--batch-id",
-                    batch,
-                ])
+                .args(["work", "select-retry", "--task-id", task])
                 .output()
                 .unwrap();
             assert!(!rejected.status.success());
-            assert_eq!(screening_receipts(&fixture), 0);
+            assert_eq!(screening_packets(&fixture), 0);
         }
     }
 }
@@ -7859,7 +7879,7 @@ fn native_screening_reference_rejection_preserves_independent_wave_records() {
             let fixture = parallel_screening_fixture(engine, mode, 2);
             let (_, report) = fixture.run("process");
             assert_eq!(report["semantic_calls"], 2, "{report}");
-            assert_eq!(screening_receipts(&fixture), 1, "{mode}: {report}");
+            assert_eq!(screening_packets(&fixture), 1, "{mode}: {report}");
             let steps = report["work_steps"].as_array().unwrap();
             assert_eq!(
                 steps
@@ -7948,8 +7968,9 @@ fn rejected_native_screening_suppresses_exact_request_and_publishes_independent_
             }
             let progress =
                 execution_json(&fixture, &["work", "select", "--task-id", &task.task_id]);
-            assert_eq!(progress["progress"]["completed_batches"], 0);
-            let markers = walkdir::WalkDir::new(queue.join("selection"))
+            assert_eq!(progress["progress"]["unknown"], 6);
+            assert!(progress["hold"].is_string(), "{progress}");
+            let markers = walkdir::WalkDir::new(queue.join("screening"))
                 .into_iter()
                 .map(Result::unwrap)
                 .filter(|entry| entry.file_name() == "rejections.json")
@@ -7974,21 +7995,43 @@ fn rejected_native_screening_suppresses_exact_request_and_publishes_independent_
 }
 
 #[test]
-fn native_screening_wave_recaptures_membership_contents_and_configuration_after_hosts() {
+fn native_screening_wave_records_judged_cards_despite_page_churn_and_refuses_configuration_drift() {
     for (mode, accepted) in [
-        ("added", 0),
-        ("deleted", 0),
-        ("changed", 0),
-        ("alias", 0),
-        ("review", 0),
-        ("unreadable", 0),
+        ("added", 2),
+        ("deleted", 2),
+        ("changed", 2),
+        ("alias", 2),
+        ("review", 2),
+        ("unreadable", 2),
         ("config", 0),
         ("unrelated", 2),
     ] {
         let fixture = parallel_screening_fixture("codex", mode, 2);
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 2);
-        assert_eq!(screening_receipts(&fixture), accepted, "{mode}: {report}");
+        assert_eq!(screening_packets(&fixture), accepted, "{mode}: {report}");
+        if mode == "added" {
+            let status = execution_json(&fixture, &["queue", "status", "--json"]);
+            for row in status["data"]["tasks"].as_array().unwrap() {
+                let current = execution_json(
+                    &fixture,
+                    &[
+                        "work",
+                        "select",
+                        "--task-id",
+                        row["task_id"].as_str().unwrap(),
+                    ],
+                );
+                assert_eq!(
+                    current["progress"]["candidates"], 14,
+                    "twelve fixtures, the peer source and the added page: {current}"
+                );
+                assert_eq!(
+                    current["progress"]["unknown"], 1,
+                    "only the added card still needs a decision: {current}"
+                );
+            }
+        }
     }
 }
 
@@ -7997,7 +8040,7 @@ fn native_screening_wave_obeys_remaining_call_budget() {
     let fixture = parallel_screening_fixture("codex", "good", 1);
     let (_, report) = fixture.run("process");
     assert_eq!(report["semantic_calls"], 1);
-    assert_eq!(screening_receipts(&fixture), 1, "{report}");
+    assert_eq!(screening_packets(&fixture), 1, "{report}");
 }
 
 #[test]
@@ -8070,7 +8113,7 @@ fn cancelled_screening_wave_retains_plans_and_reaps_all_hosts_without_recording(
             );
         }
     }
-    assert_eq!(screening_receipts(&fixture), 0);
+    assert_eq!(screening_packets(&fixture), 0);
     for step in report["work_steps"].as_array().unwrap() {
         assert_eq!(step["outcome"], "cancelled");
     }
@@ -8116,7 +8159,7 @@ fn screening_writer_wait_discards_prepared_requests_and_recaptures_before_invoca
     drop(lock);
     let report = finish_contention_run(&fixture, child);
     assert_eq!(report["semantic_calls"], 2, "{report}");
-    assert_eq!(screening_receipts(&fixture), 2, "{report}");
+    assert_eq!(screening_packets(&fixture), 2, "{report}");
     assert!(report["queue_planning"]["attempts"].as_u64().unwrap() >= 2);
     assert!(
         report["work_steps"]
@@ -8139,7 +8182,7 @@ fn screening_writer_wait_discards_prepared_requests_and_recaptures_before_invoca
                     .as_array()
                     .unwrap()
                     .iter()
-                    .any(|candidate| candidate["candidate_key"] == "wiki/documents/added.md")
+                    .any(|candidate| candidate["path"] == "wiki/documents/added.md")
             );
         }
     }
