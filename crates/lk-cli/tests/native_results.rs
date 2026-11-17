@@ -23,6 +23,8 @@ def encode(output):
         if mode=='duplicate-status': encoded=encoded.replace('"status": "complete"', '"status": "needs-action", "status": "complete"', 1)
         if mode=='duplicate-body': encoded=encoded.replace('"synthesis":', '"synthesis": "Ambiguous", "synthesis":', 1)
     return encoded
+if mode=='host-exit' and (request.get('kind')=='finalize-section' or request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']):
+    raise SystemExit(7)
 if mode in ['host-failure','host-envelope-error']:
     print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
     raise SystemExit(1 if mode=='host-failure' else 0)
@@ -76,7 +78,7 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             else: assert 'model_reasoning_effort="high"' in sys.argv
         if mode.startswith('discovery') and ('recover' in target or 'frontier' in target):
             context=item.get('context') or completed['context']
-            old=context['purpose']['discovery']['queries']
+            old=context['purpose'].get('discovery',{}).get('queries',[])
             fresh=any(q['query']=='fresh terminology' for q in old)
             if mode!='discovery-once' or not fresh:
                 query='protocol' if mode=='discovery-same' or (mode=='discovery-cycle' and fresh) else 'fresh terminology'
@@ -155,7 +157,7 @@ fn native_generation_failure_reports_only_observed_host_metadata() {
         let (task, _) = fixture.add("diagnostic", lk_queue::TaskKind::SynthesizeConcept, false);
         std::fs::write(fixture.root().join("mode"), mode).unwrap();
         let report = fixture.run();
-        assert_eq!(report["halted"], true, "{report}");
+        assert_eq!(report["halted"], mode == "host-envelope-error", "{report}");
         assert_eq!(report["semantic_calls"], 1, "{report}");
         assert_eq!(report["queue_application"]["applied"], 0);
         assert!(
@@ -447,6 +449,34 @@ impl Fixture {
         (task, plan, observations)
     }
 
+    /// A summary task with planned bounded Work, recorded inspections and the scoped review the
+    /// host's section finalizer expects.
+    fn planned_section(&self) -> lk_queue::QueueTask {
+        let root = self.root().join("vault");
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "summary", lk_queue::TaskKind::Summarize,
+            serde_json::from_value::<lk_queue::SummarizeRequest>(json!({
+                "text":"An explicit protocol proposal; deployment is unknown.", "max_sentences":3, "locale":"en", "source_type":"manual",
+                "target":{"vault_path":"wiki/documents/summary.md","kind":"document-summary","anchor":"## Summary"}
+            })).unwrap());
+        let target = root.join(&task.target.vault_path);
+        std::fs::write(&target, format!("---\ntype: document\ntitle: Source\nllm_inputs:\n  summary: {}\n---\n# Source\n\n## Summary\n\n## Content\nA protocol proposal.\n", task.cache_hash)).unwrap();
+        std::fs::create_dir_all(root.join(".lorekeeper/queue")).unwrap();
+        lk_queue::write_tasks_atomic(
+            &root.join(".lorekeeper/queue/tasks.jsonl"),
+            std::slice::from_ref(&task),
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("wiki/explorations")).unwrap();
+        let evidence = lk_core::concept::source_revision(
+            &lk_vault::parse_page(&std::fs::read_to_string(&target).unwrap()).unwrap(),
+        );
+        let metadata = json!({"status":"open","subjects":[task.target.vault_path],"evidence":[{"path":task.target.vault_path,"revision":evidence}]});
+        std::fs::write(root.join("wiki/explorations/review.md"), format!("---\ntype: exploration\ntitle: Review\nreview: {metadata}\n---\n# Review\nNew scoped issue.\n")).unwrap();
+        let plan = self.json(&["work", "plan", "--task-id", &task.task_id]);
+        assert_eq!(self.record_ready_inspections(&plan), 1);
+        task
+    }
     fn recovery(&self, task: &lk_queue::QueueTask) -> PathBuf {
         self.root()
             .join("vault/.lorekeeper/queue/discovery")
@@ -617,7 +647,10 @@ fn native_owner_rejections_hold_only_their_input_and_require_guarded_retry() {
         let raw = std::fs::read(&path).unwrap();
         let receipt: Value = serde_json::from_slice(&raw).unwrap();
         assert_eq!(receipt["task_id"], task.task_id);
-        assert_eq!(receipt["rejection"]["reason"], "unknown-owner-reference");
+        assert_eq!(
+            receipt["cause"]["rejection"]["reason"],
+            "unknown-owner-reference"
+        );
         let calls = fixture.calls();
         let source = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
         assert!(
@@ -701,6 +734,72 @@ fn native_owner_rejections_hold_only_their_input_and_require_guarded_retry() {
                 }
             }
         }
+        assert!(!path.exists());
+        let recovered = fixture.run();
+        assert!(fixture.done(&task), "{mode}: {recovered}");
+        assert_eq!(fixture.calls(), calls + 1, "{recovered}");
+    }
+}
+
+#[test]
+fn tool_enabled_host_exits_hold_only_their_exact_input_until_guarded_retry() {
+    for mode in ["selected", "root", "frontier", "section"] {
+        let fixture = Fixture::new("codex");
+        let task = match mode {
+            "frontier" => fixture.paid_frontier(lk_queue::TaskKind::ExtractConcepts).0,
+            "section" => fixture.planned_section(),
+            _ => {
+                fixture
+                    .add(
+                        "blocked",
+                        lk_queue::TaskKind::ExtractConcepts,
+                        mode == "root",
+                    )
+                    .0
+            }
+        };
+        std::fs::write(fixture.root().join("mode"), "host-exit").unwrap();
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{mode}: {report}");
+        assert!(!fixture.done(&task));
+        let store = fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections");
+        let path = std::fs::read_dir(store)
+            .unwrap_or_else(|error| panic!("{mode}: {error}; {report}"))
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let raw = std::fs::read(&path).unwrap();
+        let receipt: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(receipt["schema"], "native-generation-rejection-v2");
+        assert_eq!(receipt["task_id"], task.task_id);
+        assert_eq!(receipt["cause"]["failure"]["kind"], "exited", "{receipt}");
+        assert_eq!(receipt["cause"]["failure"]["code"], 7);
+        let calls = fixture.calls();
+        std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+        let held = fixture.run();
+        assert_eq!(held["semantic_calls"], 0, "{mode}: {held}");
+        assert_eq!(held["halted"], false, "{held}");
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        let retried = fixture
+            .command()
+            .args([
+                "work",
+                "retry-generation",
+                "--task-id",
+                &task.task_id,
+                "--input-revision",
+                receipt["input_revision"].as_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            retried.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&retried.stderr)
+        );
         assert!(!path.exists());
         let recovered = fixture.run();
         assert!(fixture.done(&task), "{mode}: {recovered}");

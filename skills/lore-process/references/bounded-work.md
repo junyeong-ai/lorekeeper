@@ -252,8 +252,13 @@ and native contract. Two confirmed timeouts hold that node. Confirmed numeric no
 exits and unusable remote responses hold the exact input across contract changes.
 Independent successful wave results remain saved; a wave with only invocation failures
 ends the current run without pausing the scheduled operation. Operational attempts grant
-no semantic progress or refinement authority and never refund calls. Signal exits,
-unknown failures, failed process cleanup and tool-enabled failures remain fatal.
+no semantic progress or refinement authority and never refund calls. A confirmed timeout
+or numeric nonzero exit of a tool-enabled selected, bounded result or bounded section
+finalizer holds each task of its exact request in the native generation receipt and ends
+the run the same way; inputs the host changed before failing are prepared afresh. After
+diagnosis, clear it with `lore work retry-generation --task-id ID --input-revision
+REVISION`, optionally with `--dry-run`. Signal exits, unknown failures, failed process
+cleanup and unusable tool-enabled replies remain fatal.
 
 After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then use
 `lore work retry WORK NODE` to clear only its current operational hold or exhausted

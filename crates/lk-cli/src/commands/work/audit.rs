@@ -93,6 +93,31 @@ pub(super) fn assemble(
     }
 }
 
+/// The audit-assessment attempt binding for this prepared subject and its context revision.
+pub(super) fn assessment_binding(
+    prepared: &Prepared,
+    context_revision: &str,
+    request: &Value,
+) -> miette::Result<super::preparation::Binding> {
+    let Subject::Audit {
+        path,
+        file_revision,
+        ..
+    } = &prepared.subject
+    else {
+        return Err(miette::miette!(
+            "audit assessment requires an audit subject"
+        ));
+    };
+    super::preparation::Binding::audit_assessment(
+        path,
+        file_revision,
+        context_revision,
+        request,
+        &audit::schema(),
+    )
+}
+
 #[derive(Clone)]
 pub(in crate::commands) struct WholeSubject {
     prepared: Prepared,
@@ -100,6 +125,7 @@ pub(in crate::commands) struct WholeSubject {
     revision: String,
     contract_revision: String,
     action: Option<crate::commands::audit::action::Snapshot>,
+    attempt: Option<String>,
 }
 
 impl WholeSubject {
@@ -115,6 +141,7 @@ impl WholeSubject {
         self.action
             .as_ref()
             .and_then(|action| action.reason(&self.binding()))
+            .or(self.attempt.as_deref())
     }
 
     pub fn same_input(&self, other: &Self) -> bool {
@@ -156,6 +183,24 @@ impl WholeSubject {
             mutation,
         )
     }
+
+    /// Holds this exact subject input after its tool-enabled `request` failed to return; the
+    /// returned binding reports the hold once `mutation` is applied.
+    pub fn plan_failure_hold(
+        &self,
+        root: &std::path::Path,
+        request: &Value,
+        failure: super::state::InvocationFailure,
+        mutation: &mut lk_vault::MutationPlan,
+    ) -> miette::Result<super::preparation::Binding> {
+        self.guard(mutation);
+        let binding = assessment_binding(&self.prepared, &self.revision, request)?;
+        mutation.extend(binding.plan_record(
+            root,
+            super::preparation::Disposition::InvocationFailed { failure },
+        )?);
+        Ok(binding)
+    }
 }
 
 pub(in crate::commands) fn capture_controlled(
@@ -175,8 +220,10 @@ pub(super) fn capture_prepared(
     candidate: &lk_graph::audit::AuditCandidate,
     prepared: Prepared,
 ) -> miette::Result<WholeSubject> {
+    let revision = prepared.revision(config_revision)?;
     Ok(WholeSubject {
-        revision: prepared.revision(config_revision)?,
+        attempt: assessment_binding(&prepared, &revision, &json!({}))?.held(root)?,
+        revision,
         prepared,
         candidate: candidate.clone(),
         contract_revision: contract_revision()?,
@@ -222,18 +269,17 @@ pub(super) fn processing_hold(
     candidate: &lk_graph::audit::AuditCandidate,
     prepared: &Prepared,
 ) -> miette::Result<Option<String>> {
-    let Some(action) = crate::commands::audit::action::read(root, &candidate.path)? else {
-        return Ok(None);
-    };
     let revision = prepared.revision(config_revision)?;
-    let contract = contract_revision()?;
-    Ok(action
-        .reason(&crate::commands::audit::action::Binding {
+    if let Some(action) = crate::commands::audit::action::read(root, &candidate.path)?
+        && let Some(reason) = action.reason(&crate::commands::audit::action::Binding {
             path: &candidate.path,
             context_revision: &revision,
-            contract_revision: &contract,
+            contract_revision: &contract_revision()?,
         })
-        .map(str::to_owned))
+    {
+        return Ok(Some(reason.to_owned()));
+    }
+    assessment_binding(prepared, &revision, &json!({}))?.held(root)
 }
 
 pub(in crate::commands) fn whole_request(

@@ -40,7 +40,9 @@ pub(in crate::commands) use selection::computation::is_computed_request as is_co
 pub(in crate::commands) use selection::computation::receipt_overhead as screening_receipt_overhead;
 use state::{Work, WorkLimits, WorkOutput};
 
-use super::queue::application::{RejectionKind, rejection as publication_rejection};
+use super::queue::application::{
+    RejectionKind, is_semantic_context_changed, rejection as publication_rejection,
+};
 
 #[derive(clap::Subcommand)]
 #[command(defer = true)]
@@ -98,7 +100,7 @@ pub enum WorkCommand {
         /// Exact retained queue task for extraction discovery or a whole section
         #[arg(long, required_unless_present = "path", conflicts_with = "path")]
         task_id: Option<String>,
-        /// Exact vault-relative subject for audit discovery or screening
+        /// Exact vault-relative subject for audit discovery, screening or assessment
         #[arg(long, required_unless_present = "task_id", conflicts_with = "task_id")]
         path: Option<String>,
         /// Exact retained preparation input hash reported by the failed run
@@ -108,12 +110,12 @@ pub enum WorkCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Clear one current native generation rejection without invoking an agent
+    /// Clear one current native generation hold without invoking an agent
     RetryGeneration {
-        /// Exact retained extraction or synthesis task
+        /// Exact retained queue task
         #[arg(long)]
         task_id: String,
-        /// Exact retained input revision reported by the failed proposal
+        /// Exact retained input revision reported by the held proposal or failed invocation
         #[arg(long)]
         input_revision: String,
         /// Validate without publishing or recovering state
@@ -2086,11 +2088,31 @@ fn validate_result_finalization(
     request: &Value,
     kind: state::CompletionKind,
 ) -> miette::Result<Value> {
+    current_result_finalization(root, config, work, prepared, request, kind)?
+        .map(|snapshot| snapshot.result().clone())
+        .ok_or_else(|| {
+            miette::miette!(
+                "native finalization scope or completed observations changed; reread and regenerate"
+            )
+        })
+}
+
+/// The completed Work whose current finalizer request is still `request`, or `None` when its
+/// scope or completed observations changed after the request was prepared.
+#[cfg(unix)]
+fn current_result_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    work: &Work,
+    prepared: &Prepared,
+    request: &Value,
+    kind: state::CompletionKind,
+) -> miette::Result<Option<state::CompletedWork>> {
     let snapshot = work.capture_native_completion(root, &prepared.resources, kind)?;
-    let completed = snapshot.result().clone();
+    let completed = snapshot.result();
     let current = match &prepared.subject {
         Subject::Audit { .. } if kind == state::CompletionKind::Root => {
-            audit::request(work, prepared, &completed)?
+            audit::request(work, prepared, completed)?
         }
         Subject::Audit { .. } => {
             return Err(miette::miette!(
@@ -2106,29 +2128,27 @@ fn validate_result_finalization(
                     work,
                     &generation::Owners::build(config, prepared)?,
                     &work.plan.subject_revision,
-                    &completed,
+                    completed,
                 )?,
                 state::CompletionKind::Frontier => native::frontier_request(
                     config,
                     &task,
                     work,
                     &generation::Owners::build(config, prepared)?,
-                    &completed,
+                    completed,
                 )?,
             }
         }
     };
     if &current != request {
-        return Err(miette::miette!(
-            "native finalization scope or completed observations changed; reread and regenerate"
-        ));
+        return Ok(None);
     }
     if serde_json::to_vec(&current).into_diagnostic()?.len() > work.max_input_bytes {
         return Err(miette::miette!(
             "complete native finalizer exceeds max_input_bytes"
         ));
     }
-    Ok(completed)
+    Ok(Some(snapshot))
 }
 
 #[cfg(unix)]
@@ -3643,7 +3663,13 @@ fn prepare_finalization_from_capture(
             });
         }
         if let Some(reason) =
-            work.load_finalization_action_for(root, &request, &completed["result_revision"])?
+            audit::assessment_binding(prepared, &prepared.revision(config_revision)?, &request)?
+                .held(root)?
+                .or(work.load_finalization_action_for(
+                    root,
+                    &request,
+                    &completed["result_revision"],
+                )?)
         {
             return Ok(FinalizationPreparation::NeedsAction(reason));
         }
@@ -3750,7 +3776,9 @@ fn prepare_finalization_from_capture(
             max_input_bytes,
         });
     }
-    if let Some(reason) = work.load_finalization_action(root, &request)? {
+    if let Some(reason) = generation::rejection::held(root, &task, &work.plan.subject_revision)?
+        .or(work.load_finalization_action(root, &request)?)
+    {
         return Ok(FinalizationPreparation::NeedsAction(reason));
     }
     if completed["output"]["unresolved"]
@@ -3836,8 +3864,7 @@ pub(super) fn finish_result(
                     },
                     request: &result.request,
                 },
-                reply,
-                reason,
+                generation::rejection::Cause::proposal(reply, reason)?,
                 &mut plan,
             )?;
             session.apply(plan).into_diagnostic()?;
@@ -3973,19 +4000,149 @@ fn revalidate_section_finalization(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<(Work, Prepared)> {
     let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
+    current_section_finalization(root, config, config_revision, work, prepared, section)?
+        .ok_or_else(|| {
+            miette::miette!(
+                "section finalization scope changed during generation; retained work requires a fresh request"
+            )
+        })
+}
+
+/// The loaded Work while its current section finalizer is still `section`, or `None` when the
+/// scope or completed observations changed after the request was prepared.
+#[cfg(unix)]
+fn current_section_finalization(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    work: Work,
+    prepared: Prepared,
+    section: &SectionFinalization,
+) -> miette::Result<Option<(Work, Prepared)>> {
     let FinalizationPreparation::Ready(current) =
         prepare_finalization_from_capture(root, config, config_revision, &work, &prepared)?
     else {
+        return Ok(None);
+    };
+    Ok(
+        (current.request == section.request && current.completed == section.completed)
+            .then_some((work, prepared)),
+    )
+}
+
+/// Holds a bounded finalizer whose tool-enabled host failed, for its exact current input, and
+/// returns the target's hold; `None` when the Work's fresh inputs no longer produce the failed
+/// request.
+#[cfg(unix)]
+pub(super) fn hold_result(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    result: &ResultFinalization,
+    failure: state::InvocationFailure,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<String>> {
+    let root = session.root();
+    let (work, prepared) = match load_controlled(root, config, config_revision, id, read) {
+        Ok(loaded) => loaded,
+        Err(error) if is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(completed) =
+        current_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?
+    else {
+        return Ok(None);
+    };
+    let mut plan = lk_vault::MutationPlan::default();
+    completed.plan_read_guards(&mut plan);
+    prepared.guard_pages(&mut plan);
+    match &prepared.subject {
+        Subject::Queue { task_id, .. } => {
+            let task = super::queue::current_task(root, task_id)?;
+            let reason = generation::rejection::plan_record(
+                root,
+                generation::rejection::Binding {
+                    task: &task,
+                    work: &work,
+                    input: generation::rejection::Input::Work {
+                        work_id: work.plan.id.clone(),
+                    },
+                    request: &result.request,
+                },
+                generation::rejection::Cause::Invocation { failure },
+                &mut plan,
+            )?;
+            session.apply(plan).into_diagnostic()?;
+            Ok(Some(format!("{}: {reason}", task.task_id)))
+        }
+        Subject::Audit { path, .. } => {
+            let binding = audit::assessment_binding(
+                &prepared,
+                &prepared.revision(config_revision)?,
+                &result.request,
+            )?;
+            plan.extend(
+                binding
+                    .plan_record(root, preparation::Disposition::InvocationFailed { failure })?,
+            );
+            session.apply(plan).into_diagnostic()?;
+            let reason = binding
+                .held(root)?
+                .ok_or_else(|| miette::miette!("audit assessment hold changed after recording"))?;
+            Ok(Some(format!("{path}: {reason}")))
+        }
+    }
+}
+
+/// Holds a bounded section finalizer whose tool-enabled host failed, for its exact current
+/// input, and returns the task's hold; `None` when the Work's fresh inputs no longer produce the
+/// failed request.
+#[cfg(unix)]
+pub(super) fn hold_section(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    id: &str,
+    section: &SectionFinalization,
+    failure: state::InvocationFailure,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<String>> {
+    let root = session.root();
+    let (work, prepared) = match load_controlled(root, config, config_revision, id, read) {
+        Ok(loaded) => loaded,
+        Err(error) if is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some((work, prepared)) =
+        current_section_finalization(root, config, config_revision, work, prepared, section)?
+    else {
+        return Ok(None);
+    };
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
         return Err(miette::miette!(
-            "section finalization scope changed; retained work requires a fresh request"
+            "section finalization requires a queue subject"
         ));
     };
-    if current.request != section.request || current.completed != section.completed {
-        return Err(miette::miette!(
-            "section finalization scope changed during generation; retained work requires a fresh request"
-        ));
-    }
-    Ok((work, prepared))
+    let task = super::queue::current_task(root, task_id)?;
+    let mut plan = lk_vault::MutationPlan::default();
+    prepared.guard_pages(&mut plan);
+    section.scope.guard_pages(&mut plan);
+    let reason = generation::rejection::plan_record(
+        root,
+        generation::rejection::Binding {
+            task: &task,
+            work: &work,
+            input: generation::rejection::Input::Work {
+                work_id: work.plan.id.clone(),
+            },
+            request: &section.request,
+        },
+        generation::rejection::Cause::Invocation { failure },
+        &mut plan,
+    )?;
+    session.apply(plan).into_diagnostic()?;
+    Ok(Some(format!("{}: {reason}", task.task_id)))
 }
 
 #[cfg(unix)]
@@ -4355,6 +4512,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     }
                     (Stage::AuditScreening, None, Some(path)) => {
                         Key::AuditScreening { path: path.clone() }
+                    }
+                    (Stage::AuditAssessment, None, Some(path)) => {
+                        Key::AuditAssessment { path: path.clone() }
                     }
                     _ => {
                         return Err(miette::miette!(

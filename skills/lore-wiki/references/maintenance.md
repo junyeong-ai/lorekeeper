@@ -296,13 +296,15 @@ no repeated intake, reconstructed guards, result-file writes, `work finish` or `
 ## Native processing state
 
 Read-only discovery/screening invocation failures and explicit needs-action replies
-hold their exact inputs without marking an audit complete. Successful independent
-results remain retained. Contract changes alone never retry these preparation holds.
-After diagnosis, use `lore work retry-preparation --stage audit-discovery --path PATH
---input-revision HASH`, or stage `audit-screening`, with the reported retained hash.
-Preview with `--dry-run`. The command clears only that attempt, invokes no agent and
-preserves paid decisions and semantic assessments. Corrupt stored state, local I/O,
-signal/cleanup and tool-enabled failures remain fatal.
+hold their exact inputs without marking an audit complete. A confirmed timeout or
+numeric nonzero exit of a tool-enabled whole or bounded assessment holds each subject's
+exact context the same way. Successful independent results remain retained. Contract
+changes alone never retry these preparation holds. After diagnosis, use `lore work
+retry-preparation --stage audit-discovery --path PATH --input-revision HASH`, or stage
+`audit-screening` or `audit-assessment`, with the reported retained hash. Preview with
+`--dry-run`. The command clears only that attempt, invokes no agent and preserves paid
+decisions and semantic assessments. Corrupt stored state, local I/O, signal/cleanup and
+unusable tool-enabled replies remain fatal.
 
 An unchanged whole-input `needs-action` is held without another invocation, independent
 of batch peers and response order. Changed input or assessment rules reopen eligibility;

@@ -7,17 +7,19 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::super::state::InvocationFailure;
 use super::super::{Subject, Work};
 use super::owners::ProposalRejection;
 
 const DIRECTORY: &str = ".lorekeeper/queue/generation-rejections";
 const MAX_BYTES: usize = 65_536;
 const MAX_REPLY_BYTES: usize = 16_384;
+const PROPOSAL_SCHEMA: &str = "native-generation-rejection-v1";
 
 #[derive(Serialize, Deserialize)]
 enum Schema {
-    #[serde(rename = "native-generation-rejection-v1")]
-    V1,
+    #[serde(rename = "native-generation-rejection-v2")]
+    V2,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -29,10 +31,120 @@ struct Receipt {
     input_revision: String,
     input: Input,
     request_revision: String,
+    cause: Cause,
+}
+
+/// Why an unchanged task input is held: Rust refused a decoded proposal, or the
+/// tool-enabled host returned no reply.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub(in crate::commands::work) enum Cause {
+    Proposal {
+        rejection: ProposalRejection,
+        reply_revision: String,
+        reply_bytes: usize,
+        reply: Option<Value>,
+    },
+    Invocation {
+        failure: InvocationFailure,
+    },
+}
+
+impl Cause {
+    pub(in crate::commands::work) fn proposal(
+        reply: Value,
+        rejection: ProposalRejection,
+    ) -> miette::Result<Self> {
+        let reply_bytes = serde_json::to_vec(&reply).into_diagnostic()?.len();
+        Ok(Self::Proposal {
+            rejection,
+            reply_revision: super::digest(&reply)?,
+            reply_bytes,
+            reply: (reply_bytes <= MAX_REPLY_BYTES).then_some(reply),
+        })
+    }
+
+    fn validate(&self) -> miette::Result<()> {
+        match self {
+            Self::Proposal {
+                reply_revision,
+                reply_bytes,
+                reply,
+                ..
+            } => {
+                if !is_revision(reply_revision, 64) || *reply_bytes == 0 {
+                    return Err(miette::miette!(
+                        "invalid native generation rejection identity"
+                    ));
+                }
+                if let Some(reply) = reply {
+                    if serde_json::to_vec(reply).into_diagnostic()?.len() != *reply_bytes
+                        || *reply_bytes > MAX_REPLY_BYTES
+                        || super::digest(reply)? != *reply_revision
+                    {
+                        return Err(miette::miette!(
+                            "native generation rejection reply differs from its guard"
+                        ));
+                    }
+                } else if *reply_bytes <= MAX_REPLY_BYTES {
+                    return Err(miette::miette!(
+                        "native generation rejection omitted its bounded reply"
+                    ));
+                }
+                Ok(())
+            }
+            Self::Invocation { failure } => failure.validate(),
+        }
+    }
+}
+
+impl std::fmt::Display for Cause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proposal { rejection, .. } => rejection.fmt(f),
+            Self::Invocation { failure } => failure.fmt(f),
+        }
+    }
+}
+
+/// The proposal-only receipt written before invocation causes existed; read, never written.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProposalReceipt {
+    schema: String,
+    task_id: String,
+    cache_hash: String,
+    input_revision: String,
+    input: Input,
+    request_revision: String,
     rejection: ProposalRejection,
     reply_revision: String,
     reply_bytes: usize,
     reply: Option<Value>,
+}
+
+impl ProposalReceipt {
+    fn into_receipt(self) -> miette::Result<Receipt> {
+        if self.schema != PROPOSAL_SCHEMA {
+            return Err(miette::miette!(
+                "invalid native generation rejection schema"
+            ));
+        }
+        Ok(Receipt {
+            schema: Schema::V2,
+            task_id: self.task_id,
+            cache_hash: self.cache_hash,
+            input_revision: self.input_revision,
+            input: self.input,
+            request_revision: self.request_revision,
+            cause: Cause::Proposal {
+                rejection: self.rejection,
+                reply_revision: self.reply_revision,
+                reply_bytes: self.reply_bytes,
+                reply: self.reply,
+            },
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -49,6 +161,13 @@ fn path(task: &QueueTask) -> PathBuf {
 fn identity_path(task_id: &str, cache_hash: &str) -> PathBuf {
     let identity = serde_json::to_vec(&(task_id, cache_hash)).expect("identity serializes");
     Path::new(DIRECTORY).join(format!("{}.json", blake3::hash(&identity).to_hex()))
+}
+
+fn is_revision(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
@@ -68,40 +187,25 @@ fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
         ));
     }
     let value = crate::commands::json::decode_object(raw.as_bytes()).into_diagnostic()?;
-    let receipt: Receipt = serde_json::from_value(value).into_diagnostic()?;
-    let revision = |value: &str, length| {
-        value.len() == length
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    let receipt: Receipt = if value["schema"] == PROPOSAL_SCHEMA {
+        serde_json::from_value::<ProposalReceipt>(value)
+            .into_diagnostic()?
+            .into_receipt()?
+    } else {
+        serde_json::from_value(value).into_diagnostic()?
     };
     if receipt.task_id.trim().is_empty()
-        || !revision(&receipt.cache_hash, 32)
-        || !revision(&receipt.input_revision, 64)
-        || !revision(&receipt.request_revision, 64)
-        || !revision(&receipt.reply_revision, 64)
+        || !is_revision(&receipt.cache_hash, 32)
+        || !is_revision(&receipt.input_revision, 64)
+        || !is_revision(&receipt.request_revision, 64)
         || identity_path(&receipt.task_id, &receipt.cache_hash) != path
-        || receipt.reply_bytes == 0
-        || matches!(&receipt.input, Input::Work { work_id } if !revision(work_id, 64))
+        || matches!(&receipt.input, Input::Work { work_id } if !is_revision(work_id, 64))
     {
         return Err(miette::miette!(
             "invalid native generation rejection identity"
         ));
     }
-    if let Some(reply) = &receipt.reply {
-        if serde_json::to_vec(reply).into_diagnostic()?.len() != receipt.reply_bytes
-            || receipt.reply_bytes > MAX_REPLY_BYTES
-            || super::digest(reply)? != receipt.reply_revision
-        {
-            return Err(miette::miette!(
-                "native generation rejection reply differs from its guard"
-            ));
-        }
-    } else if receipt.reply_bytes <= MAX_REPLY_BYTES {
-        return Err(miette::miette!(
-            "native generation rejection omitted its bounded reply"
-        ));
-    }
+    receipt.cause.validate()?;
     Ok(Some((raw, receipt)))
 }
 
@@ -111,7 +215,7 @@ pub(in crate::commands::work) fn held(
     input_revision: &str,
 ) -> miette::Result<Option<String>> {
     Ok(read(root, &path(task))?.filter(|(_, receipt)| receipt.input_revision == input_revision).map(|(_, receipt)| {
-        format!("{}; retained native generation input {}; use work retry-generation with this exact task and input revision", receipt.rejection, receipt.input_revision)
+        format!("{}; retained native generation input {}; use work retry-generation with this exact task and input revision", receipt.cause, receipt.input_revision)
     }))
 }
 
@@ -125,8 +229,7 @@ pub(in crate::commands::work) struct Binding<'a> {
 pub(in crate::commands::work) fn plan_record(
     root: &Path,
     binding: Binding<'_>,
-    reply: Value,
-    rejection: ProposalRejection,
+    cause: Cause,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<String> {
     let Binding {
@@ -137,19 +240,16 @@ pub(in crate::commands::work) fn plan_record(
     } = binding;
     let destination = path(task);
     let before = read(root, &destination)?.map(|(raw, _)| raw);
-    let reply_bytes = serde_json::to_vec(&reply).into_diagnostic()?.len();
     let receipt = Receipt {
-        schema: Schema::V1,
+        schema: Schema::V2,
         task_id: task.task_id.clone(),
         cache_hash: task.cache_hash.clone(),
         input_revision: work.plan.subject_revision.clone(),
         input,
         request_revision: super::digest(request)?,
-        reply_revision: super::digest(&reply)?,
-        reply_bytes,
-        reply: (reply_bytes <= MAX_REPLY_BYTES).then_some(reply),
-        rejection,
+        cause,
     };
+    receipt.cause.validate()?;
     let raw = serde_json::to_string(&receipt).into_diagnostic()?;
     if raw.len() > MAX_BYTES {
         return Err(miette::miette!(
@@ -158,7 +258,7 @@ pub(in crate::commands::work) fn plan_record(
     }
     let reason = format!(
         "{}; retained native generation input {}",
-        receipt.rejection, receipt.input_revision
+        receipt.cause, receipt.input_revision
     );
     plan.publish_expected(root, destination, before, raw)
         .into_diagnostic()?;
@@ -244,19 +344,13 @@ mod tests {
             "target":{"vault_path":"wiki/documents/source.md","kind":"document-concepts","anchor":"## Related Concepts"},"input":{}
         })).unwrap();
         let reply = json!({"status":"complete","value":{"concepts":[]},"reason":null});
-        let receipt = serde_json::to_value(Receipt {
-            schema: Schema::V1,
-            task_id: task.task_id.clone(),
-            cache_hash: task.cache_hash.clone(),
-            input: Input::Selected,
-            input_revision: "b".repeat(64),
-            request_revision: "c".repeat(64),
-            reply_revision: super::super::digest(&reply).unwrap(),
-            reply_bytes: serde_json::to_vec(&reply).unwrap().len(),
-            reply: Some(reply),
-            rejection: ProposalRejection::UnknownOwnerReference,
-        })
-        .unwrap();
+        let receipt = json!({
+            "schema":PROPOSAL_SCHEMA, "task_id":task.task_id, "cache_hash":task.cache_hash,
+            "input":{"kind":"selected"}, "input_revision":"b".repeat(64), "request_revision":"c".repeat(64),
+            "reply_revision":super::super::digest(&reply).unwrap(),
+            "reply_bytes":serde_json::to_vec(&reply).unwrap().len(), "reply":reply,
+            "rejection":{"reason":"unknown-owner-reference"},
+        });
         let destination = path(&task);
         std::fs::create_dir_all(directory.path().join(destination.parent().unwrap())).unwrap();
         (directory, task, destination, receipt)
@@ -291,6 +385,47 @@ mod tests {
         assert_eq!(plan_prune(root, &BTreeSet::new(), &mut prune).unwrap(), 1);
         session.apply(prune).unwrap();
         assert!(!root.join(destination).exists());
+    }
+
+    #[test]
+    fn invocation_failures_hold_their_input_only_in_strict_receipts() {
+        let (directory, task, destination, proposal) = fixture();
+        let root = directory.path();
+        let mut receipt = json!({
+            "schema":"native-generation-rejection-v2", "task_id":task.task_id, "cache_hash":task.cache_hash,
+            "input":{"kind":"work","work_id":"d".repeat(64)}, "input_revision":"b".repeat(64),
+            "request_revision":"c".repeat(64),
+            "cause":{"kind":"invocation","failure":{"kind":"exited","engine":"codex","code":7}},
+        });
+        std::fs::write(
+            root.join(&destination),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        let reason = held(root, &task, &"b".repeat(64)).unwrap().unwrap();
+        assert!(reason.contains("exited with status 7"), "{reason}");
+        assert!(held(root, &task, &"e".repeat(64)).unwrap().is_none());
+        for cause in [
+            json!({"kind":"invocation","failure":{"kind":"exited","engine":"codex","code":0}}),
+            json!({"kind":"proposal","rejection":proposal["rejection"]}),
+            json!({"kind":"unknown"}),
+        ] {
+            receipt["cause"] = cause;
+            std::fs::write(
+                root.join(&destination),
+                serde_json::to_vec(&receipt).unwrap(),
+            )
+            .unwrap();
+            assert!(held(root, &task, &"b".repeat(64)).is_err(), "{receipt}");
+        }
+        let mut layout = proposal;
+        layout["schema"] = json!("native-generation-rejection-v2");
+        std::fs::write(
+            root.join(&destination),
+            serde_json::to_vec(&layout).unwrap(),
+        )
+        .unwrap();
+        assert!(held(root, &task, &"b".repeat(64)).is_err());
     }
 
     #[test]

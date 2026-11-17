@@ -308,34 +308,91 @@ fn scheduled_jobs_share_allowance_across_restarts_and_operations() {
 }
 
 #[test]
-fn scheduled_tool_enabled_failure_requires_explicit_resume_without_refunding_calls() {
-    let fixture = Fixture::new("codex", 30, "exit 7");
-    write_audit_concept(&fixture, "stable");
-    configure(&fixture, Some(4), 60);
-    let first = run(&fixture, "knowledge", false);
-    assert_eq!(calls(&first), 1, "{first}");
-    assert_eq!(first["stop_reason"], "failed");
-    assert_eq!(
-        usage(&fixture)["paused"]["knowledge"]["cause"]["stage"],
-        "native result host"
+fn scheduled_tool_enabled_failure_holds_its_request_without_pausing_or_refunding_calls() {
+    for bounded in [false, true] {
+        let (fixture, subject) = if bounded {
+            let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+            std::fs::write(fixture.root().join("audit-response-mode"), "exit").unwrap();
+            (fixture, "wiki/concepts/large.md")
+        } else {
+            let fixture = Fixture::new("codex", 30, "exit 7");
+            write_audit_concept(&fixture, "stable");
+            (fixture, "wiki/concepts/stable.md")
+        };
+        assert_tool_enabled_failure_hold(&fixture, subject);
+    }
+}
+
+fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
+    configure(fixture, Some(64), 60);
+    let first = run(fixture, "knowledge", false);
+    assert!(calls(&first) >= 1, "{first}");
+    assert_eq!(first["stop_reason"], "deferred", "{first}");
+    assert_eq!(first["runs"][0]["halted"], false, "{first}");
+    assert!(
+        first["runs"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "native result invocation held"),
+        "the held request is reported as a deferred stage, not a halt: {first}"
     );
-    assert_eq!(
-        status(&fixture)["usage"]["paused"]["knowledge"]["cause"]["stage"],
-        "native result host"
-    );
-    let before = usage(&fixture);
-    let config = std::fs::read_to_string(&fixture.config)
+    assert!(usage(fixture)["paused"].as_object().unwrap().is_empty());
+    let attempts = fixture
+        .root()
+        .join("vault/.lorekeeper/audit-preparation-attempts");
+    let path = std::fs::read_dir(attempts)
         .unwrap()
-        .replace("max_run_seconds: 60", "max_run_seconds: 90");
-    std::fs::write(&fixture.config, config).unwrap();
-    let held = run(&fixture, "knowledge", false);
-    assert_eq!(calls(&held), 0, "{held}");
-    assert_eq!(held["stop_reason"], "blocked");
-    assert_eq!(usage(&fixture), before);
-    let resumed = run(&fixture, "knowledge", true);
-    assert_eq!(calls(&resumed), 1, "{resumed}");
-    assert_eq!(usage(&fixture)["reserved_calls"], 2);
-    assert!(usage(&fixture)["paused"]["knowledge"]["at"].is_string());
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let raw = std::fs::read(&path).unwrap();
+    let attempt: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(attempt["key"]["stage"], "audit-assessment", "{attempt}");
+    assert_eq!(attempt["subject"], subject);
+    assert_eq!(attempt["disposition"]["failure"]["code"], 7);
+    let before = usage(fixture);
+    for resume in [false, true] {
+        let held = run(fixture, "knowledge", resume);
+        assert_eq!(calls(&held), 0, "{held}");
+        assert_eq!(held["stop_reason"], "deferred", "{held}");
+        assert_eq!(usage(fixture), before);
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+    }
+    let mode = fixture.root().join("audit-response-mode");
+    if mode.exists() {
+        std::fs::remove_file(mode).unwrap();
+    }
+    for dry_run in [true, false] {
+        let mut command = fixture.command();
+        command.args([
+            "work",
+            "retry-preparation",
+            "--stage",
+            "audit-assessment",
+            "--path",
+            subject,
+            "--input-revision",
+            attempt["input_revision"].as_str().unwrap(),
+        ]);
+        if dry_run {
+            command.arg("--dry-run");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(path.exists(), dry_run);
+    }
+    let retried = run(fixture, "knowledge", false);
+    assert_eq!(calls(&retried), 1, "{retried}");
+    assert_eq!(
+        usage(fixture)["reserved_calls"],
+        before["reserved_calls"].as_u64().unwrap() + 1
+    );
 }
 
 #[test]

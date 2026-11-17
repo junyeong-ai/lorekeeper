@@ -391,6 +391,79 @@ pub(in crate::commands) fn plan_prune(
     Ok(GENERATION.plan_prune(root, pending, plan)? + rejection::plan_prune(root, pending, plan)?)
 }
 
+/// The selected task's fresh inputs, or `None` when its discovery or captured scope changed
+/// after `input` was prepared.
+fn current_selected(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    input: &Value,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<(QueueTask, Prepared, super::Work)>> {
+    let task_id = input["task"]["task_id"]
+        .as_str()
+        .ok_or_else(|| miette::miette!("missing selected task"))?;
+    let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
+    if task.kind == TaskKind::ExtractConcepts {
+        let queries: Vec<lk_core::discovery::DiscoveryQuery> =
+            serde_json::from_value(input["context"]["purpose"]["discovery"]["queries"].clone())
+                .into_diagnostic()?;
+        if super::discovery::current(root, &task)?.is_some_and(|current| current != queries) {
+            return Ok(None);
+        }
+    }
+    let prepared = match super::resources::refresh_controlled(
+        root,
+        config,
+        config_revision,
+        &input["context"],
+        read,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) if super::is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let work = super::expected(root, &prepared, config, config_revision)?;
+    let owner =
+        lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path)).into_diagnostic()?;
+    let current = super::native::selected_task(config, &task, &prepared, &work, &owner)?;
+    Ok((current == *input).then_some((task, prepared, work)))
+}
+
+/// Holds one task of a selected request whose tool-enabled host failed and returns the task's
+/// hold; `None` when its inputs changed, so a fresh request replaces the failed one.
+pub(in crate::commands) fn hold_selected_controlled(
+    session: &lk_vault::MutationSession,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    request: &Value,
+    input: &Value,
+    failure: super::state::InvocationFailure,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Option<String>> {
+    let root = session.root();
+    let Some((task, prepared, work)) =
+        current_selected(root, config, config_revision, input, read)?
+    else {
+        return Ok(None);
+    };
+    let mut plan = lk_vault::MutationPlan::default();
+    prepared.guard_pages(&mut plan);
+    let reason = rejection::plan_record(
+        root,
+        rejection::Binding {
+            task: &task,
+            work: &work,
+            input: rejection::Input::Selected,
+            request,
+        },
+        rejection::Cause::Invocation { failure },
+        &mut plan,
+    )?;
+    session.apply(plan).into_diagnostic()?;
+    Ok(Some(format!("{}: {reason}", task.task_id)))
+}
+
 pub(in crate::commands) fn finish_selected_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -452,8 +525,7 @@ pub(in crate::commands) fn finish_selected_controlled(
                     input: rejection::Input::Selected,
                     request,
                 },
-                reply,
-                reason,
+                rejection::Cause::proposal(reply, reason)?,
                 &mut plan,
             )?;
             SelectedFinish::Rejected(reason)

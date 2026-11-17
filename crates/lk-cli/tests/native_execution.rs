@@ -1419,6 +1419,8 @@ def respond(value):
     if mode=='missing':
         print('Finished reading, without submitting an assessment.')
         return
+    if mode=='exit':
+        raise SystemExit(7)
     if mode=='needs-action':
         value={'results':[{'subject_ref':'s0','status':'needs-action','disposition':None,'reason':'Required scoped evidence needs an explicit decision.'}]}
     if '--output-last-message' in sys.argv:
@@ -5172,7 +5174,7 @@ fn daily_finishes_clean_late_period_publication() {
 }
 
 #[test]
-fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
+fn a_failed_host_holds_its_request_through_period_planning_and_preserves_final_read_checks() {
     let fixture = Fixture::new(
         "codex",
         30,
@@ -5188,11 +5190,11 @@ fn a_failed_host_stops_period_planning_and_preserves_final_read_checks() {
         .iter()
         .map(|stage| stage["name"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(result["halted"], true);
-    assert!(!names.iter().any(|name| name.starts_with("period resume")));
+    assert_eq!(result["halted"], false, "{result}");
+    assert_eq!(result["semantic_calls"], 1, "{result}");
     let failed_host = names
         .iter()
-        .position(|name| *name == "native result host")
+        .position(|name| *name == "native result invocation held")
         .unwrap();
     let final_stages = &result["stages"].as_array().unwrap()[failed_host + 1..];
     assert!(

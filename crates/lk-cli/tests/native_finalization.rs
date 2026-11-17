@@ -1245,7 +1245,7 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                 "{mode}"
             );
             assert!(!fixture.work_path(&plan, "final.json").exists(), "{mode}");
-            if mode == "section-boundary" {
+            if matches!(mode, "section-boundary" | "exit") {
                 assert_eq!(report["halted"], false, "{report}");
                 let (_, again) = fixture.run();
                 assert_eq!(again["semantic_calls"], 0, "{again}");

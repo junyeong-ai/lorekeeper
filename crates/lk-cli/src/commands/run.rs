@@ -97,6 +97,7 @@ mod native {
     use super::*;
     use super::{automation, scheduler};
     use crate::commands::audit::{DeferredAudit, InputAvailability};
+    use crate::commands::queue::application::is_semantic_context_changed;
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
     };
@@ -378,14 +379,6 @@ mod native {
         Deferred(String),
         Replan,
         Failed,
-    }
-
-    fn semantic_context_changed(error: &miette::Report) -> bool {
-        matches!(
-            error.downcast_ref::<crate::commands::queue::application::PublicationRejection>(),
-            Some(rejection)
-                if rejection.kind == crate::commands::queue::application::RejectionKind::SemanticContextChanged
-        )
     }
 
     #[derive(Default, PartialEq, Eq)]
@@ -2152,7 +2145,7 @@ mod native {
                 self.supervisor.read_control(),
             ) {
                 Ok(captured) => captured,
-                Err(error) if semantic_context_changed(&error) => return None,
+                Err(error) if is_semantic_context_changed(&error) => return None,
                 Err(error) => return Some(self.failure("bounded work progress", error)),
             };
             self.result
@@ -2167,7 +2160,7 @@ mod native {
                     Err(error) if crate::commands::work::state::is_input_capacity(&error) => {
                         return None;
                     }
-                    Err(error) if semantic_context_changed(&error) => return None,
+                    Err(error) if is_semantic_context_changed(&error) => return None,
                     Err(error) => return Some(self.failure("bounded work progress", error)),
                 };
                 if !progress.complete && requests.is_empty() {
@@ -2295,7 +2288,7 @@ mod native {
                             &turn.request,
                             self.supervisor.read_control(),
                         ) {
-                            if semantic_context_changed(&error) {
+                            if is_semantic_context_changed(&error) {
                                 self.record_uninvoked_observations(turns);
                                 return None;
                             }
@@ -2596,6 +2589,9 @@ mod native {
             result
         }
 
+        /// Confirmed timeouts and numeric exits return `InvocationFailed` for the caller to hold
+        /// its exact request; unusable remote replies do so only for read-only roles. Every other
+        /// host failure halts.
         async fn request_result(
             &mut self,
             request: &serde_json::Value,
@@ -2713,21 +2709,16 @@ mod native {
                     execution::diagnostic::Phase::Invocation,
                     &child,
                 ));
-                if matches!(access, execution::AgentAccess::ReadOnly) {
-                    let engine = self.agent_profile(metrics).engine();
-                    if let Some(code) = child.failed_exit() {
-                        return Some(ResultReply::InvocationFailed(
-                            crate::commands::work::state::InvocationFailure::Exited {
-                                engine,
-                                code,
-                            },
-                        ));
-                    }
-                    if child.termination == execution::ChildTermination::TimedOut {
-                        return Some(ResultReply::InvocationFailed(
-                            crate::commands::work::state::InvocationFailure::TimedOut { engine },
-                        ));
-                    }
+                let engine = self.agent_profile(metrics).engine();
+                if let Some(code) = child.failed_exit() {
+                    return Some(ResultReply::InvocationFailed(
+                        crate::commands::work::state::InvocationFailure::Exited { engine, code },
+                    ));
+                }
+                if child.termination == execution::ChildTermination::TimedOut {
+                    return Some(ResultReply::InvocationFailed(
+                        crate::commands::work::state::InvocationFailure::TimedOut { engine },
+                    ));
                 }
                 self.failure(
                     "native result host",
@@ -2783,10 +2774,25 @@ mod native {
             } else {
                 crate::commands::work::generation::schema()
             };
-            let Some(ResultReply::Complete(response)) =
-                self.request_result(&result.request, &schema, metrics).await
-            else {
-                return WorkStep::Failed;
+            let response = match self.request_result(&result.request, &schema, metrics).await {
+                Some(ResultReply::Complete(response)) => response,
+                Some(ResultReply::InvocationFailed(failure)) => {
+                    return self
+                        .hold_failed_request(metrics, |runner, session| {
+                            crate::commands::work::hold_result(
+                                session,
+                                &runner.config,
+                                &runner.config_revision,
+                                id,
+                                &result,
+                                failure,
+                                runner.supervisor.read_control(),
+                            )
+                            .map(Vec::from_iter)
+                        })
+                        .await;
+                }
+                None => return WorkStep::Failed,
             };
             let reply = match crate::commands::work::generation::replies(response, 1) {
                 Ok(mut replies) => replies.remove(0),
@@ -2853,7 +2859,8 @@ mod native {
                     WorkStep::Replan
                 }
                 Err(error) => {
-                    if metrics.stages == [ExecutionStage::Audit] && semantic_context_changed(&error)
+                    if metrics.stages == [ExecutionStage::Audit]
+                        && is_semantic_context_changed(&error)
                     {
                         self.record(
                             "bounded audit inputs changed",
@@ -2867,6 +2874,41 @@ mod native {
                     }
                 }
             }
+        }
+
+        /// Records holds for a tool-enabled request whose host failed, then ends this run like a
+        /// read wave with only invocation failures. `hold` returns one reason per held target;
+        /// targets whose inputs changed are not held and get fresh preparation in a later run.
+        async fn hold_failed_request(
+            &mut self,
+            metrics: &mut WorkStepMetrics,
+            hold: impl FnOnce(&mut Self, &lk_vault::MutationSession) -> miette::Result<Vec<String>>,
+        ) -> WorkStep {
+            let started = Instant::now();
+            let Some((session, _)) = self.mutation_session("native result invocation hold").await
+            else {
+                return WorkStep::Failed;
+            };
+            let held = hold(self, &session);
+            drop(session);
+            metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
+            match held {
+                Ok(reasons) if reasons.is_empty() => {
+                    self.deferred(
+                        "native result inputs changed",
+                        "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
+                    );
+                }
+                Ok(reasons) => {
+                    for reason in reasons {
+                        self.deferred("native result invocation held", reason);
+                    }
+                }
+                Err(error) => {
+                    self.failure("native result invocation hold", error);
+                }
+            }
+            WorkStep::Failed
         }
 
         async fn selected_result_step(
@@ -2891,16 +2933,42 @@ mod native {
                     }
                 };
             metrics.preparation_duration_ms = Some(started.elapsed().as_millis() as u64);
-            let Some(ResultReply::Complete(value)) = self
+            let value = match self
                 .request_result(
                     &request,
                     &crate::commands::work::generation::schema(),
                     &mut metrics,
                 )
                 .await
-            else {
-                self.record_work_step(metrics);
-                return WorkStep::Failed;
+            {
+                Some(ResultReply::Complete(value)) => value,
+                Some(ResultReply::InvocationFailed(failure)) => {
+                    let step = self
+                        .hold_failed_request(&mut metrics, |runner, session| {
+                            let mut held = Vec::new();
+                            for input in inputs {
+                                held.extend(
+                                    crate::commands::work::generation::hold_selected_controlled(
+                                        session,
+                                        &runner.config,
+                                        &runner.config_revision,
+                                        &request,
+                                        input,
+                                        failure.clone(),
+                                        runner.supervisor.read_control(),
+                                    )?,
+                                );
+                            }
+                            Ok(held)
+                        })
+                        .await;
+                    self.record_work_step(metrics);
+                    return step;
+                }
+                None => {
+                    self.record_work_step(metrics);
+                    return WorkStep::Failed;
+                }
             };
             let replies = match crate::commands::work::generation::replies(value, inputs.len()) {
                 Ok(replies) => replies,
@@ -3151,15 +3219,32 @@ mod native {
             section: crate::commands::work::SectionFinalization,
             metrics: &mut WorkStepMetrics,
         ) -> WorkStep {
-            let Some(ResultReply::Complete(value)) = self
+            let value = match self
                 .request_result(
                     &section.request,
                     &execution::finalization::schema(),
                     metrics,
                 )
                 .await
-            else {
-                return WorkStep::Failed;
+            {
+                Some(ResultReply::Complete(value)) => value,
+                Some(ResultReply::InvocationFailed(failure)) => {
+                    return self
+                        .hold_failed_request(metrics, |runner, session| {
+                            crate::commands::work::hold_section(
+                                session,
+                                &runner.config,
+                                &runner.config_revision,
+                                id,
+                                &section,
+                                failure,
+                                runner.supervisor.read_control(),
+                            )
+                            .map(Vec::from_iter)
+                        })
+                        .await;
+                }
+                None => return WorkStep::Failed,
             };
             let (response, bytes) = match execution::finalization::decode_value(value) {
                 Ok(decoded) => decoded,
@@ -3253,7 +3338,7 @@ mod native {
                         self.deferred("bounded work capacity", &reason);
                         return WorkStep::Deferred(reason);
                     }
-                    if stage == ExecutionStage::Audit && semantic_context_changed(&error) {
+                    if stage == ExecutionStage::Audit && is_semantic_context_changed(&error) {
                         self.record(
                             "bounded audit inputs changed",
                             StageState::Skipped,

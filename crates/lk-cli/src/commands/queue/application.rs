@@ -43,6 +43,14 @@ pub(in crate::commands) fn rejection(
     })
 }
 
+/// Whether a fresh guard refused because semantic inputs changed after they were captured.
+pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -> bool {
+    matches!(
+        error.downcast_ref::<PublicationRejection>(),
+        Some(rejection) if rejection.kind == RejectionKind::SemanticContextChanged
+    )
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::commands) struct TaskIdentity {

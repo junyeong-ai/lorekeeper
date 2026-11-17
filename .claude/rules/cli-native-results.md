@@ -33,8 +33,10 @@ paths:
   all remaining subjects. This wire feasibility bound supplies no lexical queries.
   Confirmed timeouts/numeric exits and invalid remote responses from read-only hosts
   retain input-bound operational attempts; local transport I/O/kind, signal/cleanup,
-  unknown errors and tool-enabled failures stay fatal. Four closed preparation owners
-  are extraction discovery, audit discovery, audit screening and whole sections. Their
+  unknown errors and unusable tool-enabled replies stay fatal. Five closed preparation
+  owners are extraction discovery, audit discovery, audit screening, whole sections and
+  audit assessments; the last holds only a tool-enabled whole or bounded assessment's
+  confirmed timeout/numeric exit after completed process-group cleanup. Their
   latest per-parent attempts stay separate from semantic actions and paid decisions;
   unchanged input holds survive instruction-contract changes. Only semantic needs-action
   earns action progress; an all-failed invocation wave ends this run without an operation
@@ -111,7 +113,11 @@ paths:
   An unknown reference records a typed operational rejection for that exact task/input,
   with actual request identity and bounded reply evidence. It publishes no semantic
   result, earns no action progress and does not pause independent work. Unchanged input
-  holds survive instruction changes. `work retry-generation` requires the exact current
+  holds survive instruction changes. The same per-task receipt holds a confirmed
+  timeout/numeric exit of a tool-enabled selected, bounded result or bounded section
+  finalizer for its exact input. Receipts are strict native-generation-rejection-v2 with a
+  typed proposal or invocation cause; v1 proposal receipts are read without rewriting and
+  earlier readers refuse v2. `work retry-generation` requires the exact current
   task/input; dry runs never recover or write, and clearing a receipt invokes no host.
   Pending tasks protect receipts during pruning; corrupt state and transport failures
   remain fatal.

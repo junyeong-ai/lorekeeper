@@ -119,8 +119,13 @@ paths:
   semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
   tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
   Preserve valid wave peers; a wave with only invocation failures ends the current run
-  without pausing the scheduled operation or counting semantic progress. Signal exits,
-  process cleanup failure, unknown errors and tool-enabled failures remain fatal.
+  without pausing the scheduled operation or counting semantic progress. A confirmed
+  timeout or numeric nonzero exit of a tool-enabled finalizer, after completed
+  process-group cleanup, holds only its exact request and ends the run the same way: each
+  queue task's input in its native generation receipt, each audit subject's context as an
+  audit-assessment preparation attempt. Inputs the host changed before failing are not
+  held; they are prepared afresh. Signal exits, process cleanup failure, local I/O,
+  unusable tool-enabled replies and unknown errors remain fatal.
   `work retry` clears only a current operational hold or exhausted timeout allowance;
   `work hold` suspends an exact ready node without invoking a host or granting refinement.
   Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.

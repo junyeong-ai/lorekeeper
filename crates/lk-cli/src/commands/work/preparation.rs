@@ -17,6 +17,7 @@ pub enum Stage {
     WholeSection,
     AuditDiscovery,
     AuditScreening,
+    AuditAssessment,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -26,6 +27,7 @@ pub(in crate::commands) enum Key {
     WholeSection { task_id: String, cache_hash: String },
     AuditDiscovery { path: String },
     AuditScreening { path: String },
+    AuditAssessment { path: String },
 }
 
 impl Key {
@@ -39,7 +41,9 @@ impl Key {
                 task_id,
                 cache_hash,
             } => Some((task_id, cache_hash)),
-            Self::AuditDiscovery { .. } | Self::AuditScreening { .. } => None,
+            Self::AuditDiscovery { .. }
+            | Self::AuditScreening { .. }
+            | Self::AuditAssessment { .. } => None,
         }
     }
 
@@ -153,7 +157,10 @@ fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
             return Err(miette::miette!("invalid preparation task identity"));
         }
     } else {
-        let (Key::AuditDiscovery { path } | Key::AuditScreening { path }) = &receipt.key else {
+        let (Key::AuditDiscovery { path }
+        | Key::AuditScreening { path }
+        | Key::AuditAssessment { path }) = &receipt.key
+        else {
             unreachable!()
         };
         if path != &receipt.subject {
@@ -228,6 +235,26 @@ impl Binding {
             schema,
         )
     }
+
+    /// A tool-enabled whole or bounded assessment of one audit subject, bound to its
+    /// semantic context so that assessment-rule changes alone keep the hold.
+    pub fn audit_assessment(
+        path: &str,
+        subject_revision: &str,
+        context_revision: &str,
+        request: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> miette::Result<Self> {
+        Self::build(
+            Key::AuditAssessment { path: path.into() },
+            path.into(),
+            subject_revision.into(),
+            &serde_json::json!({"path":path,"context_revision":context_revision}),
+            request,
+            schema,
+        )
+    }
+
     pub fn build(
         key: Key,
         subject: String,
@@ -422,6 +449,9 @@ mod tests {
                 path: "wiki/documents/source.md".into(),
             },
             Key::AuditScreening {
+                path: "wiki/documents/source.md".into(),
+            },
+            Key::AuditAssessment {
                 path: "wiki/documents/source.md".into(),
             },
         ] {

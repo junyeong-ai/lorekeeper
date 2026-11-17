@@ -322,12 +322,56 @@ impl Runner<'_> {
             slots.truncate(count);
             let mut metrics = WorkStepMetrics::new(WorkRole::Finalizer);
             metrics.stages = vec![ExecutionStage::Audit];
-            let Some(ResultReply::Complete(response)) = self
+            let response = match self
                 .request_result(&request, &execution::audit::schema(), &mut metrics)
                 .await
-            else {
-                self.record_work_step(metrics);
-                return;
+            {
+                Some(ResultReply::Complete(response)) => response,
+                Some(ResultReply::InvocationFailed(failure)) => {
+                    let originals = slots
+                        .iter()
+                        .map(|indices| batch[indices[0]].clone())
+                        .collect::<Vec<_>>();
+                    self.hold_failed_request(&mut metrics, |runner, session| {
+                        let fresh = runner.current_audit_subjects(&originals)?;
+                        let mut plan = lk_vault::MutationPlan::default();
+                        let mut held = Vec::new();
+                        for (subject, candidate) in subjects.iter().zip(fresh) {
+                            let current = capture_controlled(
+                                session.root(),
+                                &runner.config,
+                                &runner.config_revision,
+                                &candidate,
+                                runner.supervisor.read_control(),
+                            )?;
+                            if subject.same_input(&current) {
+                                let binding = current.plan_failure_hold(
+                                    session.root(),
+                                    &request,
+                                    failure.clone(),
+                                    &mut plan,
+                                )?;
+                                held.push((candidate.path, binding));
+                            }
+                        }
+                        session.apply(plan).into_diagnostic()?;
+                        held.into_iter()
+                            .map(|(path, binding)| {
+                                let reason = binding.held(session.root())?.ok_or_else(|| {
+                                    miette::miette!("audit assessment hold changed after recording")
+                                })?;
+                                Ok(format!("{path}: {reason}"))
+                            })
+                            .collect()
+                    })
+                    .await;
+                    self.record_work_step(metrics);
+                    return;
+                }
+                None => {
+                    self.record_work_step(metrics);
+                    return;
+                }
             };
             let judgments = match execution::audit::decode_batch(response, count) {
                 Ok(judgments) => judgments,

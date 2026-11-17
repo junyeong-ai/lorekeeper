@@ -68,8 +68,11 @@ session timeouts receive one automatic retry per exact request and native contra
 repeated timeouts defer that node without pausing independent work. Diagnose its host
 before using `lore work retry WORK NODE` to clear its operational hold. Confirmed numeric
 nonzero exits and unusable replies from these tool-free roles also hold their exact input,
-without pausing the operation or earning semantic progress. Contract changes alone never
-retry those failures. Signal exits, cleanup failures and unknown state remain fatal.
+without pausing the operation or earning semantic progress. A confirmed timeout or numeric
+nonzero exit of a tool-enabled finalizer likewise holds only its exact request and ends
+that run without a pause: clear a queue task with `lore work retry-generation` and an audit
+subject with `lore work retry-preparation --stage audit-assessment`. Contract changes alone
+never retry those failures. Signal exits, cleanup failures and unknown state remain fatal.
 An exhausted daily allowance waits for a later UTC day or an explicitly
 changed configured limit; a new process never grants a fresh allowance.
 Without this policy, schedules and the one-batch defaults remain unchanged.
