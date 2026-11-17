@@ -6,6 +6,8 @@ paths:
   - "crates/lk-cli/src/commands/work/resources.rs"
   - "crates/lk-cli/src/commands/work/selection.rs"
   - "crates/lk-cli/src/commands/work/selection/**"
+  - "crates/lk-cli/src/commands/work/publication.rs"
+  - "crates/lk-cli/src/commands/queue/rejections.rs"
   - "crates/lk-cli/src/commands/execution/preparation.rs"
   - "crates/lk-cli/src/commands/run/native/preparation.rs"
 ---
@@ -29,9 +31,11 @@ paths:
   never enter a key, so an unchanged card under an unchanged source keeps its decision
   while the roster around it changes. A packet is only transport for undecided rows in
   owner order; screeners judge each card independently of the others.
-- `.lorekeeper/queue/screening/<digest(task_id, cache_hash)>/` holds immutable `packets/`
-  (request and decisions), `ledger.json` (key to packet row, including keys that left
-  the roster), immutable `rosters/` and `rejections.json`. Issuing a packet writes
+- `work/selection.rs` owns `.lorekeeper/queue/screening/<digest(task_id, cache_hash)>/`:
+  immutable `packets/` (`screening-packet-v1`: request and decisions), `ledger.json`
+  (`screening-ledger-v1`: key to packet row, including keys that left the roster),
+  immutable `rosters/` (`screening-roster-v1`) and `rejections.json`
+  (`screening-rejections-v1`); keys hash `screening-contract-v1`. Issuing a packet writes
   nothing. Recording its decisions journals the packet and ledger in one plan guarded by
   the ledger bytes it read and the pending task identity, never by candidate pages;
   sealing journals the roster. Stored state decodes only from canonical bytes; corrupt,
@@ -44,6 +48,16 @@ paths:
   target alone is held until `work select --reassess` issues those rows with their
   `previous` reference; fresh validated state must not become a missing-request failure
   or repeat paid screening. Continue undecided rows even when earlier cards defer.
+- `rejections.json` keeps the latest semantic hold (rejected reference coverage or
+  reasons), matched by request revision, and the latest operational hold (failed
+  invocation), matched by the request's contract-independent input revision so it
+  outlives contract changes. Either hold records no decisions, defers only that task at
+  that packet and spends no call on the unchanged request; undecided candidates remain
+  incomplete and independent targets continue. A hold no longer applies once the
+  undecided rows change. `work select-retry --task-id ID` clears only the current
+  packet's operational hold, guarded by the ledger it read; `--dry-run` writes nothing.
+  Standalone `select-record` answers the current request for undecided rows, or for
+  deferred rows under reassessment, by its exact request revision.
 - Extraction evidence Work binds only what it reads: the source, the selected owners,
   their scoped reviews and an observed source's observations. Its context states
   `extraction_scope.policy` and `selected`; recipes, the roster and unread candidates

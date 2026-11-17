@@ -90,20 +90,11 @@ paths:
   order is irrelevant. The canonical request carries each row's key and owner; the
   native presentation leaves both to Rust. Reserve key expansion in the reply
   allowance. Reference-coverage or blank/oversized decision-reason rejection journals a
-  hold naming that exact request revision, records no decisions and defers only that
-  task; the unchanged request spends no calls. Reasons obey compact UTF-8 JSON string
-  bytes, including quotes/escapes, not character count. `rejections.json` keeps the
-  latest semantic hold, matched by request revision, and the latest operational hold,
-  matched by the request's contract-independent input revision so it outlives contract
-  changes. Confirmed numeric nonzero exits and unusable tool-free replies hold the task
-  at that packet; undecided candidates remain incomplete and independent targets
-  continue. A hold no longer applies once the undecided rows change. `work select-retry
-  --task-id ID` clears only the current packet's operational hold, guarded by the ledger
-  it read; `--dry-run` writes nothing. Failures earn no semantic progress; failed-only
-  waves end this run without an operation pause. Corrupt holds, signal/cleanup errors
-  and failed fresh scope validation stay fatal. Standalone `select-record` answers the
-  current request for undecided rows, or for deferred rows under reassessment, by its
-  exact request revision.
+  semantic hold for that exact request revision; confirmed numeric nonzero exits and
+  unusable tool-free replies journal an operational hold (cli-extraction.md owns
+  `rejections.json`). Reasons obey compact UTF-8 JSON string bytes, including
+  quotes/escapes, not character count. Failures earn no semantic progress.
+  Signal/cleanup errors and failed fresh scope validation stay fatal.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
   contract. Screened extraction admits only its explicit selected owners, possibly none;

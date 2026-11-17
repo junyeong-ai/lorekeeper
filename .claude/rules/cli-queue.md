@@ -146,6 +146,9 @@ paths:
 - `queue check` is read-only: report current/unreadable/unparseable tasks,
   unpublished results, and pending journals without recovery. Final checks follow
   backlink reconciliation, not precede it.
+- `queue packet` emits `version: 2` only when it carries RSS event evidence, each item
+  with its exact `lore wiki original … --event … --revision …` argv in
+  `selected_event_command`; packets without event evidence stay `version: 1`.
 - Document identity adoption compares the production projection and guarded current
   observation, including full commit refs, blob/document identity, manifest, and
   remote ownership. A blocked mismatch is not adoption. Archival source identity

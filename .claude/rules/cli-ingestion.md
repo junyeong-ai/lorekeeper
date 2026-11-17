@@ -2,6 +2,7 @@
 paths:
   - "crates/lk-cli/src/commands/ingest.rs"
   - "crates/lk-cli/src/commands/ingest/**"
+  - "crates/lk-cli/src/commands/fetch.rs"
   - "crates/lk-cli/src/commands/wiki.rs"
 ---
 
@@ -79,10 +80,8 @@ paths:
 - `legacy_unbound` is current retained evidence, not proof of historical page/input
   binding. Never promote it to exact provider-wire/acquisition provenance.
 - Typed event tasks validate selected membership and payload: removed pair is stale,
-  corrupt selection unreadable. `queue packet` emits `version: 2` only when it carries
-  RSS event evidence, each item with its exact `lore wiki original … --event …
-  --revision …` argv in `selected_event_command`; packets without event evidence stay
-  `version: 1`. Normalize/merge/repoint typed declarations together with links.
+  corrupt selection unreadable. Normalize/merge/repoint typed declarations together with
+  links.
   Source counts count origin pages, not selected events.
 - GeneratedOnly pair retraction can remove generated occurrences/declarations while
   authored prose still supplies page evidence. Normal whole-link removal remains

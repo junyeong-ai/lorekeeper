@@ -1,6 +1,7 @@
 ---
 paths:
   - "crates/lk-cli/src/commands/task.rs"
+  - "crates/lk-cli/src/commands/status.rs"
   - "crates/lk-cli/src/commands/maintenance.rs"
 ---
 

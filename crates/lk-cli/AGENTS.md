@@ -77,10 +77,10 @@ related owner when a change crosses boundaries.
 
 | Area | Rules |
 |---|---|
-| Native sequencing, host supervision, budgets and audit admission | [cli-native-runs.md](../../.claude/rules/cli-native-runs.md) |
+| Native sequencing, host supervision, budgets, pauses, invocation-failure holds and audit admission | [cli-native-runs.md](../../.claude/rules/cli-native-runs.md) |
 | Saved Work, coverage, evidence and finalization | [cli-semantic-work.md](../../.claude/rules/cli-semantic-work.md) |
-| Extraction discovery, screening, reuse and work cost | [cli-extraction.md](../../.claude/rules/cli-extraction.md) |
-| Native requests, responses, operational holds and publication | [cli-native-results.md](../../.claude/rules/cli-native-results.md) |
+| Extraction roster, screening decisions, store and holds, sealed results and work cost | [cli-extraction.md](../../.claude/rules/cli-extraction.md) |
+| Native role requests and replies (`candidate_ref`, `owner_ref`), preparation, generation and action receipts, publication | [cli-native-results.md](../../.claude/rules/cli-native-results.md) |
 | Queue retirement, fair scheduling, readiness and application | [cli-queue.md](../../.claude/rules/cli-queue.md) |
 | Installation, job definitions, claims and credentials | [cli-installation.md](../../.claude/rules/cli-installation.md) |
 | Ingestion, originals and provenance queries | [cli-ingestion.md](../../.claude/rules/cli-ingestion.md) |

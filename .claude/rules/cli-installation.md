@@ -2,6 +2,8 @@
 paths:
   - "crates/lk-cli/src/commands/installation.rs"
   - "crates/lk-cli/src/commands/installation/**"
+  - "crates/lk-cli/src/commands/input.rs"
+  - "crates/lk-cli/src/commands/init.rs"
   - "crates/lk-cli/src/commands/schedule.rs"
   - "crates/lk-cli/src/commands/workflow.rs"
 ---
