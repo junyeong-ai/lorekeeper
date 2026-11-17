@@ -154,8 +154,9 @@ paths:
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.
   Screened extraction binds its current candidate roster in that checkpoint and again
-  after the host returns: a changed roster replans before the call and is a typed
-  `semantic-context-changed` refusal after it.
+  after the host returns. A roster that is no longer completely decided, or that admits
+  different evidence, replans before the call and is a typed `semantic-context-changed`
+  refusal after it; other roster churn rebinds (cli-extraction.md).
 - Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
@@ -180,8 +181,9 @@ paths:
   that checked scope.
   An empty audit settles only after fresh corpus readiness succeeds. Unfinished recorded
   inputs remain deferred without invalidating current semantic receipts.
-- Grant each temporary selection manifest's directory explicitly to the selected host;
-  keep it alive through the foreground consumer and remove it afterward.
+- Grant each private temporary result directory (reply schema and result file) to the
+  selected host with `--add-dir`; keep it alive through the foreground consumer and
+  remove it afterward.
 - A tool-enabled native audit finalizer may legitimately create reviews or repair
   its inputs. A typed semantic-context refusal still rejects the old submission;
   recapture the remaining selected subjects, refresh missing discovery and prepare

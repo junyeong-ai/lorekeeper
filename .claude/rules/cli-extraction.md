@@ -21,27 +21,29 @@ paths:
   `full-context` extraction keeps the complete match set.
 - Progressive extraction separates complete source observations, candidate-card screening
   and admitted full-body evidence. A screening decision belongs to one candidate. Its
-  key binds the screening contract (reply schema, instruction and the screening
-  profile's engine, model and effort), the exact source the screener reads and the exact
-  row shown: public path, matched queries by value and the card without locators.
+  key binds the screening contract (reply schema, instruction and the screening profile's
+  model identity: engine, model, effort and the Codex `profile`), the exact source the
+  screener reads and the exact row shown: public path, matched queries by value and the
+  card without locators.
   Packing, order, byte limits, target and configuration revisions and other candidates
   never enter a key, so an unchanged card under an unchanged source keeps its decision
   while the roster around it changes. A packet is only transport for undecided rows in
   owner order; screeners judge each card independently of the others.
 - `.lorekeeper/queue/screening/<digest(task_id, cache_hash)>/` holds immutable `packets/`
   (request and decisions), `ledger.json` (key to packet row, including keys that left
-  the roster), immutable `rosters/` and `rejections.json`. Nothing is written before a
-  host call. Recording journals the packet and ledger in one plan guarded by the ledger
-  bytes it read and the pending task identity, never by candidate pages. Stored state
-  decodes only from canonical bytes; corrupt, ambiguous or foreign state remains fatal.
-  The earlier `.lorekeeper/queue/selection/` store is never read or imported;
-  maintenance retires it (see `cli-task-maintenance.md`).
-- Unknown or deferred decisions block completion, and card-only rejection is not a
-  full-body assessment. A decision other than `defer` is final for its key. A fully
-  decided roster with deferred cards holds only that target until `work select
-  --reassess` issues those rows with their `previous` reference; fresh validated state
-  must not become a missing-request failure or repeat paid screening. Continue undecided
-  rows even when earlier cards defer.
+  the roster), immutable `rosters/` and `rejections.json`. Issuing a packet writes
+  nothing. Recording its decisions journals the packet and ledger in one plan guarded by
+  the ledger bytes it read and the pending task identity, never by candidate pages;
+  sealing journals the roster. Stored state decodes only from canonical bytes; corrupt,
+  ambiguous or foreign state remains fatal.
+  The retired packet-selection store `.lorekeeper/queue/selection/` is never read or
+  imported; maintenance removes it (see `cli-task-maintenance.md`).
+- A roster is completely decided when no row is unknown or `defer`; anything less blocks
+  completion, and card-only rejection is not a full-body assessment. A decision other
+  than `defer` is final for its key. When the only undecided rows are `defer`, that
+  target alone is held until `work select --reassess` issues those rows with their
+  `previous` reference; fresh validated state must not become a missing-request failure
+  or repeat paid screening. Continue undecided rows even when earlier cards defer.
 - Extraction evidence Work binds only what it reads: the source, the selected owners,
   their scoped reviews and an observed source's observations. Its context states
   `extraction_scope.policy` and `selected`; recipes, the roster and unread candidates

@@ -29,16 +29,18 @@ paths:
   Literal seeks identify text positions, never events. Bound complete page JSON and
   scalar counts, report continuation, and never record coverage/completion or recover
   journals. Native `source_read` metadata supplies this capability without source bodies.
-- Fresh source inspection uses the shared scalar workload policy as well as complete
-  JSON byte admission. Apply it to Work partitioning, whole-input task batches and raw
-  screening context. Exact retained legacy Work keeps its original policy; persist the
-  selected manifest, never rebuild it with a newer default.
-- A saved legacy inspection/reduction action stays held across native-contract changes
-  only when its original canonical input revision still hashes the complete current
-  request. Verify the whole request rather than trusting its supplied revision field;
-  keep the original receipt bytes. This automatic-admission hold never authorizes
-  refinement: refinement still requires the exact current request and native contract.
-  New-policy actions retain ordinary exact-contract matching.
+- Fresh source inspection uses the shared scalar workload policy (`semantic-ranges-v2`
+  plans with `max_part_characters`) as well as complete JSON byte admission. Apply it to
+  Work partitioning, whole-input task batches and raw screening context. An exact
+  retained byte-only `semantic-ranges-v1` plan keeps its policy; persist the selected
+  manifest, never rebuild it with a newer default.
+- On `semantic-ranges-v1` Work, a saved inspection/reduction action stays held for
+  automatic admission across native-contract changes only when its original canonical
+  input revision still hashes the complete current request. Verify the whole request
+  rather than trusting its supplied revision field; keep the original receipt bytes.
+  This hold never authorizes refinement: refinement still requires the exact current
+  request and native contract. Actions on `semantic-ranges-v2` Work match the exact
+  contract.
 - Only freshly received unambiguous authored-text or evidence-reference violations can
   create native observation-rejection holds. Validate stored state, current identity
   and question inheritance first; canonical node ranges own evidence membership, not

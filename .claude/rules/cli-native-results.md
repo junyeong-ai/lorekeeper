@@ -58,9 +58,10 @@ paths:
   resources directly; bounded finalizers compose completed observations and their evidence
   mapping. Neither representation may claim the other is supplied. Both retain complete
   input bounds, scoped review requirements and native publication ownership.
-- Discovery recovery journals the legacy recipe and native request-bound sidecar
-  together under vault→queue claims. Preserve exact current Source Work; changed
-  knowledge scope replans without retagging paid nodes. Recovery is incomplete; exact
+- Discovery recovery journals the extraction discovery recipe and its
+  `extraction-discovery-recovery-v1` sidecar together under vault→queue claims. Preserve
+  exact current Source Work; a recipe that changes what a Work reads (cli-semantic-work.md)
+  replans it without retagging paid nodes. Recovery is incomplete; exact
   repeated requests/cycles defer before another host. Retention protects pending task
   identities and validates recovery sidecars before removing them. Never interpret old
   reason text as a recovery query. Do not couple output schema to tool prohibition,
@@ -105,8 +106,9 @@ paths:
   exact request revision.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
-  contract. Progressive membership is explicit, including an empty selection; legacy
-  admission requires Context authority. Review-only and unselected pages grant no reuse.
+  contract. Screened extraction admits only its explicit selected owners, possibly none;
+  full-context extraction admits a resource with `SemanticAuthority::Context`.
+  Review-only and unselected pages grant no reuse.
   Reserve per-occurrence expansion bytes, including repeated references, while retaining
   a fitting empty extraction. Fresh request equality precedes expansion.
   An unknown reference records a typed operational rejection for that exact task/input,

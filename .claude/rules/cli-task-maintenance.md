@@ -25,10 +25,10 @@ paths:
   Validate the historical completion dependency closure from captured observations
   before retirement. Root, frontier and consumed-source proofs retain their distinct
   coverage; expired valid Work does not require current source-page freshness.
-- Maintenance retires `.lorekeeper/queue/selection/`, the packet-selection store earlier
-  releases wrote, under workflow→mutation→queue claims. It inventories the whole store
-  without opening a file and refuses before deleting anything when the store or any
-  entry is a link or is neither a regular file nor a directory. `--dry-run` reports the
+- Maintenance removes the retired packet-selection store `.lorekeeper/queue/selection/`
+  under workflow→mutation→queue claims. It inventories the whole store without opening
+  a file and refuses before deleting anything when the store or any entry is a link or
+  is neither a regular file nor a directory. `--dry-run` reports the
   same file, directory and byte counts and removes nothing; a rerun after the store is
   gone reports nothing. This removal is not journaled because the store is discarded,
   unread state with no partial-state meaning: an interrupted run leaves a smaller store

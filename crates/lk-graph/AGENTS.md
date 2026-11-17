@@ -54,7 +54,8 @@ and CLI discovery, not a second graph authority.
 
 ## Incremental semantic maintenance (`audit.rs`)
 
-- Screened discovery keeps immutable candidate states and bounded decision packets.
+- Screened audit discovery keeps immutable candidate states and bounded decision packets
+  (extraction screening keys decisions per candidate instead; see cli-extraction.md).
   Global planning uses complete compact inventories; selected boundaries capture cards
   and exact bytes. A decision binds what its screener reads: the subject's address and
   authored revision, and the candidate's verified owner, public address, authored

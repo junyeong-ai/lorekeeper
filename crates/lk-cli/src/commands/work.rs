@@ -1650,8 +1650,9 @@ fn with_current_roster<'a>(
     ))))
 }
 
-/// The same binding after a host returned: a roster that moved meanwhile is a changed
-/// read scope, so the reply is not adopted.
+/// The same binding after a host returned: a roster that is no longer completely decided,
+/// or that admits other evidence, is a changed read scope, so the reply is not adopted.
+/// Other roster churn rebinds the reply to the current roster.
 fn require_current_roster<'a>(
     root: &Path,
     config: &lk_core::config::Config,
