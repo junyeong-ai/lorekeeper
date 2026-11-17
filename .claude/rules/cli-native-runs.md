@@ -98,8 +98,9 @@ paths:
 - Scheduled runs share `execution.automation`'s UTC-day invocation allowance in the
   physical vault. Its required daily cap may be null for unlimited daily usage;
   per-run calls, duration, pauses and durable accounting still apply. Cap changes
-  never reset usage or pauses. Under an acquired workflow lease, synchronously reserve complete
-  waves in the atomic operational usage ledger before spawning; a prepared but unlocked
+  never reset usage or pauses. Under an acquired workflow lease, synchronously reserve
+  complete waves in the atomic operational usage ledger
+  (`.lorekeeper/automation-usage.json`) before spawning; a prepared but unlocked
   lease grants no ownership. Never refund ambiguous launches, reset usage on config
   changes, recover corrupt accounting as zero, or detach its writer. This ledger is
   independent of canonical mutation journals; page, Work and cursor writes still use
@@ -107,9 +108,11 @@ paths:
   excludes later controller workflow acquisition waits. Those waits have a separate
   configured bound; source collection, ingest publication and short writer waits do
   not use that allowance. Neither allowance renews across batches. Duration limits stop
-  new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation
-  with the first halting stage and its bounded detail; explicit `--resume` clears its pause without
-  clearing usage or semantic holds.
+  new calls, while returned paid results remain recordable. Fatal scheduled failures
+  pause that operation: the `automation-usage-v2` ledger records the first halting stage
+  and at most 1024 bytes of its detail, while the job report keeps the full detail. An
+  `automation-usage-v1` ledger decodes with cause-less pauses and is written back as v2.
+  Explicit `--resume` clears the pause without clearing usage or semantic holds.
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;
   absence is not admission. Resume and authoritative admission still require the lease.
