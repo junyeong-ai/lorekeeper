@@ -67,11 +67,13 @@ pub async fn run(
     let audit_preparation_present = super::work::preparation::audit_present(&vault_root)?;
     let audit_selections_present = lk_graph::audit::selection::present(&vault_root)
         .map_err(|error| miette::miette!("{error}"))?;
+    let retired_selection_present = super::work::retired_selection::present(&vault_root)?;
     #[cfg(unix)]
     let work_lease = if (work_present
         || audit_actions_present
         || audit_selections_present
-        || audit_preparation_present)
+        || audit_preparation_present
+        || retired_selection_present)
         && !dry_run
     {
         let lease = super::workflow::WorkflowLease::prepare_selected(
@@ -189,6 +191,19 @@ pub async fn run(
         let removed =
             super::work::preparation::prune_absent_audits(&vault_root, _mutation.as_ref())?;
         eprintln!("{prefix}audit preparation: pruned {removed} attempts for absent subjects.");
+    }
+    if retired_selection_present {
+        if work_available {
+            let report = super::work::retired_selection::retire(&vault_root, _mutation.as_ref())?;
+            eprintln!(
+                "{prefix}retired selection store: removed {} file(s) in {} directories, {} bytes; no command reads this store.",
+                report.files, report.directories, report.bytes
+            );
+        } else {
+            eprintln!(
+                "{prefix}retired selection store: retained; exclusive Unix workflow access is unavailable."
+            );
+        }
     }
 
     // 1. Prune ingest log

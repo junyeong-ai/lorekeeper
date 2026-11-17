@@ -12,6 +12,7 @@ use serde_json::Value;
 
 mod rejection;
 mod retention;
+pub(in crate::commands) mod retired;
 pub(in crate::commands) use rejection::ScreeningRejection;
 #[cfg(unix)]
 pub(super) use rejection::{plan_failed_attempt, plan_rejection};

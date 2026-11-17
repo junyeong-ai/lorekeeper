@@ -34,6 +34,8 @@ paths:
   host call. Recording journals the packet and ledger in one plan guarded by the ledger
   bytes it read and the pending task identity, never by candidate pages. Stored state
   decodes only from canonical bytes; corrupt, ambiguous or foreign state remains fatal.
+  The earlier `.lorekeeper/queue/selection/` store is never read or imported;
+  maintenance retires it (see `cli-task-maintenance.md`).
 - Unknown or deferred decisions block completion, and card-only rejection is not a
   full-body assessment. A decision other than `defer` is final for its key. A fully
   decided roster with deferred cards holds only that target until `work select

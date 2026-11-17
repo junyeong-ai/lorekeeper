@@ -1717,6 +1717,10 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
         .root()
         .join("vault/.lorekeeper/knowledge-audit.json");
     let audit_before = std::fs::read(&audit).unwrap();
+    let retired = fixture.root().join("vault/.lorekeeper/queue/selection");
+    let unread = retired.join("legacy/batches/0.json");
+    std::fs::create_dir_all(unread.parent().unwrap()).unwrap();
+    std::fs::write(&unread, [0xff, 0xfe]).unwrap();
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1729,11 +1733,13 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
         "{}",
         String::from_utf8_lossy(&busy.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&busy.stderr)
-            .contains("exclusive Unix workflow access is unavailable")
-    );
+    let stderr = String::from_utf8_lossy(&busy.stderr);
+    assert!(stderr.contains("work: retained; exclusive Unix workflow access is unavailable"));
+    assert!(stderr.contains(
+        "retired selection store: retained; exclusive Unix workflow access is unavailable"
+    ));
     assert!(receipt_path.exists());
+    assert!(unread.exists());
     drop(lock);
     fixture.ingest();
     let pending = fixture.command().args(["queue", "check"]).output().unwrap();
@@ -1748,8 +1754,14 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
         "{}",
         String::from_utf8_lossy(&preview.stderr)
     );
-    assert!(String::from_utf8_lossy(&preview.stderr).contains("work: pruned 1 published work"));
+    let stderr = String::from_utf8_lossy(&preview.stderr);
+    assert!(stderr.contains("work: pruned 1 published work"));
+    assert!(
+        stderr.contains("retired selection store: removed 1 file(s) in 3 directories, 2 bytes"),
+        "{stderr}"
+    );
     assert!(receipt_path.exists());
+    assert!(unread.exists());
     let prune = fixture.command().arg("maintenance").output().unwrap();
     assert!(
         prune.status.success(),
@@ -1757,6 +1769,10 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
         String::from_utf8_lossy(&prune.stderr)
     );
     assert!(!work.exists());
+    assert!(
+        !retired.exists(),
+        "the unread legacy store is removed whole"
+    );
     assert_eq!(std::fs::read(knowledge).unwrap(), knowledge_before);
     assert_eq!(std::fs::read(audit).unwrap(), audit_before);
 }

@@ -29,6 +29,7 @@ pub(super) use publication::publication_scope_controlled;
 #[cfg(unix)]
 pub(super) use selection::ScreeningDecision;
 pub(super) use selection::ScreeningRejection;
+pub(super) use selection::retired as retired_selection;
 #[cfg(unix)]
 pub(super) const FINALIZATION_REQUEST_ENV: &str = "LORE_WORK_FINALIZATION_REQUEST";
 #[cfg(unix)]
