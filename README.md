@@ -152,6 +152,9 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 분할 작업의 최종화는 관찰에서 빠진 근거를 같은 Work의 보존 원문에서 필요한 구간만 다시 읽어 확인할 수 있습니다.
 원문 읽기는 현재 입력을 재검증하며, 기존 관찰이나 완료 기록을 변경하지 않습니다.
 
+개념 추출은 질의마다 기존 검색 순위 상위 50개(`execution.work.max_query_candidates`)와 이름·별칭이 정확히 일치하는 페이지만 후보로 판단합니다.
+판정은 후보별로 저장되므로, 카드가 바뀌지 않은 후보는 다른 페이지가 바뀌어도 다시 판단하지 않습니다. 본문을 읽지 않은 후보의 변경은 게시를 막지 않습니다.
+
 새 감사 탐색은 전체 후보를 제한된 패킷으로 판단하고, 입력이 같은 판단을 재사용합니다.
 선택한 문맥은 본문을 읽으며 필수 근거와 직접 링크는 항상 유지합니다.
 미판정·명시적 보류 후보가 있으면 완료할 수 없습니다. [후보 판단 절차](skills/lore-wiki/references/maintenance.md#candidate-screening)를 참고하세요.
@@ -180,8 +183,8 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 
 정기 실행은 `lore schedule`로 정의를 출력한 뒤 [스케줄링 절차](skills/lore-ingest/references/scheduling.md)에 따라 OS에 등록합니다.
 `execution.automation`을 설정하면 대기열 소진을 별도로 예약하고, 기존 수집·감사 예약도 공통 UTC 일일 호출 한도와 실행시간 안에서 진행합니다. 필수 항목인 `max_calls_per_day`를 `null`로 지정하면 일일 한도를 해제하며, 실행별 제한과 오류 시 일시 중지는 유지합니다.
-`lore status`에서 호출 예약량과 중지 상태를 확인합니다. 치명적 추론 장애는 해당 작업의 추론을 일시 중지하며, 원인 해결 후 `lore run OPERATION --scheduled --resume`으로 재개합니다.
-도구 없는 Inspect/Reduce 호출의 시간 초과는 같은 요청에 한 번만 자동 재시도합니다. 반복 시간 초과, 확인된 비정상 종료와 사용할 수 없는 응답은 해당 입력을 보류하며 독립적으로 성공한 결과는 보존합니다. 원인 해결 후 `lore work retry WORK NODE --dry-run`으로 확인하고 `lore work retry WORK NODE`로 운영 보류를 해제합니다. 이미 실패한 입력은 `lore work hold WORK NODE --reason "..."`로 호출 없이 보류할 수 있습니다. 사용량, 유료 관찰과 의미적 보류는 유지됩니다.
+`lore status`에서 호출 예약량과 중지 상태, 중지를 일으킨 단계를 확인합니다. 치명적 추론 장애는 해당 작업의 추론을 일시 중지하며, 원인 해결 후 `lore run OPERATION --scheduled --resume`으로 재개합니다.
+도구 없는 Inspect/Reduce 호출의 시간 초과는 같은 요청에 한 번만 자동 재시도합니다. 반복 시간 초과, 확인된 비정상 종료와 사용할 수 없는 응답은 해당 입력을 보류하며 독립적으로 성공한 결과는 보존합니다. 원인 해결 후 `lore work retry WORK NODE --dry-run`으로 확인하고 `lore work retry WORK NODE`로 운영 보류를 해제합니다. 이미 실패한 입력은 `lore work hold WORK NODE --reason "..."`로 호출 없이 보류할 수 있습니다. 사용량, 유료 관찰과 의미적 보류는 유지됩니다. 도구를 쓰는 최종화의 시간 초과와 확인된 비정상 종료도 해당 요청만 보류하며, 큐 작업은 `lore work retry-generation`, 감사는 `lore work retry-preparation --stage audit-assessment`로 해제합니다.
 수동 쓰기 에이전트는 근거를 읽기 **전에** `lore workflow -- claude` 또는 `lore workflow -- codex`로 시작하세요.
 네이티브 실행은 같은 보호를 직접 소유하며, 실행 중에는 설정과 볼트 선택이 고정됩니다.
 대기자가 있으면 예약 `process`·`knowledge`는 호출 결과를 보존한 처리 경계에서 실행권을 넘깁니다. 재획득해도 호출·시간·재검토 예산은 갱신되지 않습니다.

@@ -152,6 +152,9 @@ See [bounded work](skills/lore-process/references/bounded-work.md) for status an
 Bounded finalizers can reread necessary retained-source ranges when observations omit required evidence.
 These reads revalidate current inputs and leave existing observations and completion records unchanged.
 
+Concept extraction screens, per query, the 50 best-ranked existing pages (`execution.work.max_query_candidates`) plus every exact title or alias match.
+Decisions are stored per candidate, so an unchanged card keeps its decision when other pages change, and changes to candidates whose body was not read never block publication.
+
 Fresh audit discovery screens the complete match inventory in bounded packets and reuses unchanged decisions.
 Only admitted context receives full reads; mandatory evidence and direct links remain required.
 Unknown or explicitly deferred candidates prevent completion. See [candidate screening](skills/lore-wiki/references/maintenance.md#candidate-screening).
@@ -180,8 +183,8 @@ Further changes defer that subject. Predecessor observations remain intact; an o
 
 Generate schedule definitions with `lore schedule`, then register them with the OS using the [scheduling procedure](skills/lore-ingest/references/scheduling.md).
 With `execution.automation`, queue draining gets its own schedule; collection and audit schedules share the same UTC-day invocation allowance and run-duration policy. Set the required `max_calls_per_day` to `null` for no daily cap; per-run limits and failure pauses still apply.
-`lore status` shows reservations and pauses. Fatal inference errors pause that operation's semantic phase; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
-Tool-free Inspect/Reduce timeouts receive one automatic retry per exact request. Repeated timeouts, confirmed nonzero exits and unusable replies hold that input; independent successful results remain saved. After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then clear its operational hold with `lore work retry WORK NODE`. Use `lore work hold WORK NODE --reason "..."` to suspend a known failed input without calling the host. Usage, paid observations and semantic holds remain intact.
+`lore status` shows reservations, pauses and the stage that caused each pause. Fatal inference errors pause that operation's semantic phase; repair the cause, then use `lore run OPERATION --scheduled --resume` to continue.
+Tool-free Inspect/Reduce timeouts receive one automatic retry per exact request. Repeated timeouts, confirmed nonzero exits and unusable replies hold that input; independent successful results remain saved. After diagnosing the failure, preview `lore work retry WORK NODE --dry-run`, then clear its operational hold with `lore work retry WORK NODE`. Use `lore work hold WORK NODE --reason "..."` to suspend a known failed input without calling the host. Usage, paid observations and semantic holds remain intact. Confirmed timeouts and nonzero exits of tool-enabled finalizers also hold only their request: release queue tasks with `lore work retry-generation` and audit subjects with `lore work retry-preparation --stage audit-assessment`.
 Start manual writing agents **before reading evidence** with `lore workflow -- claude` or `lore workflow -- codex`.
 Native jobs own the same protection themselves; configuration and vault selection stay pinned during execution.
 Scheduled `process` and `knowledge` yield at a retained-work checkpoint when another workflow waits. Reacquisition renews neither calls, time nor replan allowances.
