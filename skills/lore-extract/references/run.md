@@ -60,7 +60,7 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    f. Extract concepts. Assign categories via `concept_mapping`.
 
-   g. Write to the document path pattern from AGENTS.md.
+   g. Draft the complete document page for the document path pattern from AGENTS.md.
 
       The following is **illustrative only** — read AGENTS.md for the
       authoritative path pattern, frontmatter format, and required fields:
@@ -87,21 +87,30 @@ Extract knowledge using the manifest. Requires a prior scan.
       frontmatter `concepts` array. These forward links are what the Finalize
       `backlinks-sync` reads to populate each concept's sources section.
 
-   h. Create/merge concept pages per AGENTS.md, following its
-      **Concept convergence** section —
-      matching against what step 3 resolved and searched, with the concepts already
-      created earlier in this run as the created-this-run set (a batch
-      processes many documents, so that set is what closes same-run gaps).
-      New concept → fill the Synthesis section, emit the related-concepts
-      section empty; concept synthesis derives evidence-backed relations. The sources
-      section / `source_count`
-      stay machine-owned (AGENTS.md § Concept convergence); the Finalize
-      `backlinks-sync` re-derives both from the document's forward
-      link (step g), the single source of truth. If no configured
-      category fits a transferable concept, omit the `category` field (leave it
-      uncategorized) rather than forcing a wrong one.
+   h. Draft new concepts or reuse existing owners per AGENTS.md's **Concept
+      convergence** section, matching against what step 3 resolved and searched, with
+      the concepts already published earlier in this run as the created-this-run set
+      (a batch processes many documents, so that set is what closes same-run gaps).
+      New concept → a complete page with its Synthesis section filled and its
+      related-concepts section empty; concept synthesis derives evidence-backed
+      relations. Existing concept → keep its address and prose; register an equivalent
+      source form as an alias. Its synthesis and relations are rewritten through the
+      queue once the document's forward link (step g) reaches it. The sources section
+      and `source_count` stay machine-owned; the Finalize `backlinks-sync` re-derives
+      both from that forward link. If no configured category fits a transferable
+      concept, omit the `category` field rather than forcing a wrong one.
 
-   i. **Update manifest** `extracted` list with the new entry. Follow the manifest's
+   i. **Publish** the document, its new concepts and alias updates as one
+      [curation](../../lore-wiki/references/curation.md#metadata-and-review-corrections)
+      plan staged under the vault's `.lorekeeper/`, not in the source repository. Drafts
+      are `pages` entries: `revision: null` for a new address, or the current file
+      revision from `lore wiki read` to replace a page this extraction authored earlier.
+      Alias updates are revision-guarded `concepts` entries, with each concept page read
+      in `evidence`. Run `lore wiki curate --file PLAN.json --dry-run`, then omit
+      `--dry-run`. The plan publishes everything or nothing; a refusal names the owned
+      name or occupied address to resolve before redrafting. Never write vault pages directly.
+
+   j. **Update manifest** `extracted` list with the new entry. Follow the manifest's
       extraction-baseline contract before recording `extracted_at_commit`; the
       current HEAD alone does not identify dirty working-tree input. Record the
       exact retained `inputs` bindings and run `lore extract verify --project <project-name> --json`.
@@ -116,7 +125,7 @@ Extract knowledge using the manifest. Requires a prior scan.
    lore wiki refresh           # refresh SQLite navigation and the entry guide
    lore graph lint             # repair violations in pages this run wrote; report unrelated findings separately. Observations never gate
    ```
-8. Run `lore queue status --json`; report created/merged/skipped counts and any
+8. Run `lore queue status --json`; report created/reused/skipped counts and any
    pending concept synthesis. Document extraction is complete, but queued concept
    rewrites require `/lore-process` before reporting semantic completion. Report
    unrelated pending work separately; a bounded extraction does not authorize a

@@ -31,9 +31,10 @@ freshness checks separate, inspectable operations.
   cannot place itself under the lease: in a session the operator did not start that way,
   ask before the run whether to restart under `workflow` or to stop scheduled writers.
   Pause other concept/source writers during a wave; external editors do not share this lease.
-- These are directly authored COMPLETE pages: fill their owned sections, omit
-  pipeline `llm_inputs`, preserve existing addresses and `created`. The manifest
-  records per-document progress; rerunning must not delete existing knowledge.
+- These are directly authored COMPLETE pages, published only through guarded
+  `lore wiki curate` plans: fill their owned sections, omit pipeline `llm_inputs`,
+  preserve existing addresses and `created`. The manifest records per-document
+  progress; rerunning must not delete existing knowledge.
 - Resolve EVERY form a source writes with `lore resolve`, check the created-this-run
   set, then use `lore wiki search` on distinguishing terms of each form before
   creating a concept. A lexical difference does not establish a new concept.
