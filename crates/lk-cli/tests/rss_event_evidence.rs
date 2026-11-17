@@ -253,6 +253,61 @@ fn bound_rss_concepts_require_article_selection_but_empty_extraction_is_valid() 
 }
 
 #[test]
+fn an_rss_selection_outside_the_manifest_is_a_local_proposal_rejection() {
+    for unknown_event in [false, true] {
+        let fixture = Fixture::pending();
+        let before = fixture.raw();
+        let directory = fixture.root().join(".lorekeeper/queue/results");
+        let path = std::fs::read_dir(directory)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut result: lk_queue::TaskResult =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        if unknown_event {
+            result.concepts[1].rss_evidence[0].event_id = "unknown-event".into();
+        } else {
+            result.concepts[0].rss_evidence[0].revision = "f".repeat(64);
+        }
+        let raw = serde_json::to_vec(&result).unwrap();
+        std::fs::write(&path, &raw).unwrap();
+        let output = fixture.run(&["queue", "apply", "--json"]);
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["fatal"].is_null(), "{report}");
+        assert_eq!(report["rejected"], 1, "{report}");
+        assert_eq!(report["groups"][0]["kind"], "invalid-proposal", "{report}");
+        assert_eq!(fixture.raw(), before);
+        assert_eq!(std::fs::read(path).unwrap(), raw);
+        assert!(!fixture.root().join("wiki/concepts").exists());
+    }
+}
+
+#[test]
+fn current_rss_selection_with_a_missing_original_remains_fatal() {
+    let fixture = Fixture::pending();
+    let before = fixture.raw();
+    let event = &fixture.capture.manifest.events[0];
+    std::fs::remove_file(
+        fixture
+            .root()
+            .join(lk_core::rss_original::RSS_ORIGINAL_STORE)
+            .join("events")
+            .join(format!("{}.json", event.revision)),
+    )
+    .unwrap();
+    let output = fixture.run(&["queue", "apply", "--json"]);
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["fatal"]["detail"].is_string(), "{report}");
+    assert_eq!(report["applied"], 0);
+    assert_eq!(fixture.raw(), before);
+    assert!(!fixture.root().join("wiki/concepts").exists());
+}
+
+#[test]
 fn two_articles_invalidate_only_the_explicitly_changed_selection() {
     let f = Fixture::build();
     f.settle();

@@ -150,3 +150,5 @@ source publication instead of dropping evidence. New disabled pages omit that se
   and declarations under the exact origin guard. Carried selections retain and
   verify their historical manifest even after current collection changes. Daily
   rerenders preserve declarations; omission is not retraction.
+  Selections outside a valid provided manifest reject the proposal. Invalid manifests
+  and unavailable or corrupt originals remain source failures.

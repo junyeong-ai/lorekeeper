@@ -896,6 +896,11 @@ impl Pipeline {
             lk_core::markdown::validate_section_body(body)
                 .map_err(|error| PipelineError::RejectedResult(error.to_string()))?;
         }
+        if let Some(manifest) = manifest {
+            manifest
+                .validate()
+                .map_err(lk_vault::VaultError::Original)?;
+        }
         let mut staged = Vec::with_capacity(result.concepts.len());
         for reported in &result.concepts {
             if manifest.is_some() && reported.rss_evidence.is_empty() {
@@ -911,6 +916,13 @@ impl Pipeline {
                     )
                 })?;
                 for selection in &reported.rss_evidence {
+                    if !provided.events.iter().any(|event| {
+                        event.event_id == selection.event_id && event.revision == selection.revision
+                    }) {
+                        return Err(PipelineError::RejectedResult(
+                            "RSS selection not in provided manifest".into(),
+                        ));
+                    }
                     lk_vault::load_rss_selected_payload(&self.vault_root, provided, selection)?;
                 }
             }
