@@ -368,7 +368,7 @@ fn a_sealed_roster_binds_its_decisions_without_rereading_unselected_pages() {
     fixture.seal(&selection);
     let sealed = guard(&binding).unwrap();
     assert_eq!(sealed.selected, BTreeSet::from([owner(0)]));
-    assert_eq!(sealed.candidates, 3);
+    assert_eq!(sealed.queries, selection.queries);
     let inputs = sealed_inputs(
         &fixture.root,
         &fixture.task_id,

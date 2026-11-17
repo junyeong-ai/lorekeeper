@@ -863,7 +863,8 @@ pub(super) fn task_context(
     Ok(json!({
         "status":"ready",
         "requires_screening":false,
-        "selection":prepared.context["purpose"]["extraction_scope"]["selection"],
+        "selection":prepared.roster.as_ref().map(|roster| &roster.selection),
+        "discovery":prepared.roster.as_ref().map(|roster| &roster.coverage),
         "context_revision": context_revision,
         "source_context_revision": work.plan.subject_revision,
         "subject": prepared.subject,
@@ -1572,111 +1573,97 @@ pub(super) fn record_read_wave(
     }
 }
 
-/// The current roster's evidence, required to carry exactly the supplied result binding.
-fn selected_task_controlled(
+/// The completed source observations of a source too large to read whole, with the Work
+/// files they were read from, or nothing while they are not complete.
+fn completed_source_observation(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
-    task_id: &str,
-    queries: &[lk_core::discovery::DiscoveryQuery],
-    binding: &lk_queue::ExtractionSelection,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<Prepared> {
-    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
-        .into_diagnostic()?;
-    selected_task_with_screening(
-        root,
-        config,
-        screening_controlled(root, config, config_revision, task_id, queries, read)?,
-        binding,
-        &mut reviews,
-        read,
-    )
+    source: &Prepared,
+) -> miette::Result<Option<(Value, std::collections::BTreeMap<PathBuf, String>)>> {
+    let work = expected(root, source, config, config_revision)?;
+    if !work.is_planned(root)? {
+        return Ok(None);
+    }
+    work.result_if_complete_with_guards(root, &source.resources)
 }
 
-fn selected_task_with_screening(
+/// Evidence joined with the candidate roster a result drafted from it must name.
+enum RosterAdmission<'a> {
+    Bound(Box<std::borrow::Cow<'a, Prepared>>),
+    /// The current roster is undecided somewhere or admits other evidence.
+    Changed(String),
+}
+
+/// Bind screened evidence to the current candidate roster: every row decided, none
+/// deferred, and exactly this evidence admitted. Other evidence needs no roster.
+fn with_current_roster<'a>(
     root: &Path,
     config: &lk_core::config::Config,
-    preparation: ScreeningPreparation,
-    binding: &lk_queue::ExtractionSelection,
-    reviews: &mut lk_vault::ReviewInventory,
+    config_revision: &str,
+    prepared: &'a Prepared,
     read: &lk_vault::ReadControl,
-) -> miette::Result<Prepared> {
-    let screening = match preparation {
-        ScreeningPreparation::Candidates(screening) => screening,
-        ScreeningPreparation::Capacity(_) => {
-            return Err(publication_rejection(
-                RejectionKind::EvidenceScopeChanged,
-                "current candidate screening exceeds its complete packet bound; retained proposal needs explicit scope or capacity reconsideration",
-            ));
-        }
-        ScreeningPreparation::SourceBlocked { work_id } => {
-            return Err(publication_rejection(
-                RejectionKind::EvidenceScopeChanged,
-                source_blocked_reason(&work_id),
-            ));
-        }
-        ScreeningPreparation::Source { .. } => {
-            return Err(publication_rejection(
-                RejectionKind::EvidenceScopeChanged,
-                "source observations are incomplete; retained extraction cannot publish",
-            ));
-        }
+) -> miette::Result<RosterAdmission<'a>> {
+    if !resources::is_screened(&prepared.context) || prepared.roster.is_some() {
+        return Ok(RosterAdmission::Bound(Box::new(
+            std::borrow::Cow::Borrowed(prepared),
+        )));
+    }
+    let Subject::Queue { task_id, .. } = &prepared.subject else {
+        return Err(miette::miette!(
+            "screened extraction evidence requires a queue subject"
+        ));
     };
+    let screening =
+        match current_screening_controlled(root, config, config_revision, task_id, read)? {
+            ScreeningPreparation::Candidates(screening) => screening,
+            ScreeningPreparation::Capacity(capacity) => {
+                return Ok(RosterAdmission::Changed(capacity.to_string()));
+            }
+            ScreeningPreparation::SourceBlocked { work_id } => {
+                return Ok(RosterAdmission::Changed(source_blocked_reason(&work_id)));
+            }
+            ScreeningPreparation::Source { .. } => {
+                return Ok(RosterAdmission::Changed(
+                    "source observations are incomplete; this extraction cannot finish".into(),
+                ));
+            }
+        };
     let progress = screening.selection.progress();
     if !progress.complete {
-        return Err(publication_rejection(
-            RejectionKind::SelectionDecisionsChanged,
-            format!(
-                "candidate screening is incomplete: {} unknown, {} deferred; not-selected covers candidate cards only",
-                progress.unknown, progress.deferred,
-            ),
+        return Ok(RosterAdmission::Changed(format!(
+            "candidate screening is incomplete: {} unknown, {} deferred; not-selected covers candidate cards only",
+            progress.unknown, progress.deferred,
+        )));
+    }
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
+    let admitted = admitted_task(root, config, &screening, &mut reviews, read)?;
+    if admitted.revision(config_revision)? != prepared.revision(config_revision)? {
+        return Ok(RosterAdmission::Changed(
+            "candidate screening now admits different evidence than this work read".into(),
         ));
     }
-    let current = screening.selection.binding()?;
-    if current.inventory_revision != binding.inventory_revision {
-        return Err(publication_rejection(
-            RejectionKind::SelectionInventoryChanged,
-            "candidate screening: the candidate roster differs from the one this work was planned against; inspect `lore work context` and replan",
-        ));
-    }
-    if current != *binding {
-        return Err(publication_rejection(
-            RejectionKind::SelectionDecisionsChanged,
-            "candidate screening: selection decisions changed since planning",
-        ));
-    }
-    admitted_task(root, config, &screening, reviews, read)
+    Ok(RosterAdmission::Bound(Box::new(std::borrow::Cow::Owned(
+        admitted,
+    ))))
 }
 
-/// Record in the evidence context which roster and decisions admitted it.
-fn bind_selection(
-    prepared: &mut Prepared,
-    queries: &[lk_core::discovery::DiscoveryQuery],
-    binding: &lk_queue::ExtractionSelection,
-    candidates: usize,
-    source_observations: Option<&Value>,
-) {
-    let selected = prepared
-        .selected_owners
-        .as_ref()
-        .map_or(0, |owners| owners.len());
-    prepared.context["purpose"]["discovery"] = json!({
-        "queries":queries,
-        "match_count":candidates,
-        "inventory_revision":binding.inventory_revision,
-    });
-    prepared.context["purpose"]["extraction_scope"] = json!({
-        "policy":binding.policy,
-        "selection":binding,
-        "coverage":{
-            "candidate_count":candidates,
-            "full_candidate_inputs":selected,
-            "not_full_inputs":candidates.saturating_sub(selected),
-        },
-    });
-    if let Some(observation) = source_observations {
-        prepared.context["purpose"]["source_observations"] = observation.clone();
+/// The same binding after a host returned: a roster that moved meanwhile is a changed
+/// read scope, so the reply is not adopted.
+fn require_current_roster<'a>(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    prepared: &'a Prepared,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<std::borrow::Cow<'a, Prepared>> {
+    match with_current_roster(root, config, config_revision, prepared, read)? {
+        RosterAdmission::Bound(prepared) => Ok(*prepared),
+        RosterAdmission::Changed(reason) => Err(publication_rejection(
+            RejectionKind::SemanticContextChanged,
+            format!("{reason}; rescreen and regenerate the result"),
+        )),
     }
 }
 
@@ -1703,23 +1690,20 @@ fn admitted_task(
     reviews: &mut lk_vault::ReviewInventory,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let binding = screening.selection.binding()?;
     let mut prepared = resources::task_with_selected(
         root,
         config,
         &screening.inventory.source,
         &screening.selection.selected_owners(),
+        screening.source_observations.as_ref(),
         reviews,
         read,
     )?;
-    bind_selection(
-        &mut prepared,
-        &screening.inventory.capture.queries,
-        &binding,
-        screening.inventory.capture.candidates.len(),
-        screening.source_observations.as_ref(),
+    prepared.roster = Some(
+        screening
+            .selection
+            .roster_binding(&screening.inventory.capture)?,
     );
-    prepared.roster_seal = Some(screening.selection.seal()?);
     Ok(prepared)
 }
 
@@ -1775,16 +1759,14 @@ fn sealed_task_controlled(
     let observations = if revision(&retained_source(&source))? == sealed.source_revision {
         None
     } else {
-        let work = expected(root, &source, config, config_revision)?;
-        let observed = if work.is_planned(root)? {
-            work.result_if_complete_with_guards(root, &source.resources)?
-        } else {
-            None
-        };
-        let Some((observation, guards)) = observed.filter(|(observation, _)| {
-            revision(&observed_source(&source, observation))
-                .is_ok_and(|current| current == sealed.source_revision)
-        }) else {
+        let Some((observation, guards)) =
+            completed_source_observation(root, config, config_revision, &source)?.filter(
+                |(observation, _)| {
+                    revision(&observed_source(&source, observation))
+                        .is_ok_and(|current| current == sealed.source_revision)
+                },
+            )
+        else {
             return Err(publication_rejection(
                 RejectionKind::SemanticContextChanged,
                 "the extraction source changed after its candidates were screened; rescreen and regenerate the result",
@@ -1793,15 +1775,15 @@ fn sealed_task_controlled(
         observation_guards = guards;
         Some(observation)
     };
-    let mut prepared =
-        resources::task_with_selected(root, config, &source, &sealed.selected, &mut reviews, read)?;
-    bind_selection(
-        &mut prepared,
-        &sealed.queries,
-        binding,
-        sealed.candidates,
+    let prepared = resources::task_with_selected(
+        root,
+        config,
+        &source,
+        &sealed.selected,
         observations.as_ref(),
-    );
+        &mut reviews,
+        read,
+    )?;
     Ok(SealedEvidence {
         prepared,
         roster: sealed,
@@ -2054,6 +2036,7 @@ fn current_result_finalization(
                     &task,
                     work,
                     &generation::Owners::build(config, prepared)?,
+                    prepared.roster.as_ref(),
                     &work.plan.subject_revision,
                     completed,
                 )?,
@@ -2062,6 +2045,7 @@ fn current_result_finalization(
                     &task,
                     work,
                     &generation::Owners::build(config, prepared)?,
+                    prepared.roster.as_ref(),
                     completed,
                 )?,
             }
@@ -2854,14 +2838,12 @@ pub(super) struct InspectionRecord {
 #[cfg(unix)]
 pub(super) struct RecordedInspections {
     pub records: Vec<InspectionRecord>,
-    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
     pub revalidation_duration_ms: u64,
 }
 
 #[cfg(unix)]
 struct InspectionWorks {
     works: std::collections::BTreeMap<String, miette::Result<(Work, Prepared)>>,
-    discovery_io: lk_vault::DiscoveryCaptureMetrics,
     duration_ms: u64,
 }
 
@@ -2874,81 +2856,21 @@ fn load_inspection_works(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<InspectionWorks> {
     let started = std::time::Instant::now();
-    let mut loaded = std::collections::BTreeMap::new();
-    let mut screened = Vec::new();
-    let is_screened =
-        |work: &Work| work.context["purpose"]["extraction_scope"]["policy"] == selection::POLICY;
+    let mut works = std::collections::BTreeMap::new();
     for id in ids {
         read.check().into_diagnostic()?;
-        if loaded.contains_key(*id) {
+        if works.contains_key(*id) {
             continue;
         }
-        let work = Work::load(root, id);
-        if let Ok(work) = &work
-            && is_screened(work)
-        {
-            screened.push(work.clone());
-        }
-        let result = work.and_then(|work| {
-            if is_screened(&work) {
-                return Ok(None);
-            }
+        let loaded = Work::load(root, id).and_then(|work| {
             let prepared =
                 resources::refresh_controlled(root, config, config_revision, &work.context, read)?;
-            validate_loaded_work(root, config, config_revision, work, prepared).map(Some)
+            validate_loaded_work(root, config, config_revision, work, prepared)
         });
-        loaded.insert((*id).to_owned(), result);
+        works.insert((*id).to_owned(), loaded);
     }
-    let task_ids = screened
-        .iter()
-        .map(|work| {
-            work.context["subject"]["task_id"]
-                .as_str()
-                .ok_or_else(|| miette::miette!("screened work requires a queue task subject"))
-        })
-        .collect::<miette::Result<Vec<_>>>()?;
-    let (prepared, discovery_io) = if task_ids.is_empty() {
-        (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default())
-    } else {
-        let mut work_iter = screened.iter();
-        let (prepared, discovery_io, _) = map_current_screenings(
-            root,
-            config,
-            config_revision,
-            &task_ids,
-            |screening, reviews| {
-                let work = work_iter.next().expect("one capture per work");
-                (|| {
-                    let selection = serde_json::from_value(
-                        work.context["purpose"]["extraction_scope"]["selection"].clone(),
-                    )
-                    .into_diagnostic()?;
-                    let prepared = selected_task_with_screening(
-                        root,
-                        config,
-                        ScreeningPreparation::Candidates(Box::new(screening?)),
-                        &selection,
-                        reviews,
-                        read,
-                    )?
-                    .validate_context(&work.context)?;
-                    validate_loaded_work(root, config, config_revision, work.clone(), prepared)
-                })()
-            },
-            read,
-        )?;
-        (prepared, discovery_io)
-    };
-    for (work, prepared) in screened.into_iter().zip(prepared) {
-        loaded.insert(work.plan.id, prepared.map(Some));
-    }
-    let works = loaded
-        .into_iter()
-        .map(|(id, result)| (id, result.map(|work| work.expect("captured work"))))
-        .collect();
     Ok(InspectionWorks {
         works,
-        discovery_io,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -2956,7 +2878,6 @@ fn load_inspection_works(
 #[cfg(unix)]
 pub(super) struct PreparedInspections {
     pub turns: Vec<miette::Result<(state::WorkProgress, Vec<Value>)>>,
-    pub discovery_io: lk_vault::DiscoveryCaptureMetrics,
     pub duration_ms: u64,
 }
 
@@ -2996,7 +2917,6 @@ pub(super) fn prepare_inspections_batch(
         .collect();
     Ok(PreparedInspections {
         turns,
-        discovery_io: loaded.discovery_io,
         duration_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -3182,7 +3102,6 @@ fn record_prepared_inspections(
         .collect();
     Ok(RecordedInspections {
         records,
-        discovery_io: loaded.discovery_io,
         revalidation_duration_ms: loaded.duration_ms,
     })
 }
@@ -3283,6 +3202,7 @@ fn frontier_result(
         task,
         work,
         &generation::Owners::build(config, prepared)?,
+        prepared.roster.as_ref(),
         &completed,
     ) {
         Ok(request) => request,
@@ -3440,19 +3360,24 @@ fn prepare_native_finalization_from_capture(
     let state = match finished {
         Err(reason) => NativeFinalization::Ready(FinalizationPreparation::NeedsAction(reason)),
         Ok(true) => NativeFinalization::Finished,
-        Ok(false) if frontier => {
-            match prepare_frontier_finalization(root, config, work, prepared)? {
-                Some(preparation) => NativeFinalization::Ready(preparation),
-                None => NativeFinalization::Replan,
-            }
-        }
-        Ok(false) => NativeFinalization::Ready(prepare_finalization_from_capture(
+        Ok(false) => match with_current_roster(
             root,
             config,
             config_revision,
-            work,
             prepared,
-        )?),
+            prepared.read_control(),
+        )? {
+            RosterAdmission::Changed(_) => NativeFinalization::Replan,
+            RosterAdmission::Bound(prepared) if frontier => {
+                match prepare_frontier_finalization(root, config, work, &prepared)? {
+                    Some(preparation) => NativeFinalization::Ready(preparation),
+                    None => NativeFinalization::Replan,
+                }
+            }
+            RosterAdmission::Bound(prepared) => NativeFinalization::Ready(
+                prepare_finalization_from_capture(root, config, config_revision, work, &prepared)?,
+            ),
+        },
     };
     Ok(FinalizationCheckpoint {
         state,
@@ -3594,6 +3519,7 @@ fn prepare_finalization_from_capture(
             &task,
             work,
             &generation::Owners::build(config, prepared)?,
+            prepared.roster.as_ref(),
             &work.plan.subject_revision,
             &completed,
         ) {
@@ -3725,6 +3651,7 @@ pub(super) fn finish_result(
 ) -> miette::Result<ResultFinish> {
     let root = session.root();
     let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
+    let prepared = require_current_roster(root, config, config_revision, &prepared, read)?;
     let completed =
         validate_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?;
     if completed != result.completed {
@@ -4767,6 +4694,16 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                         .as_ref()
                         .map(|(path, revision)| (path.as_path(), revision.as_str())),
                 )?;
+                let prepared = match &expected {
+                    Some(_) => require_current_roster(
+                        &root,
+                        &config,
+                        &config_revision,
+                        &prepared,
+                        prepared.read_control(),
+                    )?,
+                    None => std::borrow::Cow::Borrowed(&prepared),
+                };
                 finish_with_preparation(
                     &session,
                     &config,
@@ -4891,6 +4828,7 @@ fn plan_finish_completion(
     let unresolved = completed.result()["output"]["unresolved"]
         .as_array()
         .is_some_and(|items| !items.is_empty());
+    let mut sealed = None;
     let path = match &prepared.subject {
         Subject::Queue {
             task_id,
@@ -4908,15 +4846,29 @@ fn plan_finish_completion(
                 lk_queue::TaskKind::ExtractConcepts => {
                     let typed: lk_queue::TaskResult =
                         serde_json::from_value(result.clone()).into_diagnostic()?;
-                    let selected = prepared.context["purpose"]["extraction_scope"]
-                        .get("selection")
-                        .map(|value| {
-                            serde_json::from_value::<lk_queue::ExtractionSelection>(value.clone())
+                    let sealing = prepared.roster.as_ref().map(|roster| &roster.seal);
+                    sealed = typed
+                        .selection
+                        .as_ref()
+                        .map(|selection| {
+                            selection::load_sealed(
+                                session.root(),
+                                task_id,
+                                cache_hash,
+                                selection,
+                                sealing,
+                            )
                         })
-                        .transpose()
-                        .into_diagnostic()?;
-                    if typed.selection != selected
-                        || selected.is_some() != prepared.roster_seal.is_some()
+                        .transpose()?;
+                    let admits_evidence = match &sealed {
+                        Some(sealed) => {
+                            Some(&sealed.selected) == prepared.selected_owners.as_ref()
+                                && sealed.queries == typed.discovery
+                        }
+                        None => true,
+                    };
+                    if sealed.is_some() != resources::is_screened(&prepared.context)
+                        || !admits_evidence
                     {
                         return Err(miette::miette!(
                             "final extraction selection differs from its captured evidence scope"
@@ -4983,8 +4935,11 @@ fn plan_finish_completion(
     let staged = state::load_result(session.root(), &path)?;
     let mut mutation = lk_vault::MutationPlan::default();
     prepared.guard_pages(&mut mutation);
-    if let Some(seal) = &prepared.roster_seal {
-        seal.plan(session.root(), &mut mutation)?;
+    if let Some(sealed) = &sealed {
+        sealed.guard(&mut mutation);
+        if let Some(roster) = &prepared.roster {
+            roster.seal.plan(session.root(), &mut mutation)?;
+        }
     }
     let final_before = completed.plan_seal(work, &mut mutation, session.root(), &result)?;
     if let Some((_, value)) = &staged
@@ -5124,6 +5079,17 @@ mod tests {
             panic!("large raw source requires bounded observations");
         };
         let session = MutationSession::acquire(&root).unwrap();
+        discovery::record(
+            &session,
+            &task.task_id,
+            discovery::DiscoveryRequest {
+                target_revision: file_revision(
+                    &std::fs::read_to_string(root.join(target)).unwrap(),
+                ),
+                queries: queries.to_vec(),
+            },
+        )
+        .unwrap();
         let work = persist_prepared(&session, &config, &config_revision, &prepared)
             .map(|persisted| {
                 assert_eq!(persisted, *work);
@@ -5198,13 +5164,60 @@ mod tests {
         let admitted = admitted_task(&root, &config, &decided, &mut reviews, &read).unwrap();
         assert!(!admitted.context["purpose"]["source_observations"].is_null());
         let binding = decided.selection.binding().unwrap();
-        let mut plan = MutationPlan::default();
-        admitted
-            .roster_seal
-            .as_ref()
+        let roster = admitted.roster.as_ref().unwrap();
+        assert_eq!(roster.selection, binding);
+        assert_eq!(roster.queries(), queries);
+        let evidence = resources::refresh_controlled(
+            &root,
+            &config,
+            &config_revision,
+            &admitted.context,
+            &read,
+        )
+        .unwrap();
+        assert!(
+            evidence.roster.is_none(),
+            "reading evidence consults no candidate roster"
+        );
+        assert_eq!(
+            evidence.revision(&config_revision).unwrap(),
+            admitted.revision(&config_revision).unwrap()
+        );
+        let RosterAdmission::Bound(bound) =
+            with_current_roster(&root, &config, &config_revision, &evidence, &read).unwrap()
+        else {
+            panic!("the decided roster admits exactly this evidence");
+        };
+        assert_eq!(bound.roster.as_ref().unwrap().selection, binding);
+        let later = "wiki/concepts/later.md";
+        write(
+            &root,
+            later,
+            "---\ntype: concept\ntitle: Later\n---\n## Synthesis\nCandidate scope added later.\n",
+        );
+        assert!(
+            matches!(
+                with_current_roster(&root, &config, &config_revision, &evidence, &read).unwrap(),
+                RosterAdmission::Changed(reason) if reason.contains("1 unknown")
+            ),
+            "an undecided candidate leaves the evidence readable but admits no result"
+        );
+        assert_eq!(
+            resources::refresh_controlled(
+                &root,
+                &config,
+                &config_revision,
+                &admitted.context,
+                &read,
+            )
             .unwrap()
-            .plan(&root, &mut plan)
-            .unwrap();
+            .revision(&config_revision)
+            .unwrap(),
+            admitted.revision(&config_revision).unwrap()
+        );
+        std::fs::remove_file(root.join(later)).unwrap();
+        let mut plan = MutationPlan::default();
+        roster.seal.plan(&root, &mut plan).unwrap();
         session.apply(plan).unwrap();
         let sealed = || {
             sealed_task_controlled(
@@ -6310,6 +6323,7 @@ mod tests {
             &task,
             &work,
             &generation::Owners::build(&config, &prepared).unwrap(),
+            None,
             &work.plan.subject_revision,
             &completed,
         )

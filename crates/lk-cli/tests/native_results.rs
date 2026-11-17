@@ -78,7 +78,8 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             else: assert 'model_reasoning_effort="high"' in sys.argv
         if mode.startswith('discovery') and ('recover' in target or 'frontier' in target):
             context=item.get('context') or completed['context']
-            old=context['purpose'].get('discovery',{}).get('queries',[])
+            disclosed=item.get('discovery') or request.get('discovery')
+            old=[row['query'] for row in disclosed] if disclosed else context['purpose'].get('discovery',{}).get('queries',[])
             fresh=any(q['query']=='fresh terminology' for q in old)
             if mode!='discovery-once' or not fresh:
                 query='protocol' if mode=='discovery-same' or (mode=='discovery-cycle' and fresh) else 'fresh terminology'

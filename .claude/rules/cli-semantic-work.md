@@ -120,8 +120,10 @@ paths:
   Validate unique JSON fields before completion hashing, restaging, authority replacement
   or retention, using the same captured raw bytes for mutation guards.
 - Prepare ready native nodes and their progress from one captured evaluation. Refresh
-  the complete scope after the host returns before recording; added discovery matches
-  invalidate work too. Never retain a candidate capture across host execution.
+  the Work's own scope after the host returns before recording. Audit and full-context
+  extraction Work read every discovery match, so an added match invalidates them;
+  screened extraction evidence reads only its source and selected owners, so candidate
+  churn does not. Never retain a candidate capture across host execution.
 - Queue preparation checks the next exact evidence request's current processing action
   in that checkpoint, after reusable root/frontier completion. A later held node cannot
   suppress an earlier ready request. Keep the pre-host recheck for changed state; do not

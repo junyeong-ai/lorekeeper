@@ -34,8 +34,48 @@ pub(super) struct Prepared {
     pub pages: BTreeMap<PathBuf, String>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
     pub(super) selected_owners: Option<BTreeSet<String>>,
-    /// The roster this extraction evidence was admitted from, sealed when a result finishes.
-    pub(super) roster_seal: Option<super::selection::RosterSeal>,
+    /// The current candidate roster that admits this screened evidence. Result completion
+    /// needs it; reading the evidence does not, so it is absent from a plain refresh.
+    pub(super) roster: Option<super::selection::RosterBinding>,
+}
+
+/// The discovery recipes and screening proof Rust writes into an extraction result.
+pub(super) struct ResultBinding {
+    pub discovery: Vec<lk_core::discovery::DiscoveryQuery>,
+    pub selection: Option<lk_queue::ExtractionSelection>,
+}
+
+impl ResultBinding {
+    /// The bound roster's recipes and proof for screened evidence, the context's own
+    /// recipes otherwise.
+    pub(super) fn build(
+        context: &Value,
+        roster: Option<&super::selection::RosterBinding>,
+    ) -> miette::Result<Self> {
+        match roster {
+            Some(roster) => Ok(Self {
+                discovery: roster.queries(),
+                selection: Some(roster.selection.clone()),
+            }),
+            None if is_screened(context) => Err(miette::miette!(
+                "screened extraction evidence is not bound to its current candidate roster"
+            )),
+            None => Ok(Self {
+                discovery: match context["purpose"].get("discovery") {
+                    Some(discovery) => {
+                        serde_json::from_value(discovery["queries"].clone()).into_diagnostic()?
+                    }
+                    None => Vec::new(),
+                },
+                selection: None,
+            }),
+        }
+    }
+}
+
+/// Whether a context names screened extraction evidence.
+pub(super) fn is_screened(context: &Value) -> bool {
+    context["purpose"]["extraction_scope"]["policy"] == super::selection::POLICY
 }
 
 /// One extraction task's candidate roster beside its source: the retained input, the
@@ -107,6 +147,10 @@ impl Prepared {
 
     pub fn read_control(&self) -> &lk_vault::ReadControl {
         &self.read
+    }
+
+    pub(super) fn result_binding(&self) -> miette::Result<ResultBinding> {
+        ResultBinding::build(&self.context, self.roster.as_ref())
     }
 
     pub fn validate_context(self, context: &Value) -> miette::Result<Self> {
@@ -315,7 +359,7 @@ impl<'a> Capture<'a> {
             pages: self.pages,
             audit_reviews: None,
             selected_owners: None,
-            roster_seal: None,
+            roster: None,
         }
     }
 }
@@ -634,14 +678,16 @@ fn review_subjects(
     Ok((target.clone(), subjects))
 }
 
-/// The evidence an extraction reads: its source plus each selected owner and the scoped
-/// reviews of those owners, captured from current bytes. Only these pages are guarded;
-/// a candidate that was not selected stays bound to the card it was judged from.
+/// The evidence a screened extraction reads: its source, in full or through its completed
+/// observations, plus each selected owner and the scoped reviews of those owners, captured
+/// from current bytes. Its context names exactly that, so the Work it identifies is
+/// unchanged by candidates that were not selected: those stay bound to their judged cards.
 pub(super) fn task_with_selected(
     root: &Path,
     config: &Config,
     source: &Prepared,
     selected: &BTreeSet<String>,
+    source_observations: Option<&Value>,
     reviews: &mut lk_vault::ReviewInventory,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
@@ -669,9 +715,61 @@ pub(super) fn task_with_selected(
             .into_diagnostic()?;
     let mut captured = Capture::resume(root, &prepared);
     capture_reviews(&mut captured, &mut prepared.context, &reviews)?;
+    let purpose = prepared.context["purpose"]
+        .as_object_mut()
+        .ok_or_else(|| miette::miette!("extraction context has no purpose"))?;
+    purpose.remove("discovery");
+    purpose.insert(
+        "extraction_scope".into(),
+        json!({"policy":super::selection::POLICY, "selected":selected}),
+    );
+    if let Some(observations) = source_observations {
+        purpose.insert("source_observations".into(), observations.clone());
+    }
     let mut prepared = captured.finish(prepared.subject, prepared.context, config);
     prepared.selected_owners = Some(selected.clone());
     Ok(prepared)
+}
+
+/// Rebuild screened evidence from what its Work context names, without consulting the
+/// candidate roster.
+fn screened_evidence_controlled(
+    root: &Path,
+    config: &Config,
+    config_revision: &str,
+    task_id: &str,
+    context: &Value,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<Prepared> {
+    let selected: BTreeSet<String> =
+        serde_json::from_value(context["purpose"]["extraction_scope"]["selected"].clone())
+            .into_diagnostic()?;
+    let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
+        .into_diagnostic()?;
+    let mut source = extraction_source_controlled(root, config, task_id, &mut reviews, read)?;
+    let observations = if context["purpose"]["source_observations"].is_null() {
+        None
+    } else {
+        let Some((observation, guards)) =
+            super::completed_source_observation(root, config, config_revision, &source)?
+        else {
+            return Err(super::publication_rejection(
+                super::RejectionKind::SemanticContextChanged,
+                "source observations are no longer complete; replan and reread changed evidence",
+            ));
+        };
+        source.pages.extend(guards);
+        Some(observation)
+    };
+    task_with_selected(
+        root,
+        config,
+        &source,
+        &selected,
+        observations.as_ref(),
+        &mut reviews,
+        read,
+    )
 }
 
 pub(super) fn with_discovery_controlled(
@@ -1057,23 +1155,8 @@ pub(super) fn refresh_controlled(
         Subject::Queue { task_id, .. } => {
             if context["purpose"]["extraction_scope"]["policy"] == "source-proposals-v1" {
                 source_task_controlled(root, config, task_id, read)?
-            } else if context["purpose"]["extraction_scope"]["policy"] == super::selection::POLICY {
-                let queries: Vec<lk_core::discovery::DiscoveryQuery> =
-                    serde_json::from_value(context["purpose"]["discovery"]["queries"].clone())
-                        .into_diagnostic()?;
-                let selection: lk_queue::ExtractionSelection = serde_json::from_value(
-                    context["purpose"]["extraction_scope"]["selection"].clone(),
-                )
-                .into_diagnostic()?;
-                super::selected_task_controlled(
-                    root,
-                    config,
-                    config_revision,
-                    task_id,
-                    &queries,
-                    &selection,
-                    read,
-                )?
+            } else if is_screened(context) {
+                screened_evidence_controlled(root, config, config_revision, task_id, context, read)?
             } else if context["purpose"]["extraction_scope"]
                 .get("selection")
                 .is_some()
@@ -1262,6 +1345,7 @@ mod tests {
                 &config,
                 &source_task(&root, &config, &task.task_id)?,
                 &owners.iter().map(|owner| (*owner).to_owned()).collect(),
+                None,
                 &mut reviews,
                 &read,
             )
@@ -1326,6 +1410,24 @@ mod tests {
         ));
 
         let revision = admitted.revision("config").unwrap();
+        assert!(admitted.context["purpose"].get("discovery").is_none());
+        assert_eq!(
+            admitted.context["purpose"]["extraction_scope"],
+            json!({"policy":"independent-screening-v1","selected":[selected]}),
+            "the context names what the Work reads, not the roster it was admitted from"
+        );
+        let refresh = || {
+            refresh_controlled(
+                &root,
+                &config,
+                "config",
+                &admitted.context,
+                &lk_vault::ReadControl::default(),
+            )
+        };
+        let refreshed = refresh().unwrap();
+        assert_same_prepared(&admitted, &refreshed);
+        assert!(refreshed.roster.is_none());
         for path in [excluded, &review_paths[2], &evidence_paths[2]] {
             let raw = std::fs::read_to_string(root.join(path)).unwrap();
             write(&root, path, &format!("{raw}\nExternally edited.\n"));
@@ -1334,6 +1436,13 @@ mod tests {
                 revision
             );
         }
+        write(&root, "wiki/documents/new.md", excluded_raw);
+        assert_eq!(
+            refresh().unwrap().revision("config").unwrap(),
+            revision,
+            "unread candidates leave the Work's identity unchanged"
+        );
+        std::fs::remove_file(root.join("wiki/documents/new.md")).unwrap();
         for path in [selected, &review_paths[1], &evidence_paths[1]] {
             let raw = std::fs::read_to_string(root.join(path)).unwrap();
             write(&root, path, &format!("{raw}\nExternally edited.\n"));
@@ -1341,8 +1450,30 @@ mod tests {
                 admit(&[selected]).unwrap().revision("config").unwrap(),
                 revision
             );
+            assert_ne!(
+                refresh()
+                    .ok()
+                    .map(|current| current.revision("config").unwrap()),
+                Some(revision.clone())
+            );
             write(&root, path, &raw);
         }
+        let mut retired = admitted.context.clone();
+        retired["purpose"]["extraction_scope"] =
+            json!({"policy":"progressive-evidence-v1","selection":{}});
+        assert!(
+            refresh_controlled(
+                &root,
+                &config,
+                "config",
+                &retired,
+                &lk_vault::ReadControl::default(),
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("retired packet selection")
+        );
         assert_eq!(
             admit(&[selected]).unwrap().revision("config").unwrap(),
             revision
@@ -1427,7 +1558,7 @@ mod tests {
             context: json!({"purpose":{"review_dependencies":[review]}}),
             resources: Vec::new(),
             pages: BTreeMap::new(),
-            roster_seal: None,
+            roster: None,
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
                 path: review.into(),
                 file_revision: None,

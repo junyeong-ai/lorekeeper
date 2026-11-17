@@ -267,9 +267,7 @@ fn plan_record(
         return Err(miette::miette!("discovery recovery target changed"));
     }
     plan.require_unchanged(target_path, target);
-    let old_queries: Vec<DiscoveryQuery> =
-        serde_json::from_value(binding.prepared.context["purpose"]["discovery"]["queries"].clone())
-            .into_diagnostic()?;
+    let old_queries = binding.prepared.result_binding()?.discovery;
     let recipe_path = super::path(&task.task_id);
     let recipe_before = super::super::state::read_optional(root, &recipe_path)?;
     let current_queries = if let Some(raw) = &recipe_before {

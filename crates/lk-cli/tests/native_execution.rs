@@ -3426,7 +3426,8 @@ if result_role:
     output={'results':[]}
     for selected in prepared['tasks']:
         task=selected['task']
-        if not selected['context']['purpose']['discovery']['queries']:
+        if 'discovery' not in selected:
+            assert selected['context']['purpose']['discovery']['queries']==[]
             rows=cli('queue','status','--json')['data']['tasks']
             row=next(row for row in rows if row['task_id']==task['task_id'])
             file=root/'progressive-discovery.json'
@@ -3441,8 +3442,10 @@ if result_role:
         assert 'wiki/documents/candidate-000.md' in addresses
         assert all('candidate-' not in address or address.endswith('/candidate-000.md') for address in addresses)
         output['results'].append({'status':'complete','value':{'concepts':[]},'reason':None})
-        log({'action':'final','task_id':task['task_id'],'resources':addresses,
-             'selection':selected['context']['purpose']['extraction_scope']['selection']})
+        purpose=selected['context']['purpose']
+        assert 'discovery' not in purpose
+        assert purpose['extraction_scope']=={'policy':'independent-screening-v1','selected':['wiki/documents/candidate-000.md']}
+        log({'action':'final','task_id':task['task_id'],'resources':addresses,'discovery':selected['discovery']})
     if '--output-last-message' in sys.argv:
         Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text(json.dumps(output))
     else: print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':output}))
@@ -3512,13 +3515,14 @@ for task_id in ids:
     assert 'transactional outbox' in (root/'vault/wiki/documents/candidate-000.md').read_text()
     subject=context['subject']
     result={key:subject[key] for key in ['task_id','cache_hash','target_revision']}
+    assert 'discovery' not in context['context']['purpose']
     result.update(context_revision=context['context_revision'],selection=context['selection'],
-        discovery=context['context']['purpose']['discovery']['queries'],
+        discovery=[row['query'] for row in context['discovery']],
         concept_policy=task['input']['concept_policy'],target=task['target'],date=task['input']['date'],concepts=[])
     directory=root/'vault/.lorekeeper/queue/results'
     directory.mkdir(exist_ok=True)
     (directory/(task_id+'.json')).write_text(json.dumps(result))
-    log({'action':'final','task_id':task_id,'resources':addresses,'selection':context['selection']})
+    log({'action':'final','task_id':task_id,'resources':addresses,'discovery':context['discovery']})
 PROGRESSIVE
 "#;
 
@@ -4174,7 +4178,14 @@ fn progressive_native_screening_decides_the_whole_roster_and_reads_only_admitted
         );
         let finalizer = calls.iter().find(|call| call["action"] == "final").unwrap();
         assert_eq!(finalizer["resources"].as_array().unwrap().len(), 2);
-        assert_eq!(finalizer["selection"]["policy"], "independent-screening-v1");
+        assert_eq!(
+            finalizer["discovery"],
+            serde_json::json!([{
+                "query":{"query":"transactional outbox","phrase":true,"spacing":false},
+                "matched_candidates":120,"rostered_candidates":120,
+            }]),
+            "the finalizer is told what each recipe reached, outside the Work it read"
+        );
         let source =
             std::fs::read_to_string(fixture.root().join("vault/wiki/documents/source.md")).unwrap();
         assert!(source.contains("concepts_done:"));
@@ -4382,6 +4393,22 @@ fn progressive_cli_reassesses_deferred_cards_and_publication_guards_only_selecte
     assert_eq!(context["status"], "ready");
     assert_eq!(context["resource_count"], 2);
     assert_eq!(context["selection"], sealed["selection"]);
+    assert_eq!(
+        context["discovery"],
+        serde_json::json!([{
+            "query":{"query":"transactional outbox","phrase":true,"spacing":false},
+            "matched_candidates":6,"rostered_candidates":6,
+        }])
+    );
+    assert_eq!(
+        context["context"]["purpose"]["extraction_scope"],
+        serde_json::json!({
+            "policy":"independent-screening-v1",
+            "selected":["wiki/documents/candidate-000.md"],
+        }),
+        "the Work context names what it reads, not the roster that admitted it"
+    );
+    assert!(context["context"]["purpose"].get("discovery").is_none());
     let result = serde_json::json!({
         "task_id":task.task_id,"cache_hash":task.cache_hash,
         "target_revision":context["subject"]["target_revision"],
@@ -4455,14 +4482,6 @@ fn progressive_cli_reassesses_deferred_cards_and_publication_guards_only_selecte
 fn progressive_large_source_observations_feed_guarded_admitted_work_before_publication() {
     let behavior = build_extraction_behavior(
         "    if match is None:\n        raise SystemExit('unexpected ordinary worker in bounded progressive fixture')",
-    )
-    .replace(
-        "    context=request['context']['purpose']",
-        "    context=request['context']['purpose']\n    assert context['extraction_scope']['policy']=='independent-screening-v1'\n    assert context['source_observations']['work_id']==(root/'source-work-id').read_text()",
-    )
-    .replace(
-        "    result.update(context_revision=cli('work','status',work_id)['context_revision'],",
-        "    result.update(selection=context['extraction_scope']['selection'],context_revision=cli('work','status',work_id)['context_revision'],",
     );
     let (fixture, original) = progressive_extraction_fixture("codex", &behavior, 2, 65536, 1024);
     let config = std::fs::read_to_string(&fixture.config)
@@ -4522,7 +4541,6 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
     let source_directory = root.join(".lorekeeper/work").join(source_id);
     let consumption = source_directory.join("consumption.json");
     assert!(!consumption.exists());
-    std::fs::write(fixture.root().join("source-work-id"), source_id).unwrap();
     let explicit_source = execution_json(
         &fixture,
         &["work", "source-plan", "--task-id", &task.task_id],
@@ -7264,7 +7282,7 @@ EVIDENCE
 }
 
 #[test]
-fn native_evidence_wave_shares_fresh_discovery_for_distinct_work_on_both_hosts() {
+fn native_evidence_wave_reads_distinct_work_without_a_candidate_roster_on_both_hosts() {
     for engine in ["codex", "claude-code"] {
         let fixture = evidence_wave_fixture(engine, "good");
         let (_, report) = fixture.run("process");
@@ -7278,10 +7296,10 @@ fn native_evidence_wave_shares_fresh_discovery_for_distinct_work_on_both_hosts()
             "{report}"
         );
         assert_ne!(steps[0]["work_id"], steps[1]["work_id"]);
-        assert_eq!(report["evidence_preparation_io"]["captures"], 1, "{report}");
-        assert_eq!(
-            report["evidence_revalidation_io"]["captures"], 1,
-            "{report}"
+        assert!(
+            report.get("evidence_preparation_io").is_none()
+                && report.get("evidence_revalidation_io").is_none(),
+            "evidence Work reads its own resources; no candidate roster is captured: {report}"
         );
         assert_eq!(screening_packets(&fixture), 2);
         for step in steps {
@@ -7297,15 +7315,17 @@ fn native_evidence_wave_shares_fresh_discovery_for_distinct_work_on_both_hosts()
 
 #[test]
 fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies() {
-    for (mode, siblings) in [
-        ("good", true),
-        ("failed", false),
-        ("malformed", false),
-        ("capacity", false),
-        ("action", false),
-        ("changed", false),
-        ("added", false),
-        ("unreadable", false),
+    // An unread candidate added mid-wave changes no evidence Work; a changed or unreadable
+    // assigned resource changes both.
+    for (mode, siblings, expected, halted) in [
+        ("good", true, 2, false),
+        ("failed", false, 1, false),
+        ("malformed", false, 1, false),
+        ("capacity", false, 1, false),
+        ("action", false, 1, false),
+        ("changed", false, 0, true),
+        ("added", false, 2, false),
+        ("unreadable", false, 0, true),
     ] {
         let fixture = evidence_wave_fixture("codex", mode);
         if siblings {
@@ -7321,19 +7341,8 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
             .iter()
             .filter(|step| step["outcome"] == "recorded")
             .count();
-        let expected = if siblings {
-            2
-        } else if matches!(mode, "changed" | "added" | "unreadable") {
-            0
-        } else {
-            1
-        };
         assert_eq!(recorded, expected, "{mode}: {report}");
-        assert_eq!(
-            report["halted"],
-            matches!(mode, "changed" | "added" | "unreadable"),
-            "{mode}: {report}"
-        );
+        assert_eq!(report["halted"], halted, "{mode}: {report}");
         if mode == "unreadable" {
             assert!(
                 steps
@@ -7666,10 +7675,9 @@ MIXED
                 },
                 "{report}"
             );
-            assert_eq!(
-                report["evidence_revalidation_io"]["captures"],
-                u64::from(progressive),
-                "screened evidence Work shares one fresh capture: {report}"
+            assert!(
+                report.get("evidence_revalidation_io").is_none(),
+                "recording evidence captures no candidate roster: {report}"
             );
             assert_eq!(
                 screening_settlement(&fixture)["data"]["pending_mutation"],

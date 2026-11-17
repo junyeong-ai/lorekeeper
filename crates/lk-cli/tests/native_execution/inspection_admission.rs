@@ -60,7 +60,6 @@ fn partitioned_action_admission_preserves_paid_scope_without_replanning_on_both_
         assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
         assert_eq!(repeated["halted"], false);
         assert_eq!(repeated["queue_planning"]["attempts"], 1, "{repeated}");
-        assert_eq!(repeated["evidence_preparation_io"]["captures"], 0);
         assert_eq!(before, work_files(&fixture));
         assert_eq!(screening_packets(&fixture), 2);
     }
@@ -160,7 +159,6 @@ fn source_action_admission_keeps_manual_access_and_independent_publication() {
     assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
     assert_eq!(repeated["halted"], false);
     assert_eq!(repeated["queue_planning"]["attempts"], 1, "{repeated}");
-    assert_eq!(repeated["evidence_preparation_io"]["captures"], 0);
     assert_eq!(before, work_files(&fixture));
     let manual = execution_json(
         &fixture,

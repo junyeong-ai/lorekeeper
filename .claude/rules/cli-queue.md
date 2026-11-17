@@ -59,12 +59,13 @@ paths:
   through exit and cleanup. Carry prepared screening requests only within their local
   pre-host queue checkpoint; any host call or writer wait invalidates their reuse.
   Screening replies record against candidate keys without another capture. For evidence
-  replies, capture the complete current recipe/review universe after hosts return,
-  sharing discovery across extraction Work and loading each Work once per checkpoint.
+  replies, reload what each Work reads after hosts return, its resources and scoped
+  reviews, loading each Work once per checkpoint; screened extraction evidence consults
+  no candidate roster.
   Reevaluate current node dependencies for every serial record; preserve each mutation's
   durable checkpoint and exact page/ledger guards. Never retain a capture across a host.
   Preserve an independent valid response when a peer fails. Never reuse pre-host
-  captures for recording. Shared capture timings belong to the first recorded step, not
+  captures for recording. Shared reload timings belong to the first recorded step, not
   every peer.
 - Verify target owners before batching. Defer concept synthesis while its cited origin
   pages have unfinished inputs or publishable pending work; unrelated context is not a

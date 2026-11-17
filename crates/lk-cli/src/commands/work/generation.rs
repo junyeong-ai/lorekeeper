@@ -73,7 +73,7 @@ pub(in crate::commands) fn replies(value: Value, count: usize) -> miette::Result
 pub(super) fn assemble(
     task: &QueueTask,
     subject: &Subject,
-    context: &Value,
+    binding: &super::resources::ResultBinding,
     context_revision: &str,
     owners: &Owners,
     reply: Value,
@@ -171,14 +171,8 @@ pub(super) fn assemble(
                 cache_hash: cache_hash.clone(),
                 target_revision: target_revision.clone(),
                 context_revision: context_revision.into(),
-                discovery: serde_json::from_value(
-                    context["purpose"]["discovery"]["queries"].clone(),
-                )
-                .into_diagnostic()?,
-                selection: context["purpose"]["extraction_scope"]
-                    .get("selection")
-                    .map(|value| serde_json::from_value(value.clone()).into_diagnostic())
-                    .transpose()?,
+                discovery: binding.discovery.clone(),
+                selection: binding.selection.clone(),
                 target: task.target.clone(),
                 date: serde_json::from_value(task.input["date"].clone()).into_diagnostic()?,
                 concepts,
@@ -239,7 +233,7 @@ pub(super) fn assemble_prepared(
     assemble(
         task,
         &prepared.subject,
-        &prepared.context,
+        &prepared.result_binding()?,
         revision,
         &Owners::build(config, prepared)?,
         reply,
@@ -268,7 +262,7 @@ impl miette::Diagnostic for ResultCapacity {}
 pub(super) fn response_limit(
     task: &QueueTask,
     subject: &Subject,
-    context: &Value,
+    binding: &super::resources::ResultBinding,
     revision: &str,
     owners: &Owners,
     limit: usize,
@@ -277,7 +271,7 @@ pub(super) fn response_limit(
     let Outcome::Complete(result) = assemble(
         task,
         subject,
-        context,
+        binding,
         revision,
         owners,
         reply.clone(),
@@ -308,6 +302,9 @@ pub(super) fn response_limit(
         Ok(limit - metadata)
     }
 }
+
+/// Appended to a finalizer's instructions when its request discloses a candidate roster.
+pub(super) const ROSTER_INSTRUCTION: &str = "discovery lists each recorded query with the pages it matched and how many of them the ranked candidate roster carried. Pages beyond that roster were never examined: neither the roster nor the owners list is the complete related knowledge, and needs-discovery remains the way to widen the search.";
 
 pub(super) fn minimum_reply(task: &QueueTask) -> miette::Result<Value> {
     let value = match task.kind {
@@ -391,8 +388,22 @@ pub(in crate::commands) fn plan_prune(
     Ok(GENERATION.plan_prune(root, pending, plan)? + rejection::plan_prune(root, pending, plan)?)
 }
 
-/// The selected task's fresh inputs, or `None` when its discovery or captured scope changed
-/// after `input` was prepared; a changed scope never relabels an answer to the old input.
+/// The recipes a selected extraction input was prepared under: its disclosed roster
+/// coverage when screened, its context's own recipes otherwise.
+fn input_queries(input: &Value) -> miette::Result<Vec<lk_core::discovery::DiscoveryQuery>> {
+    match input.get("discovery").and_then(Value::as_array) {
+        Some(coverage) => coverage
+            .iter()
+            .map(|row| serde_json::from_value(row["query"].clone()).into_diagnostic())
+            .collect(),
+        None => serde_json::from_value(input["context"]["purpose"]["discovery"]["queries"].clone())
+            .into_diagnostic(),
+    }
+}
+
+/// The selected task's fresh inputs, or `None` when its discovery, candidate roster or captured
+/// scope changed after `input` was prepared; a changed scope never relabels an answer to the old
+/// input.
 fn current_selected(
     root: &Path,
     config: &lk_core::config::Config,
@@ -405,9 +416,7 @@ fn current_selected(
         .ok_or_else(|| miette::miette!("missing selected task"))?;
     let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
     if task.kind == TaskKind::ExtractConcepts {
-        let queries: Vec<lk_core::discovery::DiscoveryQuery> =
-            serde_json::from_value(input["context"]["purpose"]["discovery"]["queries"].clone())
-                .into_diagnostic()?;
+        let queries = input_queries(input)?;
         if super::discovery::current(root, &task)?.is_some_and(|current| current != queries) {
             return Ok(None);
         }
@@ -422,6 +431,11 @@ fn current_selected(
         Ok(prepared) => prepared,
         Err(error) if super::is_semantic_context_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
+    };
+    let prepared = match super::with_current_roster(root, config, config_revision, &prepared, read)?
+    {
+        super::RosterAdmission::Bound(bound) => (*bound).into_owned(),
+        super::RosterAdmission::Changed(_) => return Ok(None),
     };
     let work = super::expected(root, &prepared, config, config_revision)?;
     let owner =
@@ -551,7 +565,7 @@ pub(in crate::commands) fn finish_selected_controlled(
                 config_revision,
                 &task.task_id,
                 result.clone(),
-                prepared.roster_seal.as_ref(),
+                prepared.roster.as_ref().map(|roster| &roster.seal),
                 &mut guards,
                 prepared.read_control(),
             ) {
@@ -626,7 +640,10 @@ mod tests {
                 target: task.target.vault_path.clone(),
                 target_revision: "b".repeat(64),
             };
-            let context = json!({"purpose":{"discovery":{"queries":[]},"extraction_scope":{}}});
+            let binding = super::super::resources::ResultBinding {
+                discovery: Vec::new(),
+                selection: None,
+            };
             for (body, valid) in [
                 ("## Sibling\nBody.", false),
                 ("Parent\n======\nBody.", false),
@@ -649,7 +666,7 @@ mod tests {
                 let result = assemble(
                     &task,
                     &subject,
-                    &context,
+                    &binding,
                     &"c".repeat(64),
                     &Owners::default(),
                     reply.clone(),
@@ -669,7 +686,7 @@ mod tests {
                     assemble(
                         &task,
                         &subject,
-                        &context,
+                        &binding,
                         &"c".repeat(64),
                         &Owners::default(),
                         reply,
@@ -695,13 +712,20 @@ mod tests {
             target_revision: "b".repeat(64),
         };
         let selection = json!({"policy":"independent-screening-v1","inventory_revision":"c".repeat(64),"decisions_revision":"d".repeat(64)});
-        let context = json!({"purpose":{"discovery":{"queries":[{"query":"Protocol","phrase":true,"spacing":false}]},"extraction_scope":{"selection":selection}}});
+        let binding = super::super::resources::ResultBinding {
+            discovery: vec![lk_core::discovery::DiscoveryQuery {
+                query: "Protocol".into(),
+                phrase: true,
+                spacing: false,
+            }],
+            selection: Some(serde_json::from_value(selection.clone()).unwrap()),
+        };
         let revision = "e".repeat(64);
         let owners = Owners(vec![lk_queue::ConceptOwner {
             path: "wiki/concepts/protocol.md".into(),
             revision: "f".repeat(64),
         }]);
-        let limit = response_limit(&task, &subject, &context, &revision, &owners, 4096).unwrap();
+        let limit = response_limit(&task, &subject, &binding, &revision, &owners, 4096).unwrap();
         assert!(limit < 4096);
         let mut reply = json!({"status":"complete","reason":null,"value":{"concepts":[{
             "name":"Protocol — 좁은 범위", "aliases":[],"category":null,"admission":{"decision":"reuse","owner_ref":"o0"},
@@ -713,7 +737,7 @@ mod tests {
         let Outcome::Complete(result) = assemble(
             &task,
             &subject,
-            &context,
+            &binding,
             &revision,
             &owners,
             reply.clone(),
@@ -723,6 +747,7 @@ mod tests {
             panic!("complete")
         };
         assert_eq!(result["selection"], selection);
+        assert_eq!(result["discovery"][0]["query"], "Protocol");
         assert_eq!(
             result["concepts"][0]["rss_evidence"],
             reply["value"]["concepts"][0]["rss_evidence"]
@@ -733,7 +758,7 @@ mod tests {
         );
         assert!(serde_json::to_vec(&result).unwrap().len() <= 4096);
         reply["value"]["task_id"] = json!("forged");
-        assert!(assemble(&task, &subject, &context, &revision, &owners, reply, 4096).is_err());
-        assert!(response_limit(&task, &subject, &context, &revision, &owners, 10).is_err());
+        assert!(assemble(&task, &subject, &binding, &revision, &owners, reply, 4096).is_err());
+        assert!(response_limit(&task, &subject, &binding, &revision, &owners, 10).is_err());
     }
 }

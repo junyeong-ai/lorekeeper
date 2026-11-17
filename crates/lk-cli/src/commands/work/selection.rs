@@ -634,14 +634,39 @@ pub(super) struct SelectionProgress {
     pub examination_scope: &'static str,
 }
 
-/// `matched_candidates` counts every page the query reached; the roster carries
-/// `rostered_candidates` of them, `exclusive_candidates` through this query alone.
-#[derive(Debug, Serialize)]
-pub(super) struct QueryCost {
+/// How far one discovery query reached: every page it matched and how many of them the
+/// ranked roster carries. The rest were never examined.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct QueryCoverage {
     pub query: DiscoveryQuery,
     pub matched_candidates: usize,
     pub rostered_candidates: usize,
+}
+
+/// A query's coverage and the candidates rostered through this query alone.
+#[derive(Debug, Serialize)]
+pub(super) struct QueryCost {
+    #[serde(flatten)]
+    pub coverage: QueryCoverage,
     pub exclusive_candidates: usize,
+}
+
+/// What Rust supplies beside screened evidence: what each recipe reached and the sealed
+/// roster the result will name. None of it is evidence, so none of it identifies a Work.
+#[derive(Clone)]
+pub(super) struct RosterBinding {
+    pub coverage: Vec<QueryCoverage>,
+    pub selection: lk_queue::ExtractionSelection,
+    pub seal: RosterSeal,
+}
+
+impl RosterBinding {
+    pub fn queries(&self) -> Vec<DiscoveryQuery> {
+        self.coverage
+            .iter()
+            .map(|coverage| coverage.query.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1018,10 +1043,37 @@ impl Selection {
         }
     }
 
-    pub fn cost(&self, capture: &lk_vault::DiscoveryCapture) -> miette::Result<ScreeningCost> {
-        if capture.queries != self.queries {
-            return Err(fail("screening cost requires this selection's capture"));
+    /// Per query, what the capture this roster was built from matched and rostered.
+    fn coverage(&self, capture: &lk_vault::DiscoveryCapture) -> miette::Result<Vec<QueryCoverage>> {
+        if capture.queries != self.queries || capture.coverage.len() != self.queries.len() {
+            return Err(fail("query coverage requires this roster's capture"));
         }
+        Ok(self
+            .queries
+            .iter()
+            .zip(&capture.coverage)
+            .map(|(query, coverage)| QueryCoverage {
+                query: query.clone(),
+                matched_candidates: coverage.matched,
+                rostered_candidates: coverage.rostered,
+            })
+            .collect())
+    }
+
+    /// The proof a result drafted against this completely decided roster carries.
+    pub fn roster_binding(
+        &self,
+        capture: &lk_vault::DiscoveryCapture,
+    ) -> miette::Result<RosterBinding> {
+        Ok(RosterBinding {
+            coverage: self.coverage(capture)?,
+            selection: self.binding()?,
+            seal: self.seal()?,
+        })
+    }
+
+    pub fn cost(&self, capture: &lk_vault::DiscoveryCapture) -> miette::Result<ScreeningCost> {
+        let coverage = self.coverage(capture)?;
         let progress = self.progress();
         let (remaining_packets, remaining_request_json_bytes) = self.remaining()?;
         Ok(ScreeningCost {
@@ -1040,19 +1092,17 @@ impl Selection {
             )?
             .len(),
             remaining_request_json_bytes,
-            queries: self
-                .queries
-                .iter()
-                .zip(&capture.coverage)
-                .map(|(query, coverage)| QueryCost {
-                    query: query.clone(),
-                    matched_candidates: coverage.matched,
-                    rostered_candidates: coverage.rostered,
+            queries: coverage
+                .into_iter()
+                .map(|coverage| QueryCost {
                     exclusive_candidates: self
                         .members
                         .iter()
-                        .filter(|member| member.row.queries.as_slice() == [query.clone()])
+                        .filter(|member| {
+                            member.row.queries.as_slice() == std::slice::from_ref(&coverage.query)
+                        })
                         .count(),
+                    coverage,
                 })
                 .collect(),
         })
@@ -1232,7 +1282,6 @@ impl RosterSeal {
 /// What a sealed roster establishes about the result drafted against it.
 pub(super) struct SealedRoster {
     pub selected: BTreeSet<String>,
-    pub candidates: usize,
     pub queries: Vec<DiscoveryQuery>,
     pub source_revision: String,
     guards: Vec<(PathBuf, Option<String>)>,
@@ -1481,7 +1530,6 @@ pub(super) fn load_sealed(
     }
     Ok(SealedRoster {
         selected,
-        candidates: roster.rows.len(),
         queries: roster.queries,
         source_revision: roster.source_revision,
         guards,

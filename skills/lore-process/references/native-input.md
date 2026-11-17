@@ -30,6 +30,12 @@ Rust supplies its canonical path and file revision. Never copy or reconstruct th
 guards into a native reply. An empty roster permits no reuse. References have meaning
 only within the exact supplied task or Work.
 
+A progressive extraction task or completed Work also supplies `discovery`: each
+recorded query with its `matched_candidates` and `rostered_candidates`. Screening
+examined only the rostered pages. Where a query matched more pages than it rostered,
+the rest were never examined, so neither `owners` nor the roster is the complete
+related knowledge; `needs-discovery` with narrower queries reaches them.
+
 An unknown reference holds only that task’s exact input without another automatic call.
 So does a selected result that publication guards refuse while its captured input is still
 current. A changed input instead discards the answer and prepares one fresh request.

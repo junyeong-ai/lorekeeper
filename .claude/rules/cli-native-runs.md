@@ -144,14 +144,18 @@ paths:
   semantic identity; automation duration and call budgets are not cancellation flags.
 - Mixed queue read waves record screening and evidence replies inside one post-host
   mutation session. Screening decisions bind candidate keys and record without reading
-  candidate pages; screened evidence Work shares one fresh discovery/review capture.
-  Evaluate ledgers and Work state after owned writes. Revalidate the configuration and
-  physical root before each role records; drift refuses remaining replies. Any screening
-  recording error releases that session before reacquiring/recovering and freshly
-  recording remaining paid evidence peers. Charge shared discovery I/O and duration once.
+  candidate pages; evidence Work reloads only the resources and reviews it reads and
+  consults no candidate roster. Evaluate ledgers and Work state after owned writes.
+  Revalidate the configuration and physical root before each role records; drift
+  refuses remaining replies. Any screening recording error releases that session before
+  reacquiring/recovering and freshly recording remaining paid evidence peers. Charge
+  the shared reload duration once.
 - Finalization shares one fresh capture for status and preparation in the same local
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.
+  Screened extraction binds its current candidate roster in that checkpoint and again
+  after the host returns: a changed roster replans before the call and is a typed
+  `semantic-context-changed` refusal after it.
 - Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.

@@ -69,7 +69,7 @@ status rather than assuming that a context revision or resource roster is ready:
 | `needs-source-observations` | Run `work source-plan --task-id ID`; complete its bounded reads and reductions, then return to `work context`. |
 | `needs-admission` | Read `work cost --task-id ID`; explicitly reconsider the discovery scope or capacity. Keep the task incomplete and all candidates/paid decisions retained. |
 | `needs-screening` | Run `work select --task-id ID`; record a decision for every card of each returned packet until it reports `ready`. A fully decided roster becomes ready once `work select` has sealed it. |
-| `ready` | Retain `context_revision`, `selection` and the exact resource roster; read that evidence before drafting. |
+| `ready` | Retain `context_revision`, `selection`, `discovery` and the exact resource roster; read that evidence before drafting. |
 
 The source phase uses the normal `work status`, `work read`, `work record` and
 `work result` protocol. It observes the complete retained input, including required
@@ -163,10 +163,16 @@ protocol. Native selected workers retain that verified handoff, finish other sel
 tasks and return; the controller schedules remaining source/screening/evidence units.
 Do not replace native resumption with a forced manual whole-queue drain.
 
-The final extraction carries the exact ready `context_revision`, `discovery` recipes
-and returned typed `selection`, which names the sealed roster and its decisions.
-Coverage distinguishes card screening from selected full-body inspection; it never
-certifies unselected knowledge or semantic truth.
+Ready `discovery` lists each recipe with its `matched_candidates` and
+`rostered_candidates`. A recipe that matched more pages than it rostered left the rest
+unexamined: narrow it or say so, never report those pages as absent or judged.
+
+The final extraction carries the exact ready `context_revision`, the `discovery`
+recipes (each ready `discovery[].query`) and the returned typed `selection`, which
+names the sealed roster and its decisions. The context revision covers only what was
+read: the source, the selected bodies and their scoped reviews. Coverage distinguishes
+card screening from selected full-body inspection; it never certifies unselected
+knowledge or semantic truth.
 
 `full-context` explicitly retains the complete retained-input plus every retrieved
 candidate-body contract. It can be selected globally or through a profile's `work`

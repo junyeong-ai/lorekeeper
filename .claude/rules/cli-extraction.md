@@ -15,8 +15,9 @@ paths:
 - Each discovery query contributes its identity matches and at most
   `execution.work.max_query_candidates` other pages in search order; the task's target
   is never its own candidate. That ranked roster is the inventory progressive extraction
-  screens. Ranks never enter cards, revisions or keys. `work cost` discloses per query how many
-  pages matched and how many are rostered; unrostered matches are unexamined, not judged.
+  screens. Ranks never enter cards, revisions or keys. `work cost`, ready `work context`
+  and every extraction finalizer request disclose per query how many pages matched and
+  how many are rostered; unrostered matches are unexamined, not judged.
   `full-context` extraction keeps the complete match set.
 - Progressive extraction separates complete source observations, candidate-card screening
   and admitted full-body evidence. A screening decision belongs to one candidate. Its
@@ -39,6 +40,15 @@ paths:
   --reassess` issues those rows with their `previous` reference; fresh validated state
   must not become a missing-request failure or repeat paid screening. Continue undecided
   rows even when earlier cards defer.
+- Extraction evidence Work binds only what it reads: the source, the selected owners,
+  their scoped reviews and an observed source's observations. Its context states
+  `extraction_scope.policy` and `selected`; recipes, the roster and unread candidates
+  stay outside it. Candidate churn that leaves the selected set unchanged neither
+  refuses recorded inspections nor replans the Work, and reading that evidence captures
+  no discovery. Rust binds the current completely decided roster where a result is
+  assembled, before a finalizer call and again after it, and writes the result's
+  `discovery` and `selection` itself. A roster that is undecided or admits other
+  evidence at either point is changed scope, never a retagged result.
 - A result binds one sealed roster: the exact rows of a completely decided roster.
   `work select` seals it before a manual session reads evidence and result completion
   seals it with the result; `work context` is ready only for a sealed current roster.

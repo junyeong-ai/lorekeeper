@@ -330,12 +330,13 @@ in-process admission. With `execution.work.max_parallel` above its default 1, re
 evidence requests and distinct-target screening can run concurrently within the
 remaining call budget. Compatible screening and evidence requests share a contiguous
 fair prefix; discovery and finalizers remain serial boundaries. Requests in a
-wave never depend on another request in that wave. Preparation and recording use
-separate fresh captures, sharing extraction discovery and loading each Work once
-within their own checkpoint. Each node record reevaluates current dependencies and
-retains its own durable journal transition. Recording checks each exact scope.
-Changed evidence
-refuses an old response. Discovery, finalization and canonical publication remain serial.
+wave never depend on another request in that wave. Preparation and recording each
+reload what a Work reads, loading each Work once within their own checkpoint.
+Progressive extraction evidence reads only its source and selected owners, so an
+unread candidate that changes or appears meanwhile refuses no reply. Each node record
+reevaluates current dependencies and retains its own durable journal transition.
+Recording checks each exact scope. Changed evidence refuses an old response.
+Discovery, finalization and canonical publication remain serial.
 Whole-input queue tasks are batched
 within the evidence input budget with at most one task per target; publication
 refreshes selection before another task on that page. The call budget can leave
@@ -542,6 +543,9 @@ unselected bodies as inspected or discard source-phase questions during finaliza
 ## Changed inputs
 
 Changed semantic configuration, targets, evidence or review dependencies invalidate work.
+For progressive extraction, evidence is the source and the selected bodies: a candidate
+that was not selected can change, appear or disappear without invalidating the Work,
+and is screened again before the next result is sealed.
 New Work uses parsed configuration values, so comments and
 YAML formatting do not participate. It excludes `execution.automation`, `max_calls`,
 `max_parallel`, `max_consecutive_calls`, `max_screening_batches` and profile `timeout_seconds` from configuration identity.
@@ -705,9 +709,9 @@ Shared captures are discarded before host execution. Screening replies record ag
 the cards that were judged without another capture; evidence recording recaptures
 current inputs, including scoped reviews.
 
-`queue_planning.discovery_io`, `evidence_preparation_io`, `evidence_revalidation_io`
-and `screening_preparation_io` count existing reads in successful complete discovery
-captures. They separate concept `vocabulary`, full `knowledge` traversal and
+`queue_planning.discovery_io` and `screening_preparation_io` count existing reads in
+successful complete discovery captures. Evidence reads capture no discovery and report
+none. The counters separate concept `vocabulary`, full `knowledge` traversal and
 `matched_rereads`: `files`, logical `bytes`, enumeration/address/read/parse durations
 and maximum individual read duration, all in microseconds. Read time includes
 opening and decoding; it does not identify an OS latency cause. Vocabulary bytes

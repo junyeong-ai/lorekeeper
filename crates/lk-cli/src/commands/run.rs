@@ -217,9 +217,7 @@ mod native {
         work_steps_omitted: usize,
         finalization_admissions: Vec<crate::commands::work::native::FinalizationAdmission>,
         finalization_admissions_omitted: usize,
-        evidence_preparation_io: lk_vault::DiscoveryCaptureMetrics,
         evidence_preparation_duration_ms: u64,
-        evidence_revalidation_io: lk_vault::DiscoveryCaptureMetrics,
         evidence_revalidation_duration_ms: u64,
         evidence_record_duration_ms: u64,
         screening_preparation_io: lk_vault::DiscoveryCaptureMetrics,
@@ -1762,10 +1760,6 @@ mod native {
                         .iter()
                         .map(|record| record.duration_ms)
                         .sum::<u64>();
-                    self.result
-                        .work_telemetry
-                        .evidence_revalidation_io
-                        .accumulate(recorded.discovery_io);
                     self.result.work_telemetry.evidence_revalidation_duration_ms +=
                         recorded.revalidation_duration_ms;
                     self.result.work_telemetry.evidence_record_duration_ms += record_ms;
@@ -2166,10 +2160,6 @@ mod native {
                 Err(error) if is_semantic_context_changed(&error) => return None,
                 Err(error) => return Some(self.failure("bounded work progress", error)),
             };
-            self.result
-                .work_telemetry
-                .evidence_preparation_io
-                .accumulate(captured.discovery_io);
             self.result.work_telemetry.evidence_preparation_duration_ms += captured.duration_ms;
             let mut preparation_duration_ms = Some(captured.duration_ms);
             for ((id, _), result) in demands.into_iter().zip(captured.turns) {
@@ -3837,10 +3827,6 @@ mod native {
                     Ok(captured) => captured,
                     Err(error) => return self.failure("bounded work progress", error),
                 };
-                self.result
-                    .work_telemetry
-                    .evidence_preparation_io
-                    .accumulate(captured.discovery_io);
                 self.result.work_telemetry.evidence_preparation_duration_ms += captured.duration_ms;
                 preparation_duration_ms = Some(captured.duration_ms);
                 for ((id, _), result) in demands.into_iter().zip(captured.turns) {
