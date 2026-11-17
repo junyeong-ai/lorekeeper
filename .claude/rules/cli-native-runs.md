@@ -157,9 +157,10 @@ paths:
   checkpoint. Preparation includes that capture; verification measures sealed-result
   checks separately. Never reuse this capture after a host call or writer wait.
   Screened extraction binds its current candidate roster in that checkpoint and again
-  after the host returns. A roster that is no longer completely decided, or that admits
-  different evidence, replans before the call and is a typed `semantic-context-changed`
-  refusal after it; other roster churn rebinds (cli-extraction.md).
+  after the host returns. A roster that cannot be formed (screening capacity, a blocked or
+  incomplete source), is not completely decided, or admits different evidence replans
+  before the call and is a typed `semantic-context-changed` refusal after it; other
+  roster churn rebinds (cli-extraction.md).
 - Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.

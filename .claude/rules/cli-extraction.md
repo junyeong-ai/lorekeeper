@@ -65,8 +65,10 @@ paths:
   refuses recorded inspections nor replans the Work, and reading that evidence captures
   no discovery. Rust binds the current completely decided roster where a result is
   assembled, before a finalizer call and again after it, and writes the result's
-  `discovery` and `selection` itself. A roster that is not completely decided or admits
-  other evidence at either point is changed scope, never a retagged result.
+  `discovery` and `selection` itself. A roster that cannot be formed (screening capacity,
+  a blocked or incomplete source), is not completely decided, or admits different
+  evidence at either point is changed scope, never a retagged result; other roster churn
+  rebinds.
 - A result binds one sealed roster: the exact rows of a completely decided roster.
   `work select` seals it before a manual session reads evidence and result completion
   seals it with the result; `work context` is ready only for a sealed current roster.

@@ -1592,12 +1592,14 @@ fn completed_source_observation(
 /// Evidence joined with the candidate roster a result drafted from it must name.
 enum RosterAdmission<'a> {
     Bound(Box<std::borrow::Cow<'a, Prepared>>),
-    /// The current roster is undecided somewhere or admits other evidence.
+    /// No current roster can be formed (screening capacity, a blocked or incomplete
+    /// source), it is not completely decided, or it admits different evidence.
     Changed(String),
 }
 
-/// Bind screened evidence to the current candidate roster: every row decided, none
-/// deferred, and exactly this evidence admitted. Other evidence needs no roster.
+/// Bind screened evidence to the current candidate roster: one can be formed (screening
+/// capacity, source Work and source observations allow it), every row is decided with
+/// none deferred, and exactly this evidence is admitted. Other evidence needs no roster.
 fn with_current_roster<'a>(
     root: &Path,
     config: &lk_core::config::Config,
@@ -1650,9 +1652,10 @@ fn with_current_roster<'a>(
     ))))
 }
 
-/// The same binding after a host returned: a roster that is no longer completely decided,
-/// or that admits other evidence, is a changed read scope, so the reply is not adopted.
-/// Other roster churn rebinds the reply to the current roster.
+/// The same binding after a host returned: a roster that cannot be formed (screening
+/// capacity, a blocked or incomplete source), is not completely decided, or admits
+/// different evidence is a changed read scope, so the reply is not adopted. Other roster
+/// churn rebinds the reply to the current roster.
 fn require_current_roster<'a>(
     root: &Path,
     config: &lk_core::config::Config,
