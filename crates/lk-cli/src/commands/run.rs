@@ -4621,17 +4621,18 @@ mod native {
                                 .map(|(_, input)| input.clone())
                                 .collect::<Vec<_>>();
                             inputs.push(input.clone());
-                            let request = crate::commands::work::native::selected_request(
-                                &self.config,
-                                &inputs,
-                            )?;
-                            if serde_json::to_vec(&request)
-                                .map_err(|error| miette::miette!("{error}"))?
-                                .len()
-                                > budget.max_input_bytes
-                                || crate::commands::work::native::selected_characters(&inputs)?
-                                    > lk_core::semantic::INSPECTION_CHARACTERS.get()
-                            {
+                            let split = match crate::commands::work::native::selected_request(
+                                &self.config, &inputs,
+                            ) {
+                                Ok(request) => serde_json::to_vec(&request)
+                                    .map_err(|error| miette::miette!("{error}"))?
+                                    .len() > budget.max_input_bytes
+                                    || crate::commands::work::native::selected_characters(&inputs)?
+                                        > lk_core::semantic::INSPECTION_CHARACTERS.get(),
+                                Err(error) if !batch.is_empty() && error.downcast_ref::<crate::commands::work::native::SelectedResponseCapacity>().is_some() => true,
+                                Err(error) => return Err(error),
+                            };
+                            if split {
                                 flush(&mut batch, &mut jobs);
                             }
                             batch.push((task, input));

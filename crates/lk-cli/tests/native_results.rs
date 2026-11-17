@@ -1473,6 +1473,88 @@ fn result_identity_capacity_defers_without_calls_and_preserves_independent_work(
 }
 
 #[test]
+fn selected_response_capacity_splits_before_calling_and_publishes_every_task() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(engine);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_input_bytes: 65536", "max_input_bytes: 262144")
+            .replace("max_result_bytes: 8192", "max_result_bytes: 1024")
+            .replace("max_calls: 6", "max_calls: 64");
+        std::fs::write(&fixture.config, &config).unwrap();
+        let tasks = (0..16)
+            .map(|index| {
+                fixture
+                    .add(
+                        &format!("sized-{index:02}"),
+                        lk_queue::TaskKind::ExtractConcepts,
+                        false,
+                    )
+                    .0
+            })
+            .collect::<Vec<_>>();
+        let status = fixture.json(&["queue", "status", "--json"]);
+        for task in &tasks {
+            let row = status["data"]["tasks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["task_id"] == task.task_id)
+                .unwrap();
+            let file = fixture.root().join("response-scope.json");
+            std::fs::write(&file, serde_json::to_vec(&json!({"target_revision":row["target_revision"],"queries":[{"query":"unmatched response sizing evidence","phrase":true,"spacing":false}]})).unwrap()).unwrap();
+            fixture.json(&[
+                "work",
+                "discover",
+                "--task-id",
+                &task.task_id,
+                "--file",
+                file.to_str().unwrap(),
+            ]);
+        }
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(tasks.iter().all(|task| fixture.done(task)), "{report}");
+        let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert!(calls.len() > 1 && calls.len() < tasks.len(), "{calls:?}");
+        assert_eq!(
+            report["semantic_calls"].as_u64().unwrap() as usize,
+            calls.len()
+        );
+        let mut combined = calls[0].clone();
+        let all = calls.iter().flat_map(|call| {
+            assert_eq!(call["schema"], "native-selected-results-v4");
+            assert_eq!(call["contracts"], combined["contracts"]);
+            let count = call["tasks"].as_array().unwrap().len();
+            let minimum = json!({"results":vec![json!({"status":"complete","value":{"concepts":[]},"reason":null});count]});
+            assert!(serde_json::to_vec(&minimum).unwrap().len() <= call["max_response_bytes"].as_u64().unwrap() as usize);
+            call["tasks"].as_array().unwrap().clone()
+        }).collect::<Vec<_>>();
+        assert_eq!(all.len(), tasks.len());
+        combined["tasks"] = json!(all);
+        assert!(serde_json::to_vec(&combined).unwrap().len() <= 262144);
+        let characters = combined["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|task| task["resources"].as_array().unwrap())
+            .map(|resource| resource["text"].as_str().unwrap().chars().count())
+            .sum::<usize>();
+        assert!(characters <= lk_core::semantic::INSPECTION_CHARACTERS.get());
+        let minimum = json!({"results":vec![json!({"status":"complete","value":{"concepts":[]},"reason":null});tasks.len()]});
+        assert!(
+            serde_json::to_vec(&minimum).unwrap().len()
+                > combined["max_response_bytes"].as_u64().unwrap() as usize
+        );
+        assert_eq!(std::fs::read_to_string(&fixture.config).unwrap(), config);
+    }
+}
+
+#[test]
 fn changed_batch_response_allowance_reconsiders_capacity_action() {
     let fixture = Fixture::new("codex");
     let (blocked, _) = fixture.add("blocked", lk_queue::TaskKind::ExtractConcepts, false);

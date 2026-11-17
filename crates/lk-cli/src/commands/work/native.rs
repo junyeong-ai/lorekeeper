@@ -8,6 +8,24 @@ use serde_json::{Value, json};
 
 use super::{Prepared, Subject, Work};
 
+#[derive(Debug)]
+pub(in crate::commands) struct SelectedResponseCapacity {
+    pub(in crate::commands) minimum_bytes: usize,
+    pub(in crate::commands) max_response_bytes: usize,
+}
+
+impl std::fmt::Display for SelectedResponseCapacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "native selected response requires at least {} bytes, above max_response_bytes {}",
+            self.minimum_bytes, self.max_response_bytes
+        )
+    }
+}
+impl std::error::Error for SelectedResponseCapacity {}
+impl miette::Diagnostic for SelectedResponseCapacity {}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(in crate::commands) enum FinalizationMode {
@@ -372,6 +390,23 @@ pub(in crate::commands) fn selected_request(
         .into_iter()
         .min()
         .expect("nonempty selection");
+    let replies = tasks
+        .iter()
+        .map(|task| {
+            let task: QueueTask = serde_json::from_value(task["task"].clone()).into_diagnostic()?;
+            super::generation::minimum_reply(&task)
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    let minimum_bytes = serde_json::to_vec(&json!({"results":replies}))
+        .into_diagnostic()?
+        .len();
+    if minimum_bytes > max_response_bytes {
+        return Err(SelectedResponseCapacity {
+            minimum_bytes,
+            max_response_bytes,
+        }
+        .into());
+    }
     Ok(json!({
         "schema":"native-selected-results-v4", "tasks":selected, "contracts":contracts,
         "max_input_bytes":limits.max_input_bytes,
@@ -692,6 +727,105 @@ mod tests {
         ] {
             assert!(selected_characters(&[malformed]).is_err());
         }
+    }
+
+    #[test]
+    fn selected_batches_require_room_for_each_complete_result() {
+        let mut config = config();
+        config.execution.work.max_result_bytes = 1024;
+        let mut inputs = Vec::new();
+        for index in 0..32 {
+            let (mut task, _, mut context, mut resources, _, target) = fixture();
+            task.task_id = format!("task-{index}");
+            task.target.vault_path = format!("wiki/documents/item-{index}.md");
+            let subject = Subject::Queue {
+                task_id: task.task_id.clone(),
+                cache_hash: task.cache_hash.clone(),
+                target: task.target.vault_path.clone(),
+                target_revision: lk_core::concept::file_revision(&target),
+            };
+            context["subject"] = json!(subject);
+            context["purpose"]["target"] = json!(task.target);
+            resources[0].address = format!("retained-input://{}/concepts", task.target.vault_path);
+            let work = Work::build(
+                &resources,
+                "scope",
+                context.clone(),
+                WorkLimits {
+                    max_input_bytes: 262144,
+                    max_result_bytes: 1024,
+                },
+            )
+            .unwrap();
+            inputs.push(
+                selected_task_value(
+                    &config,
+                    &task,
+                    Captured {
+                        subject: &subject,
+                        context: &context,
+                        resources: &resources,
+                        owners: &super::super::generation::Owners::default(),
+                    },
+                    &work,
+                    Path::new(&task.target.vault_path),
+                    &target,
+                )
+                .unwrap(),
+            );
+        }
+        let empty = json!({"status":"complete","value":{"concepts":[]},"reason":null});
+        for count in 1..=inputs.len() {
+            let request = match selected_request(&config, &inputs[..count]) {
+                Ok(request) => request,
+                Err(error) => {
+                    assert!(count > 1, "each task must fit independently");
+                    let capacity = error.downcast_ref::<SelectedResponseCapacity>().unwrap();
+                    assert!(capacity.minimum_bytes > capacity.max_response_bytes);
+                    return;
+                }
+            };
+            assert!(
+                serde_json::to_vec(&request).unwrap().len()
+                    <= config.execution.work.max_input_bytes
+            );
+            assert!(
+                selected_characters(&inputs[..count]).unwrap()
+                    <= lk_core::semantic::INSPECTION_CHARACTERS.get()
+            );
+            let response = json!({"results":vec![empty.clone(); count]});
+            let minimum = serde_json::to_vec(&response).unwrap().len();
+            let allowance = request["max_response_bytes"].as_u64().unwrap() as usize;
+            assert!(
+                minimum <= allowance,
+                "accepted {count} tasks require at least {minimum} response bytes, above {allowance}"
+            );
+        }
+        panic!("the response budget must split this selection");
+    }
+
+    #[test]
+    fn minimum_generation_replies_preserve_owned_synthesis_sections() {
+        let (mut task, _, _, _, _, _) = fixture();
+        task.kind = TaskKind::SynthesizeConcept;
+        task.target.kind = lk_queue::TargetKind::ConceptSynthesis;
+        for related in [false, true] {
+            if related {
+                task.input
+                    .insert("related_anchor".into(), json!("## Related"));
+            }
+            let reply = super::super::generation::minimum_reply(&task).unwrap();
+            assert!(
+                !reply["value"]["synthesis"]
+                    .as_str()
+                    .unwrap()
+                    .trim()
+                    .is_empty()
+            );
+            assert_eq!(reply["value"]["related"].is_string(), related);
+        }
+        task.kind = TaskKind::Summarize;
+        assert!(super::super::generation::minimum_reply(&task).is_err());
     }
 
     #[test]

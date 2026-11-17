@@ -273,12 +273,7 @@ pub(super) fn response_limit(
     owners: &Owners,
     limit: usize,
 ) -> miette::Result<usize> {
-    let value = match task.kind {
-        TaskKind::ExtractConcepts => json!({"concepts":[]}),
-        TaskKind::SynthesizeConcept => json!({"synthesis":"", "related":null}),
-        _ => return Err(miette::miette!("task uses section response bounds")),
-    };
-    let reply = json!({"status":"complete","value":value,"reason":null});
+    let reply = minimum_reply(task)?;
     let Outcome::Complete(result) = assemble(
         task,
         subject,
@@ -289,7 +284,7 @@ pub(super) fn response_limit(
         usize::MAX,
     )?
     else {
-        unreachable!("empty complete result")
+        unreachable!("minimum complete result")
     };
     let reply_bytes = serde_json::to_vec(&reply).into_diagnostic()?.len();
     let metadata = serde_json::to_vec(&result)
@@ -312,6 +307,18 @@ pub(super) fn response_limit(
     } else {
         Ok(limit - metadata)
     }
+}
+
+pub(super) fn minimum_reply(task: &QueueTask) -> miette::Result<Value> {
+    let value = match task.kind {
+        TaskKind::ExtractConcepts => json!({"concepts":[]}),
+        TaskKind::SynthesizeConcept => json!({
+            "synthesis":"x",
+            "related":(task.anchors().len() == 2).then_some(""),
+        }),
+        _ => return Err(miette::miette!("task uses section response bounds")),
+    };
+    Ok(json!({"status":"complete","value":value,"reason":null}))
 }
 
 pub(super) fn instruction() -> String {
