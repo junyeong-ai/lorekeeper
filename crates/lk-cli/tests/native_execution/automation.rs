@@ -45,7 +45,8 @@ fn daily_review_reassessment_defers_without_pausing_and_invalid_reviews_remain_f
         if let Some(before) = before {
             let state: serde_json::Value = serde_json::from_slice(&before).unwrap();
             assert_eq!(state["reserved_calls"], 0);
-            assert!(state["paused"]["daily"].is_string());
+            assert!(state["paused"]["daily"]["at"].is_string());
+            assert!(state["paused"]["daily"]["cause"]["stage"].is_string());
             assert_eq!(std::fs::read(usage_path).unwrap(), before);
         } else {
             assert!(!usage_path.try_exists().unwrap());
@@ -314,8 +315,14 @@ fn scheduled_tool_enabled_failure_requires_explicit_resume_without_refunding_cal
     let first = run(&fixture, "knowledge", false);
     assert_eq!(calls(&first), 1, "{first}");
     assert_eq!(first["stop_reason"], "failed");
-    assert!(usage(&fixture)["paused"]["knowledge"].is_string());
-    assert!(status(&fixture)["usage"]["paused"]["knowledge"].is_string());
+    assert_eq!(
+        usage(&fixture)["paused"]["knowledge"]["cause"]["stage"],
+        "native result host"
+    );
+    assert_eq!(
+        status(&fixture)["usage"]["paused"]["knowledge"]["cause"]["stage"],
+        "native result host"
+    );
     let before = usage(&fixture);
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
@@ -328,7 +335,7 @@ fn scheduled_tool_enabled_failure_requires_explicit_resume_without_refunding_cal
     let resumed = run(&fixture, "knowledge", true);
     assert_eq!(calls(&resumed), 1, "{resumed}");
     assert_eq!(usage(&fixture)["reserved_calls"], 2);
-    assert!(usage(&fixture)["paused"]["knowledge"].is_string());
+    assert!(usage(&fixture)["paused"]["knowledge"]["at"].is_string());
 }
 
 #[test]

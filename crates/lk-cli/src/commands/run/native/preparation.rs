@@ -484,7 +484,7 @@ impl Runner<'_> {
                 Err(disposition) => {
                     self.hold_discovery(&subject, &binding, None, disposition, &mut metrics)
                         .await;
-                    if self.result.halted || self.result.cancelled {
+                    if self.result.is_halted() || self.result.cancelled {
                         self.record_work_step(metrics);
                         return false;
                     }

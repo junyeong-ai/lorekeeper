@@ -107,8 +107,9 @@ paths:
   excludes later controller workflow acquisition waits. Those waits have a separate
   configured bound; source collection, ingest publication and short writer waits do
   not use that allowance. Neither allowance renews across batches. Duration limits stop
-  new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation;
-  explicit `--resume` clears its pause without clearing usage or semantic holds.
+  new calls, while returned paid results remain recordable. Fatal scheduled failures pause that operation
+  with the first halting stage and its bounded detail; explicit `--resume` clears its pause without
+  clearing usage or semantic holds.
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;
   absence is not admission. Resume and authoritative admission still require the lease.

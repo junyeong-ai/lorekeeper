@@ -77,7 +77,9 @@ Ordinary manual `lore run` without `--scheduled` uses its normal batch/work budg
 outside this shared allowance and pause. Use `--scheduled` for a policy-controlled
 manual trigger too; add `--wait` when it should wait for the workflow lease.
 `lore status --json` reports the current UTC-day reservations, remaining configured
-allowance and paused operations without changing the ledger. Unreadable accounting
+allowance and paused operations without changing the ledger. Each pause names the
+failed stage that stopped its job and a bounded detail; the job's `--json` report keeps
+the complete stage list. Read that cause before `--resume`. Unreadable accounting
 is unavailable, never a zero-use success. This snapshot does not verify OS registration
 or guarantee progress while the computer is off, asleep or out of agent allowance.
 

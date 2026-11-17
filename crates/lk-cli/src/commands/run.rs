@@ -586,12 +586,20 @@ mod native {
         after: Option<lk_graph::audit::AuditCoverage>,
     }
 
+    fn serialize_halted<S: serde::Serializer>(
+        halt: &Option<automation::HaltCause>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bool(halt.is_some())
+    }
+
     #[derive(Serialize)]
     struct JobResult {
         operation: Operation,
         ok: bool,
         cancelled: bool,
-        halted: bool,
+        #[serde(rename = "halted", serialize_with = "serialize_halted")]
+        halt: Option<automation::HaltCause>,
         duration_ms: u64,
         semantic_duration_ms: u64,
         execution: Option<ExecutionInfo>,
@@ -638,7 +646,7 @@ mod native {
                 operation,
                 ok: true,
                 cancelled: false,
-                halted: false,
+                halt: None,
                 duration_ms: 0,
                 semantic_duration_ms: 0,
                 execution: None,
@@ -663,11 +671,15 @@ mod native {
             }
         }
 
+        fn is_halted(&self) -> bool {
+            self.halt.is_some()
+        }
+
         fn campaign_stop(&self) -> CampaignStop {
             if self.cancelled {
                 return CampaignStop::Cancelled;
             }
-            if !self.halted
+            if !self.is_halted()
                 && let Some(stop) = self.automation.as_ref().and_then(|report| report.stop)
             {
                 return match stop {
@@ -678,7 +690,7 @@ mod native {
                     | automation::Stop::WaitDuration => CampaignStop::AutomationLimit,
                 };
             }
-            if self.halted {
+            if self.is_halted() {
                 return CampaignStop::Failed;
             }
             if self.yield_reason.is_some() {
@@ -731,7 +743,7 @@ mod native {
 
         fn is_successful_yield(&self) -> bool {
             self.yield_reason.is_some()
-                && !self.halted
+                && !self.is_halted()
                 && !self.cancelled
                 && self
                     .stages
@@ -768,7 +780,7 @@ mod native {
 
     impl Runner<'_> {
         fn finish(mut self) -> JobResult {
-            if self.result.halted
+            if let Some(cause) = self.result.halt.clone()
                 && !self.result.cancelled
                 && self.automation.is_some()
                 && self.lease.is_some()
@@ -780,7 +792,12 @@ mod native {
                     .expect("owned workflow")
                     .root_pin()
                     .root();
-                if let Err(error) = self.automation.as_mut().expect("scheduled run").pause(root) {
+                if let Err(error) = self
+                    .automation
+                    .as_mut()
+                    .expect("scheduled run")
+                    .pause(root, cause)
+                {
                     self.record(
                         "automation pause",
                         StageState::Failed,
@@ -828,8 +845,16 @@ mod native {
             if self.supervisor.is_cancelled() {
                 return self.record(name, StageState::Cancelled, Some(error.to_string()));
             }
-            self.result.halted = true;
-            self.record(name, StageState::Failed, Some(error.to_string()))
+            self.halt(name, Some(error.to_string()))
+        }
+
+        /// Records `name` as the failed stage that stops this job; the first one is the
+        /// cause a scheduled pause keeps.
+        fn halt(&mut self, name: &str, detail: Option<String>) -> bool {
+            if self.result.halt.is_none() {
+                self.result.halt = Some(automation::HaltCause::new(name, detail.as_deref()));
+            }
+            self.record(name, StageState::Failed, detail)
         }
 
         fn record_work_step(&mut self, mut step: WorkStepMetrics) {
@@ -912,7 +937,8 @@ mod native {
             timeout: Option<Duration>,
             input: Option<&[u8]>,
         ) -> bool {
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 return false;
             }
             self.configure_child(&mut command);
@@ -921,22 +947,14 @@ mod native {
                 .run_request(command, timeout, None, input)
                 .await
             {
-                Ok(result) => {
-                    if !result.success && self.lease.is_some() {
-                        self.result.halted = true;
-                    }
-                    self.record(
-                        name,
-                        if result.cancelled {
-                            StageState::Cancelled
-                        } else if result.success {
-                            StageState::Completed
-                        } else {
-                            StageState::Failed
-                        },
-                        result.detail,
-                    )
+                Ok(result) if result.cancelled => {
+                    self.record(name, StageState::Cancelled, result.detail)
                 }
+                Ok(result) if result.success => {
+                    self.record(name, StageState::Completed, result.detail)
+                }
+                Ok(result) if self.lease.is_some() => self.halt(name, result.detail),
+                Ok(result) => self.record(name, StageState::Failed, result.detail),
                 Err(error) => self.failure(name, error),
             };
             self.configuration_is_current() && completed
@@ -959,7 +977,8 @@ mod native {
         }
 
         async fn native(&mut self, name: &str, args: &[&str]) -> bool {
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 return false;
             }
             if args == ["queue", "apply"] {
@@ -1079,21 +1098,19 @@ mod native {
             );
             let success = report.ok;
             self.result.queue_application.latest = Some(report);
-            self.record(
-                name,
-                if success {
-                    StageState::Completed
-                } else {
-                    StageState::Failed
-                },
-                Some(detail),
-            );
-            self.result.halted |= !can_continue;
+            if !can_continue {
+                self.halt(name, Some(detail));
+            } else if success {
+                self.record(name, StageState::Completed, Some(detail));
+            } else {
+                self.record(name, StageState::Failed, Some(detail));
+            }
             can_continue
         }
 
         async fn acquire(&mut self, wait: bool) -> bool {
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 return false;
             }
             if let Some(control) = &mut self.automation {
@@ -1178,7 +1195,7 @@ mod native {
             &mut self,
             name: &str,
         ) -> Option<(lk_vault::MutationSession, bool)> {
-            if self.result.halted {
+            if self.result.is_halted() {
                 return None;
             }
             self.recording_session(name).await
@@ -1426,7 +1443,8 @@ mod native {
                     .expect("JSON request serializes")
                     .len(),
             );
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                 }
@@ -1580,28 +1598,18 @@ mod native {
                         },
                     ));
                 }
-                self.result.halted |= !child.cancelled;
-                if !child.cancelled {
+                if child.cancelled {
+                    metrics.outcome = WorkOutcome::Cancelled;
+                    self.record("bounded work receipt", StageState::Cancelled, child.detail);
+                } else {
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
                         invocation.engine,
                         execution::diagnostic::Phase::Invocation,
                         &child,
                     ));
+                    metrics.outcome = WorkOutcome::Failed;
+                    self.halt("bounded work receipt", child.detail);
                 }
-                metrics.outcome = if child.cancelled {
-                    WorkOutcome::Cancelled
-                } else {
-                    WorkOutcome::Failed
-                };
-                self.record(
-                    "bounded work receipt",
-                    if child.cancelled {
-                        StageState::Cancelled
-                    } else {
-                        StageState::Failed
-                    },
-                    child.detail,
-                );
                 self.configuration_is_current();
                 return None;
             }
@@ -1931,7 +1939,7 @@ mod native {
             }
             if self.automation.is_none()
                 || matches!(self.result.operation, Operation::Daily)
-                || self.result.halted
+                || self.result.is_halted()
                 || self.result.cancelled
                 || !self.result.work_telemetry.retained_progress.has_progress()
             {
@@ -2226,7 +2234,8 @@ mod native {
                     None
                 };
             }
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 return Some(false);
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -2400,7 +2409,6 @@ mod native {
                     }
                     Ok(child) => {
                         accepted = false;
-                        self.result.halted = true;
                         turn.metrics.host_failure =
                             Some(execution::diagnostic::HostFailure::from_child(
                                 engine,
@@ -2408,7 +2416,7 @@ mod native {
                                 &child,
                             ));
                         turn.metrics.outcome = WorkOutcome::Failed;
-                        self.record("bounded work receipt", StageState::Failed, child.detail);
+                        self.halt("bounded work receipt", child.detail);
                         self.record_work_step(turn.metrics);
                         continue;
                     }
@@ -2599,7 +2607,7 @@ mod native {
                     .expect("request serializes")
                     .len(),
             );
-            if self.result.halted
+            if self.result.is_halted()
                 || self.result.cancelled
                 || !self.configuration_is_current()
                 || !self.call_budget_available()
@@ -3752,7 +3760,8 @@ mod native {
             if turns.is_empty() {
                 return true;
             }
-            if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                 return false;
             }
@@ -3920,7 +3929,7 @@ mod native {
                 )
                 .await
             };
-            !self.result.halted
+            !self.result.is_halted()
                 && !self.result.cancelled
                 && (has_screenings && screening_ok || has_observations && observation_ok)
         }
@@ -4052,8 +4061,7 @@ mod native {
                                     execution::diagnostic::Phase::Invocation,
                                     &child,
                                 ));
-                            self.result.halted = true;
-                            self.record("candidate screening", StageState::Failed, child.detail);
+                            self.halt("candidate screening", child.detail);
                             None
                         }
                         Err(error) => {
@@ -4296,7 +4304,7 @@ mod native {
                 }
             };
             let observation_ok = self.finish_observation_attempts(observations, recorded);
-            !self.result.halted && !self.result.cancelled && (screening_ok || observation_ok)
+            !self.result.is_halted() && !self.result.cancelled && (screening_ok || observation_ok)
         }
 
         async fn settle_screening_attempts(
@@ -4781,7 +4789,10 @@ mod native {
         async fn dispatch_queue(&mut self) -> bool {
             'planning: loop {
                 let replan = std::mem::take(&mut self.queue_replan);
-                if self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+                if self.result.is_halted()
+                    || self.result.cancelled
+                    || !self.configuration_is_current()
+                {
                     return false;
                 }
                 if self.yield_to_waiter() {
@@ -4809,7 +4820,7 @@ mod native {
                 );
                 let plan = match planned {
                     Ok(plan) => plan,
-                    Err(_) if self.result.halted || self.result.cancelled => return false,
+                    Err(_) if self.result.is_halted() || self.result.cancelled => return false,
                     Err(error) => return self.failure("queue planning", error),
                 };
                 if plan.needs_application {
@@ -5071,7 +5082,7 @@ mod native {
                                     continue 'planning;
                                 }
                                 Ok(false) => {}
-                                Err(_) if self.result.halted || self.result.cancelled => {
+                                Err(_) if self.result.is_halted() || self.result.cancelled => {
                                     return false;
                                 }
                                 Err(error) => {
@@ -5087,7 +5098,7 @@ mod native {
         }
 
         async fn drain(&mut self) -> bool {
-            if self.result.halted || self.result.cancelled {
+            if self.result.is_halted() || self.result.cancelled {
                 return false;
             }
             let state = match crate::commands::queue::check::inspect_controlled(
@@ -5135,7 +5146,7 @@ mod native {
                 }
                 _ => {
                     let completed = self.dispatch_queue().await;
-                    self.drain_blocked = self.result.halted;
+                    self.drain_blocked = self.result.is_halted();
                     completed
                 }
             }
@@ -5168,7 +5179,8 @@ mod native {
         }
 
         async fn inspect_halted_state(&mut self) {
-            if !self.result.halted || self.result.cancelled || !self.configuration_is_current() {
+            if !self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
                 return;
             }
             for (name, args) in [
@@ -5924,24 +5936,23 @@ mod native {
                 health.open, health.resolved, health.needs_reassessment, health.invalid,
             );
             let valid = health.invalid == 0;
-            self.result.halted |= !valid;
             self.result.review_health = Some(health);
-            self.record(
-                "knowledge review health",
-                if valid {
-                    StageState::Completed
-                } else {
-                    StageState::Failed
-                },
-                Some(detail),
-            )
+            if valid {
+                self.record(
+                    "knowledge review health",
+                    StageState::Completed,
+                    Some(detail),
+                )
+            } else {
+                self.halt("knowledge review health", Some(detail))
+            }
         }
 
         fn check_reviews(&mut self) -> bool {
             if self.result.yield_reason.is_some() {
                 return false;
             }
-            if self.result.halted || !self.inspect_review_health() {
+            if self.result.is_halted() || !self.inspect_review_health() {
                 return false;
             }
             let pending = self
@@ -5962,7 +5973,7 @@ mod native {
 
         async fn knowledge(&mut self) {
             self.reconcile_audit_inputs().await;
-            if self.result.halted || self.result.cancelled {
+            if self.result.is_halted() || self.result.cancelled {
                 return;
             }
             self.audit().await;
@@ -6035,7 +6046,7 @@ mod native {
             }
             let mut plan = match self.admit_audit().await {
                 Ok(plan) => plan,
-                Err(_) if self.result.halted || self.result.cancelled => return,
+                Err(_) if self.result.is_halted() || self.result.cancelled => return,
                 Err(error) => {
                     self.failure("audit planning", error);
                     return;
@@ -6596,7 +6607,7 @@ mod native {
                 detail: None,
             });
             assert!(!result.is_successful_yield());
-            result.halted = true;
+            result.halt = Some(automation::HaltCause::new("required evidence", None));
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
@@ -6622,12 +6633,12 @@ mod native {
             assert_eq!(result.campaign_stop(), CampaignStop::NoProgress);
             result.work_telemetry.retained_progress.action_receipts = 1;
             assert_eq!(result.campaign_stop(), CampaignStop::BatchLimit);
-            result.halted = true;
+            result.halt = Some(automation::HaltCause::new("queue application", None));
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
             result.cancelled = false;
-            result.halted = false;
+            result.halt = None;
             result.budget_exhausted = false;
             assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
             result.ok = true;

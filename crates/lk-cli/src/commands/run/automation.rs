@@ -10,20 +10,103 @@ use serde::{Deserialize, Serialize};
 
 const USAGE_PATH: &str = ".lorekeeper/automation-usage.json";
 const MAX_USAGE_BYTES: usize = 16_384;
+/// The job report keeps the complete detail; the ledger keeps a prefix so that a pause
+/// for every operation always fits `MAX_USAGE_BYTES`.
+const MAX_HALT_DETAIL_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Serialize)]
 enum Schema {
-    #[serde(rename = "automation-usage-v1")]
-    V1,
+    #[serde(rename = "automation-usage-v2")]
+    V2,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Deserialize)]
+#[serde(tag = "schema", deny_unknown_fields)]
+enum StoredUsage {
+    #[serde(rename = "automation-usage-v1")]
+    V1 {
+        utc_date: Date,
+        reserved_calls: usize,
+        paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
+    },
+    #[serde(rename = "automation-usage-v2")]
+    V2 {
+        utc_date: Date,
+        reserved_calls: usize,
+        paused: BTreeMap<ExecutionOperation, Pause>,
+    },
+}
+
+#[derive(Serialize)]
 struct Usage {
     schema: Schema,
     utc_date: Date,
     reserved_calls: usize,
-    paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
+    paused: BTreeMap<ExecutionOperation, Pause>,
+}
+
+impl From<StoredUsage> for Usage {
+    fn from(stored: StoredUsage) -> Self {
+        let (utc_date, reserved_calls, paused) = match stored {
+            StoredUsage::V1 {
+                utc_date,
+                reserved_calls,
+                paused,
+            } => (
+                utc_date,
+                reserved_calls,
+                paused
+                    .into_iter()
+                    .map(|(operation, at)| (operation, Pause { at, cause: None }))
+                    .collect(),
+            ),
+            StoredUsage::V2 {
+                utc_date,
+                reserved_calls,
+                paused,
+            } => (utc_date, reserved_calls, paused),
+        };
+        Self {
+            schema: Schema::V2,
+            utc_date,
+            reserved_calls,
+            paused,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::commands) struct Pause {
+    pub at: jiff::Timestamp,
+    /// `None` only for a pause recorded by the v1 ledger, which kept no cause.
+    pub cause: Option<HaltCause>,
+}
+
+/// The failed stage that stopped a native job, as named in its report.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::commands) struct HaltCause {
+    pub stage: String,
+    pub detail: Option<String>,
+}
+
+impl HaltCause {
+    pub fn new(stage: &str, detail: Option<&str>) -> Self {
+        Self {
+            stage: stage.into(),
+            detail: detail.map(|detail| {
+                if detail.len() <= MAX_HALT_DETAIL_BYTES {
+                    return detail.to_owned();
+                }
+                let mut end = MAX_HALT_DETAIL_BYTES - '…'.len_utf8();
+                while !detail.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…", &detail[..end])
+            }),
+        }
+    }
 }
 
 fn path(root: &Path) -> miette::Result<PathBuf> {
@@ -41,7 +124,7 @@ impl Usage {
             Ok(descriptor) => descriptor,
             Err(rustix::io::Errno::NOENT) => {
                 return Ok(Self {
-                    schema: Schema::V1,
+                    schema: Schema::V2,
                     utc_date: today,
                     reserved_calls: 0,
                     paused: BTreeMap::new(),
@@ -67,8 +150,10 @@ impl Usage {
         let value = crate::commands::json::decode_object(&bytes).map_err(|_| {
             miette::miette!("automation usage requires a JSON object with unique fields")
         })?;
-        let mut usage: Self = serde_json::from_value(value)
-            .map_err(|_| miette::miette!("invalid automation usage schema or fields"))?;
+        let mut usage = Self::from(
+            serde_json::from_value::<StoredUsage>(value)
+                .map_err(|_| miette::miette!("invalid automation usage schema or fields"))?,
+        );
         if usage.utc_date > today {
             return Err(miette::miette!("automation UTC date moved backwards"));
         }
@@ -132,7 +217,7 @@ pub(in crate::commands) struct Status {
     pub remaining_calls: Option<usize>,
     pub max_run_seconds: u64,
     pub max_wait_seconds: u64,
-    pub paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
+    pub paused: BTreeMap<ExecutionOperation, Pause>,
 }
 
 pub(in crate::commands) fn status(
@@ -356,9 +441,15 @@ impl Control {
         );
     }
 
-    pub fn pause(&mut self, root: &Path) -> miette::Result<()> {
+    pub fn pause(&mut self, root: &Path, cause: HaltCause) -> miette::Result<()> {
         let mut usage = Usage::load(root, today())?;
-        usage.paused.insert(self.operation, jiff::Timestamp::now());
+        usage.paused.insert(
+            self.operation,
+            Pause {
+                at: jiff::Timestamp::now(),
+                cause: Some(cause),
+            },
+        );
         usage.save(root)?;
         self.refresh(&usage);
         self.report.stop = Some(Stop::Paused);
@@ -393,7 +484,9 @@ mod tests {
         let mut first = Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
         assert!(first.enter(root).unwrap());
         assert!(first.reserve(root, 2).unwrap());
-        first.pause(root).unwrap();
+        first
+            .pause(root, HaltCause::new("native result host", None))
+            .unwrap();
         let mut restarted =
             Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
         assert!(!restarted.enter(root).unwrap());
@@ -420,9 +513,13 @@ mod tests {
         let date: Date = "2026-11-07".parse().unwrap();
         let mut usage = Usage::load(root, date).unwrap();
         usage.reserved_calls = 19;
-        usage
-            .paused
-            .insert(ExecutionOperation::Daily, jiff::Timestamp::now());
+        usage.paused.insert(
+            ExecutionOperation::Daily,
+            Pause {
+                at: jiff::Timestamp::now(),
+                cause: Some(HaltCause::new("daily ingest", None)),
+            },
+        );
         usage.save(root).unwrap();
         assert_eq!(Usage::load(root, date).unwrap().reserved_calls, 19);
         assert!(Usage::load(root, "2026-11-06".parse().unwrap()).is_err());
@@ -440,6 +537,8 @@ mod tests {
             br#"{"schema":"unknown","utc_date":"2026-11-07","reserved_calls":0,"paused":{}}"#,
             br#"{"schema":"automation-usage-v1","utc_date":"2026-11-07","reserved_calls":3,"reserved_calls":0,"paused":{}}"#,
             br#"{"schema":"automation-usage-v1","utc_date":"2026-11-07","reserved_calls":-1,"paused":{}}"#,
+            br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":0,"paused":{},"extra":0}"#,
+            br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":0,"paused":{"process":"2026-11-07T00:00:00Z"}}"#,
         ] {
             std::fs::write(path(root).unwrap(), bytes).unwrap();
             assert!(Usage::load(root, today()).is_err());
@@ -447,6 +546,43 @@ mod tests {
         std::fs::remove_file(path(root).unwrap()).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), path(root).unwrap()).unwrap();
         assert!(Usage::load(root, today()).is_err());
+    }
+
+    #[test]
+    fn pauses_keep_their_halting_stage_and_v1_pauses_load_without_one() {
+        let directory = fixture();
+        let root = directory.path();
+        std::fs::write(
+            path(root).unwrap(),
+            format!(
+                r#"{{"schema":"automation-usage-v1","utc_date":"{}","reserved_calls":2,"paused":{{"knowledge":"2026-11-09T00:00:00Z"}}}}"#,
+                today()
+            ),
+        )
+        .unwrap();
+        let legacy = status(root, &policy(3)).unwrap();
+        assert!(
+            legacy.paused[&ExecutionOperation::Knowledge]
+                .cause
+                .is_none()
+        );
+        let mut control = Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
+        assert!(control.enter(root).unwrap());
+        let detail = "é".repeat(MAX_HALT_DETAIL_BYTES);
+        control
+            .pause(root, HaltCause::new("native result host", Some(&detail)))
+            .unwrap();
+        let paused = status(root, &policy(3)).unwrap().paused;
+        let cause = paused[&ExecutionOperation::Process].cause.as_ref().unwrap();
+        assert_eq!(cause.stage, "native result host");
+        let kept = cause.detail.as_deref().unwrap();
+        assert!(kept.len() <= MAX_HALT_DETAIL_BYTES && kept.ends_with("é…"));
+        assert!(paused[&ExecutionOperation::Knowledge].cause.is_none());
+        assert!(
+            std::fs::read_to_string(path(root).unwrap())
+                .unwrap()
+                .starts_with(r#"{"schema":"automation-usage-v2""#)
+        );
     }
 
     #[test]
@@ -556,7 +692,9 @@ mod tests {
         assert_eq!(snapshot.reserved_calls, 4);
         assert!(snapshot.max_calls_per_day.is_none());
         assert!(snapshot.remaining_calls.is_none());
-        control.pause(root).unwrap();
+        control
+            .pause(root, HaltCause::new("native result host", None))
+            .unwrap();
         let before = std::fs::read(path(root).unwrap()).unwrap();
         let mut restarted =
             Control::new(unlimited, ExecutionOperation::Knowledge, false, 2).unwrap();

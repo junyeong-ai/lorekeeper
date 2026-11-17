@@ -231,11 +231,17 @@ fn automation_row(
             if !status.paused.is_empty() {
                 let operations = status
                     .paused
-                    .keys()
-                    .map(|operation| match operation {
-                        ExecutionOperation::Daily => "daily",
-                        ExecutionOperation::Process => "process",
-                        ExecutionOperation::Knowledge => "knowledge",
+                    .iter()
+                    .map(|(operation, pause)| {
+                        let operation = match operation {
+                            ExecutionOperation::Daily => "daily",
+                            ExecutionOperation::Process => "process",
+                            ExecutionOperation::Knowledge => "knowledge",
+                        };
+                        match &pause.cause {
+                            Some(cause) => format!("{operation} at {}", cause.stage),
+                            None => operation.to_owned(),
+                        }
                     })
                     .collect::<Vec<_>>();
                 let _ = write!(state, " · paused: {}", operations.join(", "));
