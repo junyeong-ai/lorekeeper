@@ -5136,6 +5136,7 @@ PROCESS"#,
         "Daily must validate reviews after late period publication: {result}"
     );
     assert_eq!(result["ok"], !with_review);
+    assert_eq!(result["halted"], false, "{result}");
     let final_stages = &stages[period_settled + 1..];
     for name in ["graph lint", "queue completion"] {
         assert!(

@@ -60,11 +60,11 @@ paths:
 - A newly retained semantic audit action or other verified progress can advance the
   next knowledge batch while the overall result stays incomplete. Operational
   rejections and cached refusals earn no progress and cannot sustain continuation.
-- Process classifies final review health through the shared typed reports. Reassessment
-  keeps strict completion nonzero without halting budgeted independent queue progress;
-  invalid reviews and failed reads remain fatal. Queue settlement alone cannot satisfy
-  review completion. Daily retains its strict review checkpoints before period
-  resumption.
+- Daily and process classify review health through the shared typed reports.
+  Reassessment keeps strict completion nonzero without halting independent queue
+  progress or pausing automation; invalid reviews and failed reads remain fatal.
+  Queue settlement alone cannot satisfy review completion. Daily requires a passing
+  review check before period resumption and checks again after publication.
 - Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.
   An input pipe closed by the child may retain a natural numeric nonzero exit only
   after complete stdout draining, reaping and group cleanup. Closed input with exit zero

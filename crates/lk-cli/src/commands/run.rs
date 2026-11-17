@@ -5936,7 +5936,7 @@ mod native {
             )
         }
 
-        fn check_process_reviews(&mut self) -> bool {
+        fn check_reviews(&mut self) -> bool {
             if self.result.yield_reason.is_some() {
                 return false;
             }
@@ -6555,18 +6555,15 @@ mod native {
                         runner.native("task propose", &["task", "propose"]).await;
                     }
                     runner.reconcile().await;
-                    runner
-                        .native("knowledge reviews", &["wiki", "reviews", "--check"])
-                        .await;
-                    runner.resume_periods().await;
-                    runner.reconcile().await;
-                    runner
-                        .native("knowledge reviews", &["wiki", "reviews", "--check"])
-                        .await;
+                    if runner.check_reviews() {
+                        runner.resume_periods().await;
+                        runner.reconcile().await;
+                        runner.check_reviews();
+                    }
                 }
                 Operation::Process => {
                     runner.reconcile().await;
-                    runner.check_process_reviews();
+                    runner.check_reviews();
                 }
                 Operation::Knowledge => runner.knowledge().await,
             }

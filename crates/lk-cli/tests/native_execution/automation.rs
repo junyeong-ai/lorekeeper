@@ -1,6 +1,62 @@
 use super::*;
 
 #[test]
+fn daily_review_reassessment_defers_without_pausing_and_invalid_reviews_remain_fatal() {
+    for invalid in [false, true] {
+        let fixture = Fixture::new("codex", 30, "exit 91");
+        configure(&fixture, Some(20), 60);
+        write_review_attention(&fixture, "wiki/documents/reviewed.md", invalid);
+        let review = fixture.root().join("vault/wiki/explorations/review.md");
+        let original_review = std::fs::read(&review).unwrap();
+        let original_config = std::fs::read(&fixture.config).unwrap();
+        let output = fixture
+            .command()
+            .args(["run", "daily", "--scheduled", "--json"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["ok"], false, "{report}");
+        assert_eq!(report["halted"], invalid, "{report}");
+        assert_eq!(report["semantic_calls"], 0, "{report}");
+        assert_eq!(
+            report["review_health"][if invalid {
+                "invalid"
+            } else {
+                "needs_reassessment"
+            }],
+            1,
+            "{report}"
+        );
+        assert_eq!(report["automation"]["reserved_calls"], 0);
+        let usage_path = fixture
+            .root()
+            .join("vault/.lorekeeper/automation-usage.json");
+        let before = if invalid {
+            Some(std::fs::read(&usage_path).unwrap())
+        } else {
+            assert!(!usage_path.try_exists().unwrap());
+            None
+        };
+        let repeated = run(&fixture, "daily", false);
+        assert_eq!(repeated["ok"], false, "{repeated}");
+        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(repeated["automation"]["reserved_calls"], 0);
+        if let Some(before) = before {
+            let state: serde_json::Value = serde_json::from_slice(&before).unwrap();
+            assert_eq!(state["reserved_calls"], 0);
+            assert!(state["paused"]["daily"].is_string());
+            assert_eq!(std::fs::read(usage_path).unwrap(), before);
+        } else {
+            assert!(!usage_path.try_exists().unwrap());
+        }
+        assert_eq!(std::fs::read(review).unwrap(), original_review);
+        assert_eq!(std::fs::read(&fixture.config).unwrap(), original_config);
+        assert!(!fixture.root().join("arguments").exists());
+    }
+}
+
+#[test]
 fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 1, "exec sleep 30");

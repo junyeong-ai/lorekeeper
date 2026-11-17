@@ -56,8 +56,10 @@ restart/config changes; they count outer agent attempts, not internal model requ
 tokens or billing. Separate waiting and execution limits bound acquisition and new-call admission,
 not completion of an active host, source collection or paid-result recording.
 Unknown/corrupt accounting refuses semantic execution. Fatal inference failures pause
-that operation's semantic phase across restarts and day rollover. Daily source
-collection still runs before this pause check.
+that operation's semantic phase across restarts and day rollover. Reviews needing
+reassessment keep completion nonzero without pausing automation; invalid reviews and
+failed reads remain fatal. Daily checks reviews before and after period publication.
+Daily source collection still runs before this pause check.
 Process and knowledge report a known pause before waiting for the workflow lease.
 After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json` clears only its pause;
 it preserves usage, rejected proposals and exact semantic holds. Unchanged holds
