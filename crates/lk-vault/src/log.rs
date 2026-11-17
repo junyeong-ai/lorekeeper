@@ -16,6 +16,7 @@ pub struct LogEntry {
     pub status: LogStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<lk_core::event::ObservationOutcome>,
+    #[serde(alias = "events_count")]
     pub event_count: usize,
     pub duration_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -186,6 +187,23 @@ mod tests {
         .await;
         let found = log.find_last_collection("jira").await.unwrap().unwrap();
         assert_eq!(found.timestamp.as_second(), 1_000);
+    }
+
+    #[tokio::test]
+    async fn entries_written_before_the_event_count_rename_still_record_collections() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ingest.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"timestamp":"2026-06-03T05:30:55Z","source_id":"ai-news","status":"success","events_count":39,"duration_ms":8302}"#,
+        )
+        .unwrap();
+        let found = IngestLog::new(path)
+            .find_last_collection("ai-news")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.event_count, 39);
     }
 
     #[tokio::test]
