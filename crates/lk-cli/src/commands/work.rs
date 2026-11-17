@@ -108,6 +108,18 @@ pub enum WorkCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Clear one current native generation rejection without invoking an agent
+    RetryGeneration {
+        /// Exact retained extraction or synthesis task
+        #[arg(long)]
+        task_id: String,
+        /// Exact retained input revision reported by the failed proposal
+        #[arg(long)]
+        input_revision: String,
+        /// Validate without publishing or recovering state
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Plan complete retained-source observations for an oversized screening context
     SourcePlan {
         /// Exact retained concept-extraction task identifier
@@ -2541,6 +2553,9 @@ fn prepare_task_in_session(
                     Some(FinalizationHold::ProcessingAction(_)) => {
                         admission.with_outcome(FinalizationAdmissionState::ProcessingAction)
                     }
+                    Some(FinalizationHold::GenerationRejection(_)) => {
+                        admission.with_outcome(FinalizationAdmissionState::GenerationRejected)
+                    }
                 };
                 preparation.admissions.push(admission);
                 match hold {
@@ -2548,7 +2563,10 @@ fn prepare_task_in_session(
                         preparation.work = TaskWork::Finalization { id: work.plan.id };
                         return Ok(preparation);
                     }
-                    Some(FinalizationHold::DiscoveryRecovery(reason)) => {
+                    Some(
+                        FinalizationHold::DiscoveryRecovery(reason)
+                        | FinalizationHold::GenerationRejection(reason),
+                    ) => {
                         preparation.work = TaskWork::Admission { reason };
                         return Ok(preparation);
                     }
@@ -3367,13 +3385,16 @@ fn frontier_result(
 enum FinalizationHold {
     ProcessingAction(String),
     DiscoveryRecovery(String),
+    GenerationRejection(String),
 }
 
 #[cfg(unix)]
 impl FinalizationHold {
     fn reason(self) -> String {
         match self {
-            Self::ProcessingAction(reason) | Self::DiscoveryRecovery(reason) => reason,
+            Self::ProcessingAction(reason)
+            | Self::DiscoveryRecovery(reason)
+            | Self::GenerationRejection(reason) => reason,
         }
     }
 }
@@ -3388,6 +3409,9 @@ fn native_finalization_hold(
 ) -> miette::Result<Option<FinalizationHold>> {
     let action = work.load_finalization_action_for(root, request, &completed["result_revision"])?;
     let recovery = discovery::recovery::blocked(root, task, request)?;
+    if let Some(reason) = generation::rejection::held(root, task, &work.plan.subject_revision)? {
+        return Ok(Some(FinalizationHold::GenerationRejection(reason)));
+    }
     Ok(recovery
         .map(FinalizationHold::DiscoveryRecovery)
         .or_else(|| action.map(FinalizationHold::ProcessingAction)))
@@ -3752,6 +3776,7 @@ pub(super) enum ResultFinish {
     Staged,
     NeedsAction(String),
     DiscoveryRecorded,
+    Rejected(String),
 }
 
 #[cfg(unix)]
@@ -3774,17 +3799,50 @@ pub(super) fn finish_result(
         ));
     }
     let outcome = match &prepared.subject {
-        Subject::Audit { .. } => audit::assemble(&prepared, reply)?,
+        Subject::Audit { .. } => audit::assemble(&prepared, reply.clone())?,
         Subject::Queue { task_id, .. } => generation::assemble_prepared(
             config,
             &super::queue::current_task(root, task_id)?,
             &prepared,
             &work.plan.subject_revision,
-            reply,
+            reply.clone(),
             work.plan.max_result_bytes,
         )?,
     };
     match outcome {
+        generation::Outcome::Rejected(reason) => {
+            let Subject::Queue { task_id, .. } = &prepared.subject else {
+                return Err(miette::miette!(
+                    "native owner rejection requires a queue subject"
+                ));
+            };
+            let task = super::queue::current_task(root, task_id)?;
+            let capture = work.capture_native_completion(root, &prepared.resources, result.kind)?;
+            if capture.result() != &completed {
+                return Err(miette::miette!(
+                    "completed Work changed before generation rejection"
+                ));
+            }
+            let mut plan = lk_vault::MutationPlan::default();
+            capture.plan_read_guards(&mut plan);
+            prepared.guard_pages(&mut plan);
+            let reason = generation::rejection::plan_record(
+                root,
+                generation::rejection::Binding {
+                    task: &task,
+                    work: &work,
+                    input: generation::rejection::Input::Work {
+                        work_id: work.plan.id.clone(),
+                    },
+                    request: &result.request,
+                },
+                reply,
+                reason,
+                &mut plan,
+            )?;
+            session.apply(plan).into_diagnostic()?;
+            Ok(ResultFinish::Rejected(reason))
+        }
         generation::Outcome::NeedsDiscovery(recovery, reason) => {
             let Subject::Queue { task_id, .. } = &prepared.subject else {
                 return Err(miette::miette!(
@@ -4226,6 +4284,35 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
     let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
+        #[cfg(unix)]
+        WorkCommand::RetryGeneration {
+            task_id,
+            input_revision,
+            dry_run,
+        } => {
+            let prepare = |root: &Path| {
+                generation::rejection::plan_retry(
+                    root,
+                    &config,
+                    &config_revision,
+                    &task_id,
+                    &input_revision,
+                )
+            };
+            if dry_run {
+                prepare(&root)?
+                    .validate_addresses(&root)
+                    .into_diagnostic()?;
+            } else {
+                let session = super::publication::acquire_mutation_now(&root)?;
+                session.apply(prepare(session.root())?).into_diagnostic()?;
+            }
+            json!({"task_id":task_id,"input_revision":input_revision,"dry_run":dry_run})
+        }
+        #[cfg(not(unix))]
+        WorkCommand::RetryGeneration { .. } => {
+            return Err(miette::miette!("native generation retries require Unix"));
+        }
         #[cfg(unix)]
         WorkCommand::RetryPreparation {
             stage,

@@ -13,6 +13,126 @@ pub(super) enum Admission {
     Reuse { owner_ref: String },
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(tag = "reason", rename_all = "kebab-case", deny_unknown_fields)]
+pub(in crate::commands) enum ProposalRejection {
+    UnknownOwnerReference,
+}
+
+impl std::fmt::Display for ProposalRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownOwnerReference => {
+                f.write_str("native reuse reference is outside the admitted owner roster")
+            }
+        }
+    }
+}
+
+impl Owners {
+    pub(in crate::commands::work) fn build(
+        config: &lk_core::config::Config,
+        prepared: &super::Prepared,
+    ) -> miette::Result<Self> {
+        let kind: lk_queue::TaskKind =
+            serde_json::from_value(prepared.context["purpose"]["task_kind"].clone())
+                .into_diagnostic()?;
+        if kind != lk_queue::TaskKind::ExtractConcepts {
+            return Ok(Self::default());
+        }
+        let directory = lk_core::vault_path::concepts_dir(&config.vault.dirs);
+        let mut owners = Vec::new();
+        for resource in &prepared.resources {
+            let path = std::path::Path::new(&resource.address);
+            if !prepared.is_reuse_owner(&resource.address, &resource.revision)
+                || !path.starts_with(&directory)
+                || path.extension().is_none_or(|extension| extension != "md")
+            {
+                continue;
+            }
+            let page = lk_vault::parse_page(&resource.text)
+                .map_err(|error| miette::miette!("{}: {error}", resource.address))?;
+            if page.frontmatter.is_declared_concept() {
+                owners.push(ConceptOwner {
+                    path: resource.address.clone(),
+                    revision: resource.revision.clone(),
+                });
+            }
+        }
+        Ok(Self(owners))
+    }
+
+    fn reference(index: usize) -> String {
+        format!("o{index}")
+    }
+
+    pub(in crate::commands::work) fn presentation(&self) -> Value {
+        json!(self.0.iter().enumerate().map(|(index, owner)| json!({
+            "owner_ref":Self::reference(index), "path":owner.path, "revision":owner.revision,
+        })).collect::<Vec<_>>())
+    }
+
+    pub(super) fn resolve(
+        &self,
+        admission: Admission,
+    ) -> Result<ConceptAdmission, ProposalRejection> {
+        match admission {
+            Admission::New => Ok(ConceptAdmission::New),
+            Admission::Reuse { owner_ref } => self
+                .0
+                .iter()
+                .enumerate()
+                .find(|(index, _)| Self::reference(*index) == owner_ref)
+                .map(|(_, owner)| ConceptAdmission::Reuse {
+                    owner: owner.clone(),
+                })
+                .ok_or(ProposalRejection::UnknownOwnerReference),
+        }
+    }
+
+    pub(super) fn response_limit(
+        &self,
+        budget: usize,
+        empty_reply_bytes: usize,
+    ) -> miette::Result<usize> {
+        let mut expansion = 0;
+        let mut minimum_entry = usize::MAX;
+        for (index, owner) in self.0.iter().enumerate() {
+            let native = json!({"decision":"reuse", "owner_ref":Self::reference(index)});
+            let canonical = serde_json::to_vec(&ConceptAdmission::Reuse {
+                owner: owner.clone(),
+            })
+            .into_diagnostic()?
+            .len();
+            let native_bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
+            expansion = expansion.max(canonical.saturating_sub(native_bytes));
+            let entry = json!({"admission":native,"name":"","aliases":[],"rss_evidence":[]});
+            minimum_entry = minimum_entry.min(serde_json::to_vec(&entry).into_diagnostic()?.len());
+        }
+        if expansion == 0 || budget < empty_reply_bytes {
+            return Ok(budget);
+        }
+        let fits = |bytes: usize| {
+            let entries =
+                bytes.saturating_sub(empty_reply_bytes).saturating_add(1) / (minimum_entry + 1);
+            entries
+                .checked_mul(expansion)
+                .and_then(|extra| bytes.checked_add(extra))
+                .is_some_and(|assembled| assembled <= budget)
+        };
+        let (mut low, mut high) = (empty_reply_bytes, budget);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if fits(middle) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        Ok(low)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,125 +208,5 @@ mod tests {
                 }
             }
         }
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "reason", rename_all = "kebab-case")]
-pub(in crate::commands) enum ProposalRejection {
-    UnknownOwnerReference,
-}
-
-impl std::fmt::Display for ProposalRejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::UnknownOwnerReference => {
-                f.write_str("native reuse reference is outside the admitted owner roster")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ProposalRejection {}
-impl miette::Diagnostic for ProposalRejection {}
-
-impl Owners {
-    pub(in crate::commands::work) fn build(
-        config: &lk_core::config::Config,
-        prepared: &super::Prepared,
-    ) -> miette::Result<Self> {
-        let kind: lk_queue::TaskKind =
-            serde_json::from_value(prepared.context["purpose"]["task_kind"].clone())
-                .into_diagnostic()?;
-        if kind != lk_queue::TaskKind::ExtractConcepts {
-            return Ok(Self::default());
-        }
-        let directory = lk_core::vault_path::concepts_dir(&config.vault.dirs);
-        let mut owners = Vec::new();
-        for resource in &prepared.resources {
-            let path = std::path::Path::new(&resource.address);
-            if !prepared.is_reuse_owner(&resource.address, &resource.revision)
-                || !path.starts_with(&directory)
-                || path.extension().is_none_or(|extension| extension != "md")
-            {
-                continue;
-            }
-            let page = lk_vault::parse_page(&resource.text)
-                .map_err(|error| miette::miette!("{}: {error}", resource.address))?;
-            if page.frontmatter.is_declared_concept() {
-                owners.push(ConceptOwner {
-                    path: resource.address.clone(),
-                    revision: resource.revision.clone(),
-                });
-            }
-        }
-        Ok(Self(owners))
-    }
-
-    fn reference(index: usize) -> String {
-        format!("o{index}")
-    }
-
-    pub(in crate::commands::work) fn presentation(&self) -> Value {
-        json!(self.0.iter().enumerate().map(|(index, owner)| json!({
-            "owner_ref":Self::reference(index), "path":owner.path, "revision":owner.revision,
-        })).collect::<Vec<_>>())
-    }
-
-    pub(super) fn resolve(&self, admission: Admission) -> miette::Result<ConceptAdmission> {
-        match admission {
-            Admission::New => Ok(ConceptAdmission::New),
-            Admission::Reuse { owner_ref } => self
-                .0
-                .iter()
-                .enumerate()
-                .find(|(index, _)| Self::reference(*index) == owner_ref)
-                .map(|(_, owner)| ConceptAdmission::Reuse {
-                    owner: owner.clone(),
-                })
-                .ok_or_else(|| ProposalRejection::UnknownOwnerReference.into()),
-        }
-    }
-
-    pub(super) fn response_limit(
-        &self,
-        budget: usize,
-        empty_reply_bytes: usize,
-    ) -> miette::Result<usize> {
-        let mut expansion = 0;
-        let mut minimum_entry = usize::MAX;
-        for (index, owner) in self.0.iter().enumerate() {
-            let native = json!({"decision":"reuse", "owner_ref":Self::reference(index)});
-            let canonical = serde_json::to_vec(&ConceptAdmission::Reuse {
-                owner: owner.clone(),
-            })
-            .into_diagnostic()?
-            .len();
-            let native_bytes = serde_json::to_vec(&native).into_diagnostic()?.len();
-            expansion = expansion.max(canonical.saturating_sub(native_bytes));
-            let entry = json!({"admission":native,"name":"","aliases":[],"rss_evidence":[]});
-            minimum_entry = minimum_entry.min(serde_json::to_vec(&entry).into_diagnostic()?.len());
-        }
-        if expansion == 0 || budget < empty_reply_bytes {
-            return Ok(budget);
-        }
-        let fits = |bytes: usize| {
-            let entries =
-                bytes.saturating_sub(empty_reply_bytes).saturating_add(1) / (minimum_entry + 1);
-            entries
-                .checked_mul(expansion)
-                .and_then(|extra| bytes.checked_add(extra))
-                .is_some_and(|assembled| assembled <= budget)
-        };
-        let (mut low, mut high) = (empty_reply_bytes, budget);
-        while low < high {
-            let middle = low + (high - low).div_ceil(2);
-            if fits(middle) {
-                low = middle;
-            } else {
-                high = middle - 1;
-            }
-        }
-        Ok(low)
     }
 }

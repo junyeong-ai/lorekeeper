@@ -7,6 +7,7 @@ use std::path::Path;
 use super::action::{Action, GENERATION, digest};
 use super::{Prepared, Subject};
 mod owners;
+pub(super) mod rejection;
 pub(super) use owners::Owners;
 
 #[derive(Deserialize)]
@@ -21,6 +22,7 @@ pub(in crate::commands) enum Outcome {
     Complete(Value),
     NeedsAction(String),
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
+    Rejected(owners::ProposalRejection),
 }
 
 pub(in crate::commands) enum SelectedFinish {
@@ -28,6 +30,7 @@ pub(in crate::commands) enum SelectedFinish {
     NeedsAction(String),
     ScopeChanged,
     DiscoveryRecorded,
+    Rejected(String),
 }
 
 pub(in crate::commands) fn schema() -> Value {
@@ -152,7 +155,11 @@ pub(super) fn assemble(
                         rss_evidence: concept.rss_evidence,
                     })
                 })
-                .collect::<miette::Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>, owners::ProposalRejection>>();
+            let concepts = match concepts {
+                Ok(concepts) => concepts,
+                Err(reason) => return Ok(Outcome::Rejected(reason)),
+            };
             let body_error = concepts
                 .iter()
                 .filter_map(|concept| concept.synthesis.as_deref())
@@ -342,6 +349,10 @@ pub(super) fn admission(
             "native action context differs from its request"
         ));
     }
+    let revision = input["context_revision"]
+        .as_str()
+        .ok_or_else(|| miette::miette!("missing native generation input revision"))?;
+    let rejection = rejection::held(root, &task, revision)?;
     let history = match super::discovery::recovery::admission(root, &task, &request)? {
         super::discovery::recovery::Admission::Blocked(reason) => {
             return Ok(Admission::Deferred(reason));
@@ -349,6 +360,9 @@ pub(super) fn admission(
         super::discovery::recovery::Admission::Changed => true,
         super::discovery::recovery::Admission::New => false,
     };
+    if let Some(reason) = rejection {
+        return Ok(Admission::Deferred(reason));
+    }
     let Some((_, action)) = action else {
         return Ok(if history {
             Admission::Single
@@ -367,7 +381,7 @@ pub(in crate::commands) fn plan_prune(
     pending: &std::collections::BTreeSet<(String, String)>,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    GENERATION.plan_prune(root, pending, plan)
+    Ok(GENERATION.plan_prune(root, pending, plan)? + rejection::plan_prune(root, pending, plan)?)
 }
 
 pub(in crate::commands) fn finish_selected_controlled(
@@ -418,9 +432,25 @@ pub(in crate::commands) fn finish_selected_controlled(
         &task,
         &prepared,
         &work.plan.subject_revision,
-        reply,
+        reply.clone(),
         work.plan.max_result_bytes,
     )? {
+        Outcome::Rejected(reason) => {
+            prepared.guard_pages(&mut plan);
+            let reason = rejection::plan_record(
+                root,
+                rejection::Binding {
+                    task: &task,
+                    work: &work,
+                    input: rejection::Input::Selected,
+                    request,
+                },
+                reply,
+                reason,
+                &mut plan,
+            )?;
+            SelectedFinish::Rejected(reason)
+        }
         Outcome::NeedsDiscovery(recovery, reason) => {
             super::discovery::recovery::record(
                 session,

@@ -231,7 +231,7 @@ fn prepare_with_classifier(
                 super::super::work::section::plan_prune(root, &retained_pending, &mut plan)?,
             ));
             removed.push((
-                "native result action receipt(s)",
+                "native generation receipt(s)",
                 super::super::work::generation::plan_prune(root, &retained_pending, &mut plan)?,
             ));
         }

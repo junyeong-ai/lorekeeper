@@ -95,6 +95,9 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             path.write_text('---\ntype: exploration\ntitle: Review\nreview:\n  status: unresolved\n  subjects: ['+target+']\n---\n# New scoped issue\n')
         if task['kind']=='extract-concepts':
             value={'concepts':[]}
+            if mode=='unknown-owner' and ('blocked' in target or 'frontier' in target):
+                value={'concepts':[{'name':'Not admitted','category':None,'aliases':[],
+                    'admission':{'decision':'reuse','owner_ref':'o9999'},'synthesis':None,'rss_evidence':[]}]}
             if mode=='reuse':
                 owners=item.get('owners', request.get('owners'))
                 owner=next(owner for owner in owners if owner['path']=='wiki/concepts/protocol.md')
@@ -565,6 +568,143 @@ fn native_owner_references_publish_selected_root_and_frontier_results_on_both_ho
                 assert!(value["concepts"][0]["admission"].get("owner_ref").is_none());
             }
         }
+    }
+}
+
+#[test]
+fn native_owner_rejections_hold_only_their_input_and_require_guarded_retry() {
+    for mode in ["selected", "root", "frontier"] {
+        let fixture = Fixture::new("codex");
+        let (peer, _) = fixture.add_with_text(
+            "ready",
+            lk_queue::TaskKind::ExtractConcepts,
+            false,
+            "Independent notes about ocean currents.",
+        );
+        let peer_path = fixture.root().join("vault").join(&peer.target.vault_path);
+        let peer_raw = std::fs::read_to_string(&peer_path)
+            .unwrap()
+            .replace("protocol", "weather");
+        std::fs::write(peer_path, peer_raw).unwrap();
+        let (task, plan) = if mode == "frontier" {
+            let (task, plan, _) = fixture.paid_frontier(lk_queue::TaskKind::ExtractConcepts);
+            (task, Some(plan))
+        } else {
+            fixture.add(
+                "blocked",
+                lk_queue::TaskKind::ExtractConcepts,
+                mode == "root",
+            )
+        };
+        std::fs::write(fixture.root().join("mode"), "unknown-owner").unwrap();
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{mode}: {report}");
+        assert!(!fixture.done(&task));
+        assert!(fixture.done(&peer), "{report}");
+        assert_eq!(
+            report["retained_progress"]["action_receipts"], 0,
+            "{report}"
+        );
+        let store = fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections");
+        let path = std::fs::read_dir(store)
+            .unwrap_or_else(|error| panic!("{mode}: {error}; {report}"))
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let raw = std::fs::read(&path).unwrap();
+        let receipt: Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(receipt["task_id"], task.task_id);
+        assert_eq!(receipt["rejection"]["reason"], "unknown-owner-reference");
+        let calls = fixture.calls();
+        let source = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
+        assert!(
+            source
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .any(|request| {
+                    lk_core::concept::file_revision(&serde_json::to_string(&request).unwrap())
+                        == receipt["request_revision"]
+                })
+        );
+        let paid = plan.as_ref().map(|plan| {
+            let directory = fixture
+                .root()
+                .join("vault/.lorekeeper/work")
+                .join(plan["work_id"].as_str().unwrap());
+            walkdir::WalkDir::new(directory)
+                .into_iter()
+                .map(Result::unwrap)
+                .filter(|entry| {
+                    entry.file_type().is_file()
+                        && entry
+                            .path()
+                            .extension()
+                            .is_some_and(|extension| extension == "json")
+                })
+                .map(|entry| {
+                    (
+                        entry.path().to_path_buf(),
+                        std::fs::read(entry.path()).unwrap(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
+        std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+        let held = fixture.run();
+        assert_eq!(held["semantic_calls"], 0, "{mode}: {held}");
+        assert_eq!(held["halted"], false, "{held}");
+        assert_eq!(fixture.calls(), calls);
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        let wrong = fixture
+            .command()
+            .args([
+                "work",
+                "retry-generation",
+                "--task-id",
+                &task.task_id,
+                "--input-revision",
+                &"f".repeat(64),
+            ])
+            .output()
+            .unwrap();
+        assert!(!wrong.status.success());
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        for dry_run in [true, false] {
+            let mut command = fixture.command();
+            command.args([
+                "work",
+                "retry-generation",
+                "--task-id",
+                &task.task_id,
+                "--input-revision",
+                receipt["input_revision"].as_str().unwrap(),
+            ]);
+            if dry_run {
+                command.arg("--dry-run");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if dry_run {
+                assert_eq!(std::fs::read(&path).unwrap(), raw);
+            }
+            assert_eq!(fixture.calls(), calls);
+            if let Some(paid) = &paid {
+                for (path, raw) in paid {
+                    assert_eq!(std::fs::read(path).unwrap(), *raw);
+                }
+            }
+        }
+        assert!(!path.exists());
+        let recovered = fixture.run();
+        assert!(fixture.done(&task), "{mode}: {recovered}");
+        assert_eq!(fixture.calls(), calls + 1, "{recovered}");
     }
 }
 

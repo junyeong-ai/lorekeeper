@@ -27,6 +27,7 @@ pub(in crate::commands) enum FinalizationAdmissionState {
     ReusableSeal,
     ProcessingAction,
     DiscoveryRecovery,
+    GenerationRejected,
     FrontierUnavailable {
         reason: super::state::FrontierUnavailable,
     },

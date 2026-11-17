@@ -30,6 +30,12 @@ Rust supplies its canonical path and file revision. Never copy or reconstruct th
 guards into a native reply. An empty roster permits no reuse. References have meaning
 only within the exact supplied task or Work.
 
+An unknown reference holds only that task’s exact input without another automatic call.
+Inspect the reported input revision and retained rejection before explicitly clearing it
+with `lore work retry-generation --task-id ID --input-revision REVISION`.
+`--dry-run` validates without writing; clearing the rejection invokes no agent and does
+not clear semantic actions or an operation pause.
+
 ## Revision ownership
 
 Native revisions are opaque identifiers with distinct domains. Compare only the same

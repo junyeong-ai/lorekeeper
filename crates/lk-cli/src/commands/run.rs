@@ -2720,6 +2720,15 @@ mod native {
             );
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match finished {
+                Ok(crate::commands::work::ResultFinish::Rejected(reason)) => {
+                    metrics.outcome = WorkOutcome::Rejected;
+                    self.record(
+                        "native finalization rejection",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    WorkStep::Deferred(reason)
+                }
                 Ok(crate::commands::work::ResultFinish::NeedsAction(reason)) => {
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.record(
@@ -2863,6 +2872,14 @@ mod native {
                     Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
                         deferred = true;
                         self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
+                    }
+                    Ok(crate::commands::work::generation::SelectedFinish::Rejected(reason)) => {
+                        deferred = true;
+                        self.record(
+                            "native selected rejection",
+                            StageState::Skipped,
+                            Some(reason),
+                        );
                     }
                     Err(error) => {
                         failed = true;

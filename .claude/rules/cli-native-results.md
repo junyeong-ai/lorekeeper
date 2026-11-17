@@ -107,6 +107,13 @@ paths:
   admission requires Context authority. Review-only and unselected pages grant no reuse.
   Reserve per-occurrence expansion bytes, including repeated references, while retaining
   a fitting empty extraction. Fresh request equality precedes expansion.
+  An unknown reference records a typed operational rejection for that exact task/input,
+  with actual request identity and bounded reply evidence. It publishes no semantic
+  result, earns no action progress and does not pause independent work. Unchanged input
+  holds survive instruction changes. `work retry-generation` requires the exact current
+  task/input; dry runs never recover or write, and clearing a receipt invokes no host.
+  Pending tasks protect receipts during pruning; corrupt state and transport failures
+  remain fatal.
 - Native new questions contain only semantic text/evidence; Rust supplies IDs and
   retains inherited active questions unchanged unless an exact local question key is
   explicitly resolved. Native child question tuples separate active keys from closed
