@@ -14,6 +14,14 @@ This operation is a complete run of one batch, not a request to audit the entire
 Coordinate the workflow lease and follow the shared page and publication contracts in
 SKILL.md; read the curation reference before repairs.
 
+The batch is complete when every selected subject has a recorded assessment or a
+reported reason it could not be recorded, and the finishing checks have run. Continue
+through every selected subject: do not stop to summarize progress, offer to continue,
+list decisions that block nothing, or because the session has grown long. Stop only
+when nothing can proceed without the operator: the lease, a merge or retirement nobody
+authorized, or a failure whose cause you cannot establish. Then report the batch as
+the Assessment section's last paragraph describes.
+
 ## Structural preflight and repair
 
 `lore run knowledge` reconciles the vault and stops before semantic execution when

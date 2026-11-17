@@ -59,6 +59,14 @@ technology/API names and evidence that the finding depends on.
 
 ## Completion
 
+A `run` is complete when every selected source has a published entry or a recorded
+skip in the manifest and the checks below pass. Continue through every selected
+source: do not stop to summarize progress, offer to continue, list decisions that
+block nothing, or because the session has grown long. Stop only when nothing can
+proceed without the operator (a missing manifest, the lease, a curation refusal or
+source contradiction the evidence cannot settle); persist the manifest entries already
+published, then report what remains and what it needs.
+
 After publication, run `lore graph backlinks-sync`, `lore wiki refresh`, and
 `lore graph lint`. Fix violations on pages written by this run; report unrelated
 violations and observations separately. Machine-owned sources and `source_count`

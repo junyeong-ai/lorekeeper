@@ -156,6 +156,17 @@ review check: empty status does not exclude unpublished results, interrupted
 mutations or evidence drift. `lore ingest` alone performs none of this finalization;
 `lore run daily` coordinates collection, semantic work and controller checks.
 
+### When a drain ends
+
+A standalone drain is complete when reconciliation leaves no current task and every
+finalization check above exits 0. `lore queue status --status current --json` is its
+checklist; recheck it after each apply. Until then, continue through every current
+task: do not stop to summarize progress, offer to continue, list decisions that block
+nothing, or because the session has grown long. Stop only when nothing can proceed
+without the operator (the lease, an authorization, a destructive correction) or when
+a command fails for a reason you cannot establish, as step 4 describes. Then report
+what was published, what is retained and what it needs.
+
 Report completed tasks, publication/check outcomes and any retained failures.
 Distinguish selected-call completion from complete native-job success. For exact
 retained-input regeneration, current-citation resynthesis or reviewed retraction,
