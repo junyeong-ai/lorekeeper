@@ -200,6 +200,10 @@ const EXEMPT: &[(&[&str], &str)] = &[
         "requires a retained preparation input revision; native_execution::preparation verifies guarded clearing, no host invocation and stale subject refusal",
     ),
     (
+        &["work", "retry-generation"],
+        "requires an exact current native rejection input; native_results verifies guarded refusal, dry-run, explicit clearing, zero host calls and paid-byte preservation for selected, root and frontier inputs",
+    ),
+    (
         &["work", "source-plan"],
         "requires an oversized retained source and current discovery; native_execution verifies complete source observations, standalone publication refusal and atomic consumption",
     ),
