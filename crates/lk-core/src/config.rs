@@ -589,6 +589,21 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
         root.remove("execution");
     }
     if let Some(root) = value.as_object_mut()
+        && let Some(graph) = root
+            .get_mut("graph")
+            .and_then(serde_json::Value::as_object_mut)
+        && let Some(audit) = graph
+            .get_mut("audit")
+            .and_then(serde_json::Value::as_object_mut)
+        && audit.remove("subjects").is_some()
+        && audit.is_empty()
+    {
+        graph.remove("audit");
+        if graph.is_empty() {
+            root.remove("graph");
+        }
+    }
+    if let Some(root) = value.as_object_mut()
         && let Some(execution) = root
             .get_mut("execution")
             .and_then(serde_json::Value::as_object_mut)
@@ -1875,6 +1890,17 @@ mod tests {
             original.semantic_work_revision(),
             unlimited.semantic_work_revision()
         );
+        for subjects in ["[concept]", "[concept, document]"] {
+            std::fs::write(
+                &path,
+                format!("{base}graph: {{audit: {{subjects: {subjects}}}}}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                original.semantic_work_revision(),
+                Config::load(&path).unwrap().semantic_work_revision()
+            );
+        }
         for invalid in [
             knowledge.replace("5,20,35,50 * * * *", "60 * * * *"),
             knowledge.replace("default_profile: main", "operations: {process: main}"),
