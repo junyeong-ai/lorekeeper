@@ -57,11 +57,11 @@ and CLI discovery, not a second graph authority.
 - Screened audit discovery keeps immutable candidate states and bounded decision packets
   (extraction screening keys decisions per candidate instead; see cli-extraction.md).
   Global planning uses complete compact inventories; selected boundaries capture cards
-  and exact bytes. A decision binds what its screener reads: the subject's address and
-  authored revision, and the candidate's verified owner, public address, authored
-  revision, matched query semantics and scoped reviews. Subject evidence, direct
-  links, subject reviews and the recipe's other queries stay outside every key, so a
-  new citation or an added query keeps recorded decisions; re-recorded queries for an
+  and exact bytes. A decision binds the subject's address and authored revision, and
+  the candidate's verified owner, public address, authored revision, matched query
+  semantics and scoped reviews. The packet also lists the recipe's other queries as
+  context; they, subject evidence, direct links and subject reviews stay outside every
+  key, so a new citation or an added query keeps recorded decisions; re-recorded queries for an
   unchanged subject keep the screening state. Unknown or deferred
   candidates prevent assessment. Excluding discovery context never excludes mandatory
   evidence or direct links; excluded candidate bytes remain publication guards.
@@ -111,7 +111,9 @@ and CLI discovery, not a second graph authority.
   A bounded batch never grows into a full-corpus audit; lower-risk subjects can wait
   indefinitely, so plans report coverage instead of promising it.
   Native admission journals pending order before external discovery or assessment,
-  under the writer claim with exact selected-input and readiness guards. It creates
+  under the writer claim with exact selected-input and readiness guards; that order
+  breaks only equal priorities, so a riskier subject can still precede one whose
+  discovery is already paid. It creates
   no assessment receipt and does not advance a class turn; planning stays read-only.
   Native admission can defer unavailable subjects through a readiness callback;
   preserve complete coverage counts and pending order, and do not consume a class

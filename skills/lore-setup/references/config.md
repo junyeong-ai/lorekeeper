@@ -107,7 +107,9 @@ automatic plans include: `[concept]` by default, `[concept, document]` to add de
 source documents. Coverage is `reviewed_current` of `total` over those kinds, shown by
 `lore status` and `lore wiki audit-plan`; other kinds appear only as `excluded_by_kind`
 counts and stay auditable through explicit `audit-plan --path`. Subjects are planned by
-typed risk, so lower-risk pages can wait: coverage is reported, not promised.
+typed risk, so lower-risk pages can wait: coverage is reported, not promised. Documents
+have no citing pages, so with `document` included they follow every cited concept of
+the same class.
 `max_input_bytes` bounds one subject's distinct source bytes, including scoped reviews,
 their evidence and available prior archives, not accumulated model usage. Oversized
 subjects stay selected with their actual footprint diagnostic and are read through

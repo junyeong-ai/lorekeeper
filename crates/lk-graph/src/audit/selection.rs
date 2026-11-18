@@ -366,9 +366,10 @@ pub(super) struct SelectionInputs<'a> {
     pub matches: &'a [Citation],
 }
 
-/// A decision's purpose is the subject as its screener reads it: the page's address and
-/// authored revision. Evidence, direct links, the subject's reviews and the recipe's
-/// other queries are not shown to a screener and stay outside every candidate key.
+/// A decision's purpose is the subject's address and authored revision. Evidence, direct
+/// links and the subject's reviews are not shown to a screener; the packet lists the
+/// recipe's queries as context, but a decision keys only the candidate's own matched
+/// queries. All of these stay outside every candidate key.
 pub(super) fn project(
     root: &Path,
     inputs: SelectionInputs<'_>,
