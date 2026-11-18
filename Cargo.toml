@@ -50,7 +50,7 @@ blake3 = "1"
 semver = "1"
 tar = "0.4"
 flate2 = "1"
-htmd = "0.5"
+htmd = "0.6"
 # Match htmd's public DOM types and serializer traits. Upgrade this parser family
 # together when htmd's published dependency requirements change.
 html5ever = "0.38"
