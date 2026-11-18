@@ -156,7 +156,7 @@ Do not nest that option or reacquire the lease inside a skill. Cancellation and
 session deadlines terminate the foreground process group and preserve unfinished
 work. Manual agent sessions can use `lore workflow -- claude` or
 `lore workflow -- codex` before reading inputs. Closing inherited descriptors or
-detaching work is outside the manual exec lease's guarantee. Windows is unsupported
+detaching work is outside the workflow lease's guarantee. Windows is unsupported
 for workflow leases and native agent jobs.
 
 Native short writer acquisition waits cancellably for typed contention, rechecks

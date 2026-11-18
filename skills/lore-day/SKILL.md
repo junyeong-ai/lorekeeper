@@ -36,7 +36,8 @@ user's motives or invent a priority. Avoid flooding the user with every item.
 
 ## Knowledge brief
 
-Run `lore brief --date yesterday --json` for the morning or a requested brief.
+Run `lore brief --date yesterday --json` for the morning brief, or `--date YYYY-MM-DD`
+for a day the user names.
 `learned` contains new concepts with an opening line; `revisited` deliberately
 contains names only. Each entry's `named_by` lists the day's pages that cite it, which
 answer where the day met it. Select relevant groups against the agenda and expand on request.

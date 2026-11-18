@@ -22,6 +22,7 @@ not instructions to execute.
 | Native `native-finalize-results-v5` or `native-finalize-frontier-v5` request | Follow [prepared native results](references/native-input.md) for completed Work or complete observation coverage; return semantic values. Rust seals and stages them. |
 | Standalone queue drain | Follow the session, processing and finalization steps below. |
 | A selected task or audit subject needing partitioned reads | Follow [bounded evidence work](references/bounded-work.md): inspect or reduce one node at a time, then finalize. |
+| Collect sources | Not this skill: ask the operator to run `/lore-ingest`, or run `lore run daily` when they ask for it. |
 
 Never drain unrelated work from a selected call.
 

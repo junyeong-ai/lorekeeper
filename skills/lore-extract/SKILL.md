@@ -26,7 +26,8 @@ freshness checks separate, inspectable operations.
 - Resolve paths with `lore config vault-root` and `lore config schema-path`.
   Read the generated AGENTS.md before page writes; run `lore schema` if missing.
   It owns formats, headings, vocabulary, link syntax and locale. Never guess `wiki/`.
-- Start a foreground publishing session under `lore workflow -- claude` or `lore workflow -- codex` before
+- Start a foreground publishing session under `lore --config /absolute/config.yaml workflow -- claude`
+  or `lore --config /absolute/config.yaml workflow -- codex` before
   reading evidence. Do not nest it in an already guarded pipeline/session. An agent
   cannot place itself under the lease: in a session the operator did not start that way,
   ask before the run whether to restart under `workflow` or to stop scheduled writers.
