@@ -2120,28 +2120,24 @@ pub(super) fn prepare_task(
     config_revision: &str,
     task_id: &str,
 ) -> miette::Result<TaskPreparation> {
-    prepare_task_controlled(
-        session,
-        config,
-        config_revision,
-        task_id,
-        &lk_vault::ReadControl::default(),
-    )
+    let read = lk_vault::ReadControl::default();
+    let task = super::queue::current_task_controlled(session.root(), task_id, &read)?;
+    prepare_task_controlled(session, config, config_revision, &task, &read)
 }
 
+/// Prepare a task this checkpoint already selected as current.
 pub(super) fn prepare_task_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
-    task_id: &str,
+    task: &lk_queue::QueueTask,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<TaskPreparation> {
-    let task = super::queue::current_task_controlled(session.root(), task_id, read)?;
     TaskPreparation::from_result(prepare_task_in_session(
         session,
         config,
         config_revision,
-        &task,
+        task,
         None,
         None,
         read,
@@ -2190,12 +2186,13 @@ pub(super) fn prepare_tasks_with_audit(
         None => (Vec::new(), lk_vault::DiscoveryCaptureMetrics::default()),
     };
     let mut captures = positions.into_iter().zip(captures).peekable();
+    let pending = super::queue::PendingTasks::load_controlled(root, read)?;
     let work = tasks
         .iter()
         .enumerate()
         .map(|(index, task)| {
             read.check().into_diagnostic()?;
-            let task = super::queue::current_task_controlled(root, &task.task_id, read)?;
+            let task = pending.current_controlled(root, &task.task_id, read)?;
             let screening = if captures.peek().is_some_and(|(at, _)| *at == index) {
                 let (_, capture) = captures.next().expect("indexed capture");
                 let reviews = reviews

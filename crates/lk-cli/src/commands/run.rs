@@ -4905,6 +4905,10 @@ mod native {
                     miette::miette!("extraction preparation did not acquire writer access")
                 })?;
             let root = session.root();
+            let pending = crate::commands::queue::PendingTasks::load_controlled(
+                root,
+                self.supervisor.read_control(),
+            )?;
             let mut unfinished = false;
             for task in tasks {
                 if crate::commands::queue::tasks_completed_controlled(
@@ -4918,7 +4922,7 @@ mod native {
                 if task.kind != lk_queue::TaskKind::ExtractConcepts {
                     return Ok(false);
                 }
-                let current = crate::commands::queue::current_task_controlled(
+                let current = pending.current_controlled(
                     root,
                     &task.task_id,
                     self.supervisor.read_control(),
@@ -4934,7 +4938,7 @@ mod native {
                             &session,
                             &self.config,
                             &self.config_revision,
-                            &current.task_id,
+                            &current,
                             self.supervisor.read_control(),
                         )?
                         .work,

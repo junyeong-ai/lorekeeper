@@ -424,60 +424,94 @@ pub(super) fn select_task_controlled(
     control: &lk_vault::ReadControl,
 ) -> miette::Result<QueueTask> {
     control.check().into_diagnostic()?;
-    let pending = read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), control)?;
-    if pending.unparseable != 0 && matches!(selection, TaskSelection::Current) {
-        return Err(miette::miette!(
-            "unparseable pending tasks prevent selecting semantic work"
-        ));
+    PendingTasks::load_controlled(root, control)?
+        .select_controlled(root, task_id, selection, control)
+}
+
+/// The pending queue as one read captured it. A preparation checkpoint selects each of
+/// its tasks from one snapshot; rereading the queue per task costs its full size each time.
+pub(super) struct PendingTasks {
+    tasks: BTreeMap<(String, String), QueueTask>,
+    unparseable: usize,
+}
+
+impl PendingTasks {
+    pub(super) fn load_controlled(
+        root: &Path,
+        control: &lk_vault::ReadControl,
+    ) -> miette::Result<Self> {
+        read_pending_tasks_controlled(&root.join(".lorekeeper/queue"), control)
     }
-    let mut selected = pending
-        .tasks
-        .into_values()
-        .filter(|task| task.task_id == task_id);
-    let task = selected
-        .next()
-        .ok_or_else(|| miette::miette!("current task not found: {task_id}"))?;
-    if selected.next().is_some() {
-        return Err(miette::miette!("ambiguous pending task id: {task_id}"));
+
+    pub(super) fn current_controlled(
+        &self,
+        root: &Path,
+        task_id: &str,
+        control: &lk_vault::ReadControl,
+    ) -> miette::Result<QueueTask> {
+        self.select_controlled(root, task_id, TaskSelection::Current, control)
     }
-    let status = classify_with_reader_controlled(
-        root,
-        &task,
-        &mut BTreeMap::new(),
-        Artifact::Task,
-        &mut |path| control.read_to_string(&lk_vault::page_path(root, path)?),
-        control,
-    )?
-    .status;
-    let mut allowed = status == TaskStatus::Current
-        || (matches!(selection, TaskSelection::CurrentOrDoneExtraction)
-            && status == TaskStatus::Done
-            && task.kind == lk_queue::TaskKind::ExtractConcepts);
-    if allowed && status == TaskStatus::Done {
-        let target = resolve_target_path(&task.target.vault_path)
-            .ok_or_else(|| miette::miette!("invalid extraction target"))?;
-        allowed = classify_against_page_controlled(
+
+    fn select_controlled(
+        &self,
+        root: &Path,
+        task_id: &str,
+        selection: TaskSelection,
+        control: &lk_vault::ReadControl,
+    ) -> miette::Result<QueueTask> {
+        control.check().into_diagnostic()?;
+        if self.unparseable != 0 && matches!(selection, TaskSelection::Current) {
+            return Err(miette::miette!(
+                "unparseable pending tasks prevent selecting semantic work"
+            ));
+        }
+        let mut selected = self.tasks.values().filter(|task| task.task_id == task_id);
+        let task = selected
+            .next()
+            .ok_or_else(|| miette::miette!("current task not found: {task_id}"))?
+            .clone();
+        if selected.next().is_some() {
+            return Err(miette::miette!("ambiguous pending task id: {task_id}"));
+        }
+        let status = classify_with_reader_controlled(
             root,
-            &target,
-            task.target.kind,
-            &task.cache_hash,
-            &task.anchors(),
-            Artifact::Result,
+            &task,
+            &mut BTreeMap::new(),
+            Artifact::Task,
+            &mut |path| control.read_to_string(&lk_vault::page_path(root, path)?),
             control,
-        )? == TaskStatus::Current;
+        )?
+        .status;
+        let mut allowed = status == TaskStatus::Current
+            || (matches!(selection, TaskSelection::CurrentOrDoneExtraction)
+                && status == TaskStatus::Done
+                && task.kind == lk_queue::TaskKind::ExtractConcepts);
+        if allowed && status == TaskStatus::Done {
+            let target = resolve_target_path(&task.target.vault_path)
+                .ok_or_else(|| miette::miette!("invalid extraction target"))?;
+            allowed = classify_against_page_controlled(
+                root,
+                &target,
+                task.target.kind,
+                &task.cache_hash,
+                &task.anchors(),
+                Artifact::Result,
+                control,
+            )? == TaskStatus::Current;
+        }
+        if !allowed {
+            return Err(miette::miette!(
+                "task {task_id} is {}, not current",
+                status.as_str()
+            ));
+        }
+        task.validate_retained_input()
+            .map_err(|e| miette::miette!("{e}"))?;
+        task.generation_policy()
+            .map_err(|e| miette::miette!("{e}"))?;
+        control.check().into_diagnostic()?;
+        Ok(task)
     }
-    if !allowed {
-        return Err(miette::miette!(
-            "task {task_id} is {}, not current",
-            status.as_str()
-        ));
-    }
-    task.validate_retained_input()
-        .map_err(|e| miette::miette!("{e}"))?;
-    task.generation_policy()
-        .map_err(|e| miette::miette!("{e}"))?;
-    control.check().into_diagnostic()?;
-    Ok(task)
 }
 
 /// Pending queue files, sorted by name (run-id order). `.jsonl` only — skips the
@@ -515,11 +549,6 @@ fn pending_queue_files_controlled(
 
 fn read_tasks(file: &Path) -> miette::Result<QueueFile> {
     lk_queue::read_tasks(file).map_err(|e| miette::miette!("read {}: {e}", file.display()))
-}
-
-struct PendingTasks {
-    tasks: BTreeMap<(String, String), QueueTask>,
-    unparseable: usize,
 }
 
 fn read_pending_tasks(queue: &Path) -> miette::Result<PendingTasks> {
