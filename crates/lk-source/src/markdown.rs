@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 
+use htmd::element_handler::{Context, Element, HandlerResult, Handlers};
+use htmd::node::{Node, NodeType};
 use serde_json::Value;
 
 /// Convert an HTML fragment to Markdown via `htmd`. `htmd::convert` reads from an
@@ -40,27 +42,19 @@ pub fn html_to_markdown(html: &str) -> String {
         .add_handler(vec!["ac:adf-extension"], one_adf_representation)
         .build();
     converter
-        .convert(&normalize_storage_format(html))
+        .convert(normalize_storage_format(html))
         .map(|md| md.trim().to_string())
         .unwrap_or_default()
 }
 
-fn html_link(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let content = handlers.walk_children(element.node).content;
-    let attribute = |key: &str| {
-        element
-            .attrs
-            .iter()
-            .find(|attr| attr.name.local.as_ref() == key)
-            .map(|attr| attr.value.as_ref())
-    };
-    let Some(destination) = attribute("href") else {
+fn html_link(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    let content = handlers.walk_children_content(element.node, element.context);
+    let Some(destination) = element.node.attr("href") else {
         return Some(content.into());
     };
-    let title = attribute("title").unwrap_or("");
+    let destination = &*destination;
+    let title = element.node.attr("title");
+    let title = title.as_deref().unwrap_or("");
     let label = content.trim_ascii();
     let mut rendered = lk_core::link::InlineLink {
         raw_text: label,
@@ -85,27 +79,26 @@ fn serialize_inline(events: &[pulldown_cmark::Event<'_>]) -> String {
 /// GFM has one column-header row and no spanning cells. Read direct cells together,
 /// in DOM order, retaining empty cells and row labels. Structures
 /// GFM cannot express stay HTML instead of being flattened into a different table.
-fn ordered_html_table(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
+fn ordered_html_table(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
     let mut rows = Vec::new();
     let mut captions = Vec::new();
     let mut header_rows = 0;
     let mut representable = true;
-    for child in element.node.children.borrow().iter() {
-        match element_name(child) {
-            Some("caption") => captions.push(handlers.walk_children(child).content),
-            Some("thead" | "tbody" | "tfoot") => {
-                for row in child.children.borrow().iter() {
-                    if element_name(row) == Some("tr") {
-                        let header = element_name(child) == Some("thead");
+    for child in children(element.node) {
+        match child.tag_name() {
+            Some("caption") => {
+                captions.push(handlers.walk_children_content(&child, Context::INLINE))
+            }
+            Some(section @ ("thead" | "tbody" | "tfoot")) => {
+                for row in children(&child) {
+                    if row.tag_name() == Some("tr") {
+                        let header = section == "thead";
                         header_rows += usize::from(header);
-                        rows.push((row.clone(), header));
+                        rows.push((row, header));
                     }
                 }
             }
-            Some("tr") => rows.push((child.clone(), false)),
+            Some("tr") => rows.push((child, false)),
             Some(_) => representable = false,
             None => {}
         }
@@ -114,24 +107,18 @@ fn ordered_html_table(
     let mut rendered_rows = Vec::new();
     let mut has_header = false;
     for (index, (row, in_head)) in rows.iter().enumerate() {
-        let cells: Vec<_> = row
-            .children
-            .borrow()
-            .iter()
-            .filter(|node| matches!(element_name(node), Some("th" | "td")))
-            .cloned()
+        let cells: Vec<_> = children(row)
+            .filter(|node| matches!(node.tag_name(), Some("th" | "td")))
             .collect();
         if cells.is_empty() {
             representable = false;
         }
-        let row_header = |cell: &std::rc::Rc<markup5ever_rcdom::Node>| {
-            html_attribute(cell, "scope").is_some_and(|scope| {
+        let row_header = |cell: &Node<'_>| {
+            cell.attr("scope").is_some_and(|scope| {
                 scope.eq_ignore_ascii_case("row") || scope.eq_ignore_ascii_case("rowgroup")
             })
         };
-        let column_header = |cell: &std::rc::Rc<markup5ever_rcdom::Node>| {
-            element_name(cell) == Some("th") && !row_header(cell)
-        };
+        let column_header = |cell: &Node<'_>| cell.tag_name() == Some("th") && !row_header(cell);
         if index == 0 {
             has_header = *in_head || (!cells.is_empty() && cells.iter().all(column_header));
             // A mixed row outside thead may contain column or row headers. Preserve
@@ -148,12 +135,12 @@ fn ordered_html_table(
         let mut rendered = Vec::new();
         for cell in cells {
             for attribute in ["rowspan", "colspan"] {
-                if html_attribute(&cell, attribute).is_some_and(|value| value != "1") {
+                if cell.attr(attribute).is_some_and(|value| value != "1") {
                     representable = false;
                 }
             }
-            if html_attribute(&cell, "headers").is_some()
-                || html_attribute(&cell, "scope").is_some_and(|scope| {
+            if cell.attr("headers").is_some()
+                || cell.attr("scope").is_some_and(|scope| {
                     scope.eq_ignore_ascii_case("colgroup") || scope.eq_ignore_ascii_case("rowgroup")
                 })
             {
@@ -162,7 +149,7 @@ fn ordered_html_table(
             // Lists, paragraphs, code blocks and nested tables cannot be flattened
             // into one GFM cell without changing their structure.
             representable &= !has_html_table_blocks(&cell);
-            let content = handlers.walk_children(&cell).content;
+            let content = handlers.walk_children_content(&cell, Context::INLINE);
             rendered.push(content.trim().replace('|', "\\|").replace('\n', "<br>"));
         }
         rendered_rows.push(rendered);
@@ -180,7 +167,7 @@ fn ordered_html_table(
             },
         )
         .expect("serializing HTML into a Vec cannot fail");
-        return Some(htmd::element_handler::HandlerResult {
+        return Some(HandlerResult {
             content: format!(
                 "\n\n{}\n\n",
                 String::from_utf8(bytes).expect("HTML serializer writes UTF-8")
@@ -219,21 +206,15 @@ fn ordered_html_table(
     Some(out.into())
 }
 
-fn html_attribute(node: &markup5ever_rcdom::Node, attribute: &str) -> Option<String> {
-    match &node.data {
-        markup5ever_rcdom::NodeData::Element { attrs, .. } => attrs
-            .borrow()
-            .iter()
-            .find(|attr| &*attr.name.local == attribute)
-            .map(|attr| attr.value.to_string()),
-        _ => None,
-    }
+/// Direct children carrying the tree's lifetime, so they outlive the borrow that found them.
+fn children<'a>(node: &Node<'a>) -> impl Iterator<Item = Node<'a>> + use<'a> {
+    std::iter::successors(node.first_child(), Node::next_sibling)
 }
 
-fn has_html_table_blocks(node: &markup5ever_rcdom::Node) -> bool {
-    node.children.borrow().iter().any(|child| {
+fn has_html_table_blocks(node: &Node<'_>) -> bool {
+    children(node).any(|child| {
         matches!(
-            element_name(child),
+            child.tag_name(),
             Some(
                 "table"
                     | "p"
@@ -259,45 +240,58 @@ fn has_html_table_blocks(node: &markup5ever_rcdom::Node) -> bool {
                     | "h5"
                     | "h6"
             )
-        ) || has_html_table_blocks(child)
+        ) || has_html_table_blocks(&child)
     })
 }
 
 /// Preserve tables outside GFM's model, using the same machine-text/data-image
-/// exclusions as the Markdown handlers. The HTML serializer handles escaping.
-struct NormalizedTableHtml<'a>(&'a std::rc::Rc<markup5ever_rcdom::Node>);
+/// exclusions as the Markdown handlers. The HTML serializer handles escaping. The
+/// parsed DOM exposes local names only, so elements are written in the HTML namespace
+/// and attributes without a namespace prefix.
+struct NormalizedTableHtml<'n, 'a>(&'n Node<'a>);
 
-impl html5ever::serialize::Serialize for NormalizedTableHtml<'_> {
+impl html5ever::serialize::Serialize for NormalizedTableHtml<'_, '_> {
     fn serialize<S: html5ever::serialize::Serializer>(
         &self,
         serializer: &mut S,
         _: html5ever::serialize::TraversalScope,
     ) -> std::io::Result<()> {
-        use markup5ever_rcdom::NodeData;
-        match &self.0.data {
-            NodeData::Element { name, attrs, .. } => {
-                if MACHINE_STATE_ELEMENTS.contains(&name.local.as_ref()) {
+        let node = self.0;
+        match node.node_type() {
+            NodeType::Element => {
+                let tag = node.tag_name().expect("an element node has a tag name");
+                if MACHINE_STATE_ELEMENTS.contains(&tag) {
                     return Ok(());
                 }
-                if name.local.as_ref() == "img"
-                    && html_attribute(self.0, "src").is_some_and(|src| is_data_uri(&src))
-                {
-                    return serializer
-                        .write_text(&html_attribute(self.0, "alt").unwrap_or_default());
+                if tag == "img" && node.attr("src").is_some_and(|src| is_data_uri(&src)) {
+                    return serializer.write_text(node.attr("alt").as_deref().unwrap_or_default());
                 }
+                let name = html5ever::QualName::new(None, html5ever::ns!(html), tag.into());
+                let attrs = node.attrs();
+                let attrs = attrs
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            html5ever::QualName::new(None, html5ever::ns!(), name.into()),
+                            value,
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 serializer.start_elem(
                     name.clone(),
-                    attrs.borrow().iter().map(|attr| (&attr.name, &*attr.value)),
+                    attrs.iter().map(|(name, value)| (name, *value)),
                 )?;
-                for child in self.0.children.borrow().iter() {
-                    NormalizedTableHtml(child).serialize(
+                for child in children(node) {
+                    NormalizedTableHtml(&child).serialize(
                         serializer,
                         html5ever::serialize::TraversalScope::IncludeNode,
                     )?;
                 }
-                serializer.end_elem(name.clone())?;
+                serializer.end_elem(name)?;
             }
-            NodeData::Text { contents } => serializer.write_text(&contents.borrow())?,
+            NodeType::Text => {
+                serializer.write_text(&node.text().expect("a text node has contents"))?
+            }
             _ => {}
         }
         Ok(())
@@ -347,11 +341,8 @@ const MACHINE_STATE_ELEMENTS: &[&str] = &[
 /// checklist says. The storage words `complete`/`incomplete` are the machine's spelling of it,
 /// so anything else — a status this converter has no translation for — degrades to nothing
 /// rather than leaking that vocabulary into the prose.
-fn task_checkbox(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let state = handlers.walk_children(element.node).content;
+fn task_checkbox(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    let state = handlers.walk_children_content(element.node, element.context);
     Some(match state.trim() {
         "complete" => "[x] ".to_string().into(),
         "incomplete" => "[ ] ".to_string().into(),
@@ -359,10 +350,7 @@ fn task_checkbox(
     })
 }
 
-fn drop_element(
-    _: &dyn htmd::element_handler::Handlers,
-    _: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
+fn drop_element(_: &dyn Handlers, _: &Element<'_>) -> Option<HandlerResult> {
     Some(String::new().into())
 }
 
@@ -389,11 +377,8 @@ const ATTRIBUTE_BORNE_TEXT: &[(&str, &str)] = &[
 /// Only `time` can carry both — `<time datetime="2020-12-25">Christmas</time>` — and there
 /// the word is what the page reads. The rest are empty elements, for which this degenerates
 /// to the attribute, so one rule covers both without a special case.
-fn attribute_borne_text(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let text = handlers.walk_children(element.node).content;
+fn attribute_borne_text(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    let text = handlers.walk_children_content(element.node, element.context);
     if !text.trim().is_empty() {
         return Some(text.into());
     }
@@ -404,8 +389,8 @@ fn attribute_borne_text(
         .find(|(tag, _)| *tag == element.tag)
         .map(|(_, attr)| *attr);
     let value = carrier
-        .and_then(|attr| element.attrs.iter().find(|a| &*a.name.local == attr))
-        .map(|a| a.value.to_string())
+        .and_then(|attr| element.node.attr(attr))
+        .map(|value| value.to_string())
         .unwrap_or_default();
     Some(serialize_inline(&[pulldown_cmark::Event::Text(value.into())]).into())
 }
@@ -422,11 +407,8 @@ fn attribute_borne_text(
 /// it to the gap BETWEEN the two: a link with no resource label — an anchor link, the form
 /// where the body stands alone — renders its body and trims the leading space away, so it
 /// never gains a stray one before the sentence's next character.
-fn spaced_link_body(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let body = handlers.walk_children(element.node).content;
+fn spaced_link_body(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    let body = handlers.walk_children_content(element.node, element.context);
     let body = body.trim();
     Some(if body.is_empty() {
         String::new().into()
@@ -450,47 +432,36 @@ fn spaced_link_body(
 /// fallback comes second — and a premise that fails does so silently, inverting the rule into
 /// exactly the stand-in-wins outcome it was chosen to prevent. Naming the children has no
 /// premise to fail.
-fn one_adf_representation(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let children = element.node.children.borrow();
+fn one_adf_representation(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
     // `handle`, not `walk_children`: a child's OWN rendering, so one that is not an element
     // wrapper — bare text — is not silently skipped over.
-    let render = |rendered: &std::rc::Rc<markup5ever_rcdom::Node>| {
+    let render = |rendered: Node<'_>| {
         handlers
-            .handle(rendered)
+            .handle(&rendered, element.context)
             .map(|result| result.content)
             .filter(|content| !content.trim().is_empty())
     };
     let named = |name: &'static str| {
-        children
-            .iter()
-            .filter(|child| element_name(child) == Some(name))
+        children(element.node)
+            .filter(|child| child.tag_name() == Some(name))
             .find_map(render)
     };
     let chosen = named("ac:adf-node")
         .or_else(|| named("ac:adf-fallback"))
         // An extension holding neither still says whatever it holds.
-        .or_else(|| children.iter().find_map(render))
+        .or_else(|| children(element.node).find_map(render))
         .unwrap_or_default();
     Some(chosen.into())
 }
 
-/// The tag name of `node`, or `None` when it is not an element.
-fn element_name(node: &std::rc::Rc<markup5ever_rcdom::Node>) -> Option<&str> {
-    match &node.data {
-        markup5ever_rcdom::NodeData::Element { name, .. } => Some(&name.local),
-        _ => None,
-    }
-}
-
 /// See [`spaced_link_body`] — this is the half that keeps the separator internal.
-fn trimmed_link(
-    handlers: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    Some(handlers.walk_children(element.node).content.trim().into())
+fn trimmed_link(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    Some(
+        handlers
+            .walk_children_content(element.node, element.context)
+            .trim()
+            .into(),
+    )
 }
 
 /// Rewrite the parts of Confluence storage format that an HTML parser reads wrongly, so the
@@ -881,19 +852,13 @@ fn is_data_uri(url: &str) -> bool {
 /// carrying zero retrievable knowledge — so it degrades to its alt text (the
 /// loss-averse rule: keep the text content). A fetchable `http(s)` image keeps the
 /// standard `![alt](src "title")` form.
-fn img_without_data_uris(
-    _: &dyn htmd::element_handler::Handlers,
-    element: htmd::Element,
-) -> Option<htmd::element_handler::HandlerResult> {
-    let attr = |name: &str| {
-        element
-            .attrs
-            .iter()
-            .find(|a| &a.name.local == name)
-            .map(|a| a.value.as_ref())
-    };
-    let src = attr("src")?;
-    let alt = attr("alt").unwrap_or_default();
+fn img_without_data_uris(_: &dyn Handlers, element: &Element<'_>) -> Option<HandlerResult> {
+    let src = element.node.attr("src")?;
+    let src = &*src;
+    let alt = element.node.attr("alt");
+    let alt = alt.as_deref().unwrap_or_default();
+    let title = element.node.attr("title");
+    let title = title.as_deref().unwrap_or_default();
 
     use pulldown_cmark::{Event, LinkType, Tag, TagEnd};
 
@@ -906,7 +871,7 @@ fn img_without_data_uris(
             Event::Start(Tag::Image {
                 link_type: LinkType::Inline,
                 dest_url: src.into(),
-                title: attr("title").unwrap_or_default().into(),
+                title: title.into(),
                 id: "".into(),
             }),
             Event::Text(alt.into()),
@@ -1396,30 +1361,30 @@ mod tests {
     fn cdata_inside_a_raw_text_element_keeps_its_entities() {
         assert_eq!(
             html_to_markdown("<xmp>sample <![CDATA[a < b & c]]> end</xmp>"),
-            "sample a &lt; b &amp; c end"
+            "sample a \\&lt; b \\&amp; c end"
         );
         // The same holds for the bare opening token of a section that never closes. Escaping
         // that one buys nothing here — RAWTEXT has no bogus-comment state to protect against —
         // so this is the second shape the gap takes, not a separate one.
         assert_eq!(
             html_to_markdown("<xmp>text <![CDATA[ unterminated</xmp>"),
-            "text &lt;!\\[CDATA\\[ unterminated"
+            "text \\&lt;!\\[CDATA\\[ unterminated"
         );
         // `iframe` and `noscript` are the reachable two — RSS full-text fetching pulls arbitrary
         // pages — so both are pinned by name rather than left standing behind `xmp`. `noscript`
         // is raw text that is KEPT, which is what puts it in this set and not in the dropped one.
         assert_eq!(
             html_to_markdown("<iframe>fallback mentions <![CDATA[ never closes</iframe>"),
-            "fallback mentions &lt;!\\[CDATA\\[ never closes"
+            "fallback mentions \\&lt;!\\[CDATA\\[ never closes"
         );
         assert_eq!(
             html_to_markdown("<noscript>alt text <![CDATA[a < b]]> end</noscript>"),
-            "alt text a &lt; b end"
+            "alt text a \\&lt; b end"
         );
         // A text box is RCDATA, so the entities decode again and nothing shows.
         assert_eq!(
             html_to_markdown("<textarea>note <![CDATA[a < b & c]]> end</textarea>"),
-            "note a < b & c end"
+            "note a < b \\& c end"
         );
     }
 

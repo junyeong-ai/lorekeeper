@@ -117,7 +117,7 @@ pub(crate) fn visit_html_elements(
     let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(content);
     for node in elements(&dom, true) {
         if let NodeData::Element { name, attrs, .. } = &node.data {
-            visit(name.local.as_ref(), name.ns.as_ref(), &attrs.borrow());
+            visit(&name.local, &name.ns, &attrs.borrow());
         }
     }
 }
@@ -131,13 +131,12 @@ pub(crate) fn html(content: &str, base: Option<&Url>) -> Result<String, SourceEr
     let elements = elements(&dom, true);
     let declared_base = active_elements.iter().find_map(|node| match &node.data {
         NodeData::Element { name, attrs, .. }
-            if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                && name.local.as_ref() == "base" =>
+            if &*name.ns == "http://www.w3.org/1999/xhtml" && &*name.local == "base" =>
         {
             attrs
                 .borrow()
                 .iter()
-                .find(|attr| attr.name.local.as_ref() == "href")
+                .find(|attr| &*attr.name.local == "href")
                 .map(|attr| attr.value.to_string())
         }
         _ => None,
@@ -168,14 +167,8 @@ pub(crate) fn html(content: &str, base: Option<&Url>) -> Result<String, SourceEr
         if let NodeData::Element { name, attrs, .. } = &node.data {
             let mut attrs = attrs.borrow_mut();
             for attr in attrs.iter_mut() {
-                if is_url_attribute(
-                    name.local.as_ref(),
-                    attr.name.local.as_ref(),
-                    name.ns.as_ref(),
-                ) {
-                    if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                        && name.local.as_ref() == "base"
-                    {
+                if is_url_attribute(&name.local, &attr.name.local, &name.ns) {
+                    if &*name.ns == "http://www.w3.org/1999/xhtml" && &*name.local == "base" {
                         continue;
                     }
                     let resolved = validate_destination(attr.value.as_ref(), effective_base)?;
@@ -236,23 +229,19 @@ pub(crate) fn markdown(content: &str, base: Option<&Url>) -> Result<String, Sour
         let dom = html5ever::parse_document(RcDom::default(), Default::default()).one(rendered);
         for node in elements(&dom, true) {
             if let NodeData::Element { name, attrs, .. } = &node.data {
-                if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                    && name.local.as_ref() == "base"
+                if &*name.ns == "http://www.w3.org/1999/xhtml"
+                    && &*name.local == "base"
                     && attrs
                         .borrow()
                         .iter()
-                        .any(|attr| attr.name.local.as_ref() == "href")
+                        .any(|attr| &*attr.name.local == "href")
                 {
                     return Err(dependency_error(
                         "HTML base in Markdown has no captured source authority",
                     ));
                 }
                 for attr in attrs.borrow().iter() {
-                    if is_url_attribute(
-                        name.local.as_ref(),
-                        attr.name.local.as_ref(),
-                        name.ns.as_ref(),
-                    ) {
+                    if is_url_attribute(&name.local, &attr.name.local, &name.ns) {
                         validate_destination(attr.value.as_ref(), None)?;
                     }
                 }

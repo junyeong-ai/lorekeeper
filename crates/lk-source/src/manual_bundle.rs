@@ -162,7 +162,7 @@ pub(crate) fn html_references(text: &str) -> (Vec<String>, BTreeSet<String>) {
             unsupported.insert(format!("html-{tag}"));
         }
         for attr in attrs {
-            let key = attr.name.local.as_ref();
+            let key = &*attr.name.local;
             // A closed table of URL-bearing HTML/foreign-content surfaces. Unsupported
             // syntax is recorded even when it points to a remote URI: preserving HTML
             // bytes is not a claim to have captured those resource semantics.

@@ -50,11 +50,12 @@ blake3 = "1"
 semver = "1"
 tar = "0.4"
 flate2 = "1"
-htmd = "0.5"
-# Match htmd's public DOM types and serializer traits. Upgrade this parser family
-# together when htmd's published dependency requirements change.
-html5ever = "0.38"
-markup5ever_rcdom = "0.38"
+htmd = "0.6"
+# One HTML parser family: htmd parses with html5ever, and search, remote text and
+# table serialization read or write the same HTML directly. Upgrade them together
+# when htmd's html5ever requirement changes.
+html5ever = "0.40"
+markup5ever_rcdom = "0.40"
 feed-rs = "3"
 quick-xml = { version = "0.42", features = ["encoding"] }
 dom_smoothie = "0.19"

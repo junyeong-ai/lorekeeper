@@ -2014,8 +2014,8 @@ fn has_html_opening_boundary(
             .iter()
             .find(|child| {
                 matches!(&child.data, NodeData::Element { name, .. }
-                    if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-                    && name.local.as_ref() == tag)
+                    if &*name.ns == "http://www.w3.org/1999/xhtml"
+                    && &*name.local == tag)
             })
             .cloned()
     };
@@ -2030,9 +2030,9 @@ fn has_html_opening_boundary(
         !matches!(&child.data, NodeData::Text { contents } if contents.borrow().trim().is_empty())
     }) else { return false };
     matches!(&last.data, NodeData::Element { name, attrs, .. }
-        if name.ns.as_ref() == "http://www.w3.org/1999/xhtml"
-        && name.local.as_ref() == "h2" && attrs.borrow().iter().any(|attribute|
-            attribute.name.ns.as_ref().is_empty() && attribute.name.local.as_ref() == marker))
+        if &*name.ns == "http://www.w3.org/1999/xhtml"
+        && &*name.local == "h2" && attrs.borrow().iter().any(|attribute|
+            attribute.name.ns.is_empty() && *attribute.name.local == marker))
 }
 
 fn html_search_blocks<'a>(
@@ -2149,7 +2149,7 @@ fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, pr
             }
         }
         NodeData::Element { name, attrs, .. } => {
-            let tag = name.local.as_ref();
+            let tag = &*name.local;
             if matches!(
                 tag,
                 "head"
@@ -2221,7 +2221,7 @@ fn append_html_search_text(node: &markup5ever_rcdom::Node, text: &mut String, pr
                 && let Some(alt) = attrs
                     .borrow()
                     .iter()
-                    .find(|attr| attr.name.local.as_ref() == "alt")
+                    .find(|attr| &*attr.name.local == "alt")
             {
                 text.push_str(&alt.value);
             }
