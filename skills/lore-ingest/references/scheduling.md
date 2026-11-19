@@ -38,7 +38,8 @@ The scheduler emits native commands:
 - `ingest.schedule`: `lore run daily --wait`.
 - `graph.audit.schedule`: `lore run knowledge --wait`.
 - Period schedules: `lore synthesis PERIOD --previous --defer --wait-for-vault`.
-- Maintenance: `lore maintenance --prune-queue --wait-for-vault`.
+- Maintenance: `lore maintenance --prune-queue --wait-for-vault`. It waits for the
+  workflow lease, so a running process or knowledge campaign yields to it.
 - A configured task board: `lore task remind notify` every five minutes.
 
 ## Automation budget

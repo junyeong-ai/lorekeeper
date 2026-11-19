@@ -48,8 +48,9 @@ deferred subcommands expose their names eagerly for name-only discovery.
   contender retains admission until it obtains the workflow lease, preventing a
   new campaign batch from barging ahead. Release admission before working/exec;
   only the workflow descriptor is inherited. Cancellation/refusal releases held
-  claims by descriptor lifetime. Maintenance's nonblocking retention claim uses
-  the same admission order. Neither file is unlinked, and legacy binaries still
+  claims by descriptor lifetime. Maintenance claims retention through the same
+  admission order: it skips held work stores unless `--wait-for-vault` makes it wait,
+  so scheduled campaigns yield to it. Neither file is unlinked, and legacy binaries still
   share mutual exclusion through `workflow.lock` without the admission guarantee.
 - The lease lasts only while a participating process retains the descriptor. Detached
   programs or programs closing inherited descriptors are outside that guarantee. No

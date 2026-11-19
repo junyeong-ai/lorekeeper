@@ -185,7 +185,8 @@ pub enum Command {
         /// Also retire completed queue runs and prune stale pending tasks
         #[arg(long)]
         prune_queue: bool,
-        /// Wait for the vault writer instead of failing when another writer is active
+        /// Wait for the workflow lease and vault writer instead of skipping work-store
+        /// retention or failing while another workflow or writer holds them
         #[arg(long)]
         wait_for_vault: bool,
         /// Report what would be pruned, and delete nothing

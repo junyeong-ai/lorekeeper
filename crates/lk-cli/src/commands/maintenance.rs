@@ -76,21 +76,35 @@ pub async fn run(
         || retired_selection_present)
         && !dry_run
     {
-        let lease = super::workflow::WorkflowLease::prepare_selected(
-            opts,
-            &config,
-            &vault_root,
-            config_path.clone(),
-            config_revision.clone(),
-        )?;
-        lease.root_pin().validate()?;
-        match lease.try_lock() {
-            Ok(()) => {
-                lease.root_pin().validate()?;
-                Some(lease)
+        if wait_for_vault {
+            Some(
+                super::workflow::WorkflowLease::acquire_selected(
+                    opts,
+                    &config,
+                    &vault_root,
+                    config_path.clone(),
+                    config_revision.clone(),
+                    true,
+                )
+                .await?,
+            )
+        } else {
+            let lease = super::workflow::WorkflowLease::prepare_selected(
+                opts,
+                &config,
+                &vault_root,
+                config_path.clone(),
+                config_revision.clone(),
+            )?;
+            lease.root_pin().validate()?;
+            match lease.try_lock() {
+                Ok(()) => {
+                    lease.root_pin().validate()?;
+                    Some(lease)
+                }
+                Err(std::fs::TryLockError::WouldBlock) => None,
+                Err(error) => return Err(miette::miette!("work retention lease: {error}")),
             }
-            Err(std::fs::TryLockError::WouldBlock) => None,
-            Err(error) => return Err(miette::miette!("work retention lease: {error}")),
         }
     } else {
         None

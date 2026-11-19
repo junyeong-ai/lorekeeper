@@ -1768,11 +1768,28 @@ fn maintenance_prunes_published_work_only_after_exclusive_access_without_changin
     );
     assert!(receipt_path.exists());
     assert!(unread.exists());
-    let prune = fixture.command().arg("maintenance").output().unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(fixture.root().join("vault/.lorekeeper/workflow.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let waiting = fixture
+        .command()
+        .args(["maintenance", "--wait-for-vault"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(work.exists(), "a held lease keeps the work store");
+    drop(lock);
+    let prune = waiting.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&prune.stderr);
+    assert!(prune.status.success(), "{stderr}");
     assert!(
-        prune.status.success(),
-        "{}",
-        String::from_utf8_lossy(&prune.stderr)
+        stderr.contains("Waiting for the vault workflow lease"),
+        "{stderr}"
     );
     assert!(!work.exists());
     assert!(
