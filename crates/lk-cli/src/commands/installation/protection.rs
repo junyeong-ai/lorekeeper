@@ -685,7 +685,8 @@ fn acquire(requests: &[Request]) -> miette::Result<Lease> {
     Lease::acquire(requests).map_err(|error| {
         if error.kind() == std::io::ErrorKind::WouldBlock {
             miette::miette!(
-                "installation is busy or in use; no installation files changed: {error}"
+                "installation is in use by another Lore process (a command, workflow session \
+                 or scheduled job); no installation files changed. Retry after it exits"
             )
         } else {
             miette::miette!("installation protection unavailable: {error}")
