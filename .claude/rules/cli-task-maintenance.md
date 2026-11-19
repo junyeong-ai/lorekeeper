@@ -26,6 +26,8 @@ paths:
   Validate the historical completion dependency closure from captured observations
   before retirement. Root, frontier and consumed-source proofs retain their distinct
   coverage; expired valid Work does not require current source-page freshness.
+  The observation index is then reconciled with the surviving Work under the same
+  claims (cli-semantic-work.md); a dry run reports without writing.
 - Maintenance removes the retired packet-selection store `.lorekeeper/queue/selection/`
   under workflow→mutation→queue claims. It inventories the whole store without opening
   a file and refuses before deleting anything when the store or any entry is a link or

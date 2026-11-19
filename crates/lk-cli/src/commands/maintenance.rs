@@ -150,6 +150,12 @@ pub async fn run(
             );
             selection_references = report.selection_references;
             selection_guards = report.selection_guards;
+            let index =
+                super::work::state::reconcile_observation_index(&vault_root, _mutation.as_ref())?;
+            eprintln!(
+                "{prefix}observation index: indexed {} and removed {} entries to match stored work.",
+                index.indexed, index.removed
+            );
         } else {
             eprintln!("{prefix}work: retained; exclusive Unix workflow access is unavailable.");
         }

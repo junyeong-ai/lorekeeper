@@ -15,6 +15,7 @@ mod evidence;
 mod finalization;
 mod frontier;
 mod inspection;
+mod observations;
 mod output;
 mod refinement;
 mod retention;
@@ -30,6 +31,7 @@ pub(crate) use inspection::OutputCapacity;
 #[cfg(unix)]
 pub(crate) use inspection::RefinementResponse;
 pub(crate) use inspection::{ObservationCandidate, ObservationRecordPlan, ObservationViolation};
+pub(crate) use observations::reconcile_observation_index;
 pub(crate) use output::ObservationTextError;
 #[cfg(unix)]
 pub(crate) use output::result_bytes as output_result_bytes;
@@ -996,6 +998,28 @@ impl Work {
         Ok(())
     }
 
+    fn semantic_purpose(&self) -> miette::Result<Value> {
+        let mut context = self
+            .context
+            .as_object()
+            .cloned()
+            .ok_or_else(|| fail("invalid work context"))?;
+        if !context.contains_key("purpose") {
+            return Err(fail("work has no semantic purpose"));
+        }
+        context.remove("subject");
+        Ok(Value::Object(context))
+    }
+
+    /// Address of one inspection's exact evidence under this Work's semantic purpose and
+    /// partition policy; equal addresses are the condition for attributed reuse.
+    fn content_revision(&self, part_id: &str) -> miette::Result<String> {
+        let purpose = encoded(&self.semantic_purpose()?)?;
+        self.plan
+            .part_content_revision(part_id, &purpose)
+            .map_err(fail)
+    }
+
     fn manifest(&self, root: &Path) -> miette::Result<(PathBuf, String)> {
         let path = work_path(&self.plan.id, "plan.json")?;
         let raw = read_optional(root, &path)?.ok_or_else(|| fail("work manifest disappeared"))?;
@@ -1721,6 +1745,9 @@ impl Work {
                 "published or consumed work observations cannot be replaced",
             ));
         }
+        if !unchanged && stored.reused_from.is_none() {
+            self.plan_observation_origin(root, node, &mut mutation)?;
+        }
         let rejected = inspection::rejection_path(self)?;
         if !evaluated.raw.contains_key(&rejected) {
             mutation.require_absent(rejected);
@@ -1835,25 +1862,12 @@ impl Work {
         new_node_id: &str,
         resources: &[SemanticResource],
     ) -> miette::Result<MutationPlan> {
-        fn purpose(context: &Value) -> miette::Result<Value> {
-            let mut context = context
-                .as_object()
-                .cloned()
-                .ok_or_else(|| fail("invalid work context"))?;
-            if !context.contains_key("purpose") {
-                return Err(fail("work has no semantic purpose"));
-            }
-            context.remove("subject");
-            Ok(Value::Object(context))
-        }
         prior.verify_context()?;
-        let purpose_value = purpose(&self.context)?;
-        if purpose_value != purpose(&prior.context)? {
+        if self.semantic_purpose()? != prior.semantic_purpose()? {
             return Err(fail(
                 "prior observation has a different semantic purpose or output contract",
             ));
         }
-        let purpose_key = encoded(&purpose_value)?;
         let evaluated = self.evaluate(session.root(), resources)?;
         let destination = evaluated
             .nodes
@@ -1875,16 +1889,8 @@ impl Work {
                 "refined observations require their complete refinement closure and cannot be reused",
             ));
         }
-        let content_revision = self
-            .plan
-            .part_content_revision(new_node_id, &purpose_key)
-            .map_err(fail)?;
-        if content_revision
-            != prior
-                .plan
-                .part_content_revision(old_node_id, &purpose_key)
-                .map_err(fail)?
-        {
+        let content_revision = self.content_revision(new_node_id)?;
+        if content_revision != prior.content_revision(old_node_id)? {
             return Err(fail("prior leaf has different assigned exact evidence"));
         }
         let NodeKind::Inspect { part_id } = &old_node.kind else {
@@ -2186,7 +2192,12 @@ mod tests {
         }
     }
 
-    fn draft(work: &Work, root: &Path, id: &str, resources: &[SemanticResource]) -> WorkOutput {
+    pub(super) fn draft(
+        work: &Work,
+        root: &Path,
+        id: &str,
+        resources: &[SemanticResource],
+    ) -> WorkOutput {
         let input = work.input(root, id, resources).unwrap();
         let children: Vec<WorkOutput> = input
             .get("children")

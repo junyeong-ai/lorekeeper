@@ -344,7 +344,14 @@ fn persist_prepared(
     prepared: &Prepared,
 ) -> miette::Result<Work> {
     let work = expected(session.root(), prepared, config, config_revision)?;
-    work.persist(session)
+    let created = !work.is_planned(session.root())?;
+    let work = work.persist(session)?;
+    if created {
+        work.reuse_recorded(session, &prepared.resources, |mutation| {
+            prepared.guard_pages(mutation)
+        })?;
+    }
+    Ok(work)
 }
 
 fn guard_prepared(

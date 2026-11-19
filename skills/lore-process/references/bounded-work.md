@@ -294,9 +294,10 @@ belong to Work identity is stated under
 [execution profiles](../../lore-setup/references/config.md#execution-profiles). Every
 configuration byte remains pinned during execution, so adjust operational limits only
 between workflows. Legacy byte-bound plans resume with the exact original configuration.
-Replan. `lore work reuse WORK NODE --from-work OLD --from-node OLD_NODE` permits
-explicitly attributed reuse of an inspection only when semantic purpose and its
-assigned exact resources/ranges match. It never claims a new read. Changed-source
+Replan. A new Work already starts with attributed reuse of every inspection whose
+semantic purpose and assigned exact resources/ranges match one another stored Work
+observed; `lore work reuse WORK NODE --from-work OLD --from-node OLD_NODE` applies the
+same check to an origin you name. Reuse never claims a new read. Changed-source
 parts and reductions must be performed again; do not copy hashes into old drafts.
 Refined source or destination nodes require their complete refinement proof and
 are not accepted by this cross-Work reuse route. Reuse attribution does not renew the
