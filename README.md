@@ -191,6 +191,7 @@ launchd 작업은 `~/Library/Logs/lorekeeper`에 기록하므로 등록하기 �
 
 업데이트는 `lore self update`, 설치 상태 확인은 `lore self status`를 사용합니다. 큐 작업이나 중단된 게시가 남아 있으면 업데이트를 거부하며,
 `--force`를 쓸 조건은 [설치 안내](skills/lore-ingest/references/installation.md#update-and-repair)에 있습니다.
+macOS에서는 업데이트 뒤 launchd 작업을 다시 등록해야 실행될 수 있습니다. [등록과 확인](skills/lore-ingest/references/scheduling.md#registration-and-verification) 절차를 따르세요.
 백업은 숨김 상태를 포함한 전체 볼트와 `config.yaml`을 함께 보존해야 합니다. 에이전트 호출 결과·큐·검토 이력은 캐시가 아닙니다.
 백업에는 자격증명이 들어 있으므로 백업 자체를 보호하세요.
 Unix의 `lore self snapshot -- 백업명령 인수...`는 백업 동안 협력 쓰기를 차단합니다.

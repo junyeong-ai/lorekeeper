@@ -31,6 +31,11 @@ read-only `lore queue check`; inspect actual vault access and termination separa
 from unfinished-queue status. A permission prompt awaiting the user is not a passed check.
 This probes only the command's read paths, not source access or a complete pipeline run.
 
+A binary update can also leave registered jobs unable to launch: `launchctl print`
+reports `last exit reason = OS_REASON_CODESIGNING` (a launch constraint violation),
+and launchd may remove a job that keeps failing. Boot each job out and bootstrap its
+plist again so launchd registers the replaced executable, then confirm one launch.
+
 ## Emitted commands
 
 The scheduler emits native commands:

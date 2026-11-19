@@ -194,6 +194,7 @@ for the exact `lore work retry` commands, each previewable with `--dry-run`.
 
 Use `lore self update` to update and `lore self status` to check installation coherence. Updates refuse while queue work
 or interrupted publication is outstanding; [installation](skills/lore-ingest/references/installation.md#update-and-repair) explains `--force`.
+On macOS, launchd jobs may need registering again after an update; follow [registration and verification](skills/lore-ingest/references/scheduling.md#registration-and-verification).
 Back up the entire vault, including hidden state, and your `config.yaml`. Agent results, queues and review history are not caches.
 Protect the backup: it contains your credentials.
 On Unix, `lore self snapshot -- BACKUP_COMMAND ARGS...` excludes cooperating writers during backup.
