@@ -10,12 +10,13 @@ updates:
       exclude: ["*"]
     open-pull-requests-limit: 10
     ignore:
-      # htmd's public DOM and serializer traits require this parser family to move together.
-      # Compatible 0.38 patches remain eligible; change the boundary with htmd's requirements.
+      # htmd parses with html5ever, and search, remote text and table serialization use the
+      # same parser family directly (Cargo.toml). Compatible 0.40 patches remain eligible;
+      # move the boundary with htmd's html5ever requirement.
       - dependency-name: html5ever
-        versions: [">=0.39.0"]
+        versions: [">=0.41.0"]
       - dependency-name: markup5ever_rcdom
-        versions: [">=0.39.0"]
+        versions: [">=0.41.0"]
     groups:
       patch-and-minor:
         update-types: [patch, minor]
