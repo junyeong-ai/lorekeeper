@@ -132,7 +132,7 @@ const PARSER_IDENTITIES: &[(&str, &str)] = &[
     ("pulldown-cmark-to-cmark", "23.0.3"),
     ("selectors", "0.41.0"),
     ("serde", "1.0.229"),
-    ("serde-saphyr", "2.1.1"),
+    ("serde-saphyr", "2.2.0"),
     ("serde_json", "1.0.154"),
     ("unicode-normalization", "0.1.26"),
     ("unicode-segmentation", "1.13.3"),
