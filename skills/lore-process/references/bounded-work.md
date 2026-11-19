@@ -124,12 +124,12 @@ coverage, not source scope or semantic approval.
 ## Private drafts
 
 For interactive inspection and finalization, create a private, unique draft
-directory directly under the vault's `.lorekeeper/`, outside `.lorekeeper/work/`,
-accessible only to the current user (`mkdir -m 700`). Never write source-derived
-drafts to a shared temporary directory or replace native plan, node or seal files.
-Lore does not remove these drafts: after `work record` or `work finish` accepts one,
-report its path as safe to delete; on failure, keep it and report its exact path for
-resumption.
+directory under the vault's `.lorekeeper/drafts/`, accessible only to the current
+user (`mkdir -p -m 700`). Never write source-derived drafts to a shared temporary
+directory or replace native plan, node or seal files. After `work record` or
+`work finish` accepts one, report its path as safe to delete; on failure, keep it
+and report its exact path for resumption. Maintenance removes a draft once every
+file in it is older than `maintenance.retention_days`.
 
 ## Inspect or reduce one node
 

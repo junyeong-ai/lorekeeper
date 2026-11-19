@@ -48,7 +48,7 @@ Read the selected subject's declared names, scope and outline with revision-chec
 the source's names and declared aliases where useful. A query is a retrieval choice,
 not a semantic verdict. Do not add synonyms or equivalence as facts merely to find pages.
 
-Stage JSON under `.lorekeeper/`, then run `lore wiki audit-discover --file FILE`:
+Stage JSON under `.lorekeeper/drafts/`, then run `lore wiki audit-discover --file FILE`:
 
 ```json
 {

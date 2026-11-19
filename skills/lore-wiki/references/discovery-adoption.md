@@ -5,7 +5,7 @@ discovery. Native discovery, screening and finalization do not adopt other scope
 Coordinate through the workflow lease before reading evidence or publishing.
 
 Read `lore wiki audit-plan --path SUBJECT` and copy the selected candidate's exact
-guards into a JSON file under `.lorekeeper/`:
+guards into a JSON file under `.lorekeeper/drafts/`:
 
 ```json
 {

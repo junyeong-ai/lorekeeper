@@ -102,7 +102,7 @@ Extract knowledge using the manifest. Requires a prior scan.
 
    i. **Publish** the document, its new concepts and alias updates as one
       [curation](../../lore-wiki/references/curation.md#metadata-and-review-corrections)
-      plan staged under the vault's `.lorekeeper/`, not in the source repository. Drafts
+      plan staged under the vault's `.lorekeeper/drafts/`, not in the source repository. Drafts
       are `pages` entries: `revision: null` for a new address, or the current file
       revision from `lore wiki read` to replace a page this extraction authored earlier.
       Alias updates are revision-guarded `concepts` entries, with each concept page read

@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::find_config;
 
+mod drafts;
+
 /// Seconds-since-epoch cutoff for pruning: entries with `seen_at`/mtime older than this
 /// are removed. Clamped at 0 so a retention horizon exceeding the time since the Unix
 /// epoch keeps everything, never a negative cutoff that would wrap when cast to `u64`
@@ -68,12 +70,14 @@ pub async fn run(
     let audit_selections_present = lk_graph::audit::selection::present(&vault_root)
         .map_err(|error| miette::miette!("{error}"))?;
     let retired_selection_present = super::work::retired_selection::present(&vault_root)?;
+    let drafts_present = drafts::present(&vault_root)?;
     #[cfg(unix)]
     let work_lease = if (work_present
         || audit_actions_present
         || audit_selections_present
         || audit_preparation_present
-        || retired_selection_present)
+        || retired_selection_present
+        || drafts_present)
         && !dry_run
     {
         if wait_for_vault {
@@ -223,6 +227,17 @@ pub async fn run(
             eprintln!(
                 "{prefix}retired selection store: retained; exclusive Unix workflow access is unavailable."
             );
+        }
+    }
+    if drafts_present {
+        if work_available {
+            let report = drafts::prune(&vault_root, _mutation.as_ref(), cutoff_secs)?;
+            eprintln!(
+                "{prefix}drafts: removed {} draft(s) unused for {retention_days}d, {} file(s), {} bytes; kept {} recent and {} holding links or special files.",
+                report.removed, report.files, report.bytes, report.recent, report.unsupported
+            );
+        } else {
+            eprintln!("{prefix}drafts: retained; exclusive Unix workflow access is unavailable.");
         }
     }
 

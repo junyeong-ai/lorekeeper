@@ -3,6 +3,7 @@ paths:
   - "crates/lk-cli/src/commands/task.rs"
   - "crates/lk-cli/src/commands/status.rs"
   - "crates/lk-cli/src/commands/maintenance.rs"
+  - "crates/lk-cli/src/commands/maintenance/**"
 ---
 
 ## Task intent (`commands/task.rs`, delegated to lk-task)
@@ -37,3 +38,8 @@ paths:
   unread state with no partial-state meaning: an interrupted run leaves a smaller store
   the next run finishes. It is not a precedent for canonical or derived data, and it
   never touches `.lorekeeper/queue/screening/`.
+- Interactive sessions stage drafts under `.lorekeeper/drafts/`. Under the workflow
+  lease, maintenance removes a draft once every file in it is older than retention;
+  a draft holding a link or special file stays for a person to inspect, and a file
+  written during removal keeps its draft. Removal is not journaled because no command
+  reads a draft except by the path a session gives it; `--dry-run` reports the counts.

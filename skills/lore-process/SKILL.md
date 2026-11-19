@@ -100,7 +100,7 @@ schema generation replaces that file wholesale.
    extraction uses `<task_id>.json`, synthesis `<task_id>.synthesis.json`, and other
    kinds `<task_id>.section.json`. Use the exact contracts in queue format. Write the
    complete JSON to that path plus `.tmp`, then rename using quoted literal paths.
-   Keep drafts under `.lorekeeper/`; never round-trip guard fields through shell
+   Keep drafts under `.lorekeeper/drafts/`; never round-trip guard fields through shell
    variables or intermediate Markdown.
 
 4. **Apply and verify.** Run `lore queue apply` before reading another task on the

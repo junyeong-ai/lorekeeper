@@ -116,7 +116,7 @@ Insufficient previews do not establish irrelevance. Each reason’s serialized J
 `max_reason_json_bytes`; the complete output must fit `max_result_bytes`. Do not infer equivalence from names or turn search scores into
 admission rules.
 
-For interactive processing, stage the output under the vault's `.lorekeeper/` and run
+For interactive processing, stage the output under the vault's `.lorekeeper/drafts/` and run
 `work select-record --task-id ID --file FILE`, then run `work select` again.
 Unknown or deferred candidates block extraction completion. A recorded decision other
 than `defer` is final for that card under that source and screening model. To
