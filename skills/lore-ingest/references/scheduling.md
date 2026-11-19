@@ -33,8 +33,10 @@ This probes only the command's read paths, not source access or a complete pipel
 
 A binary update can also leave registered jobs unable to launch: `launchctl print`
 reports `last exit reason = OS_REASON_CODESIGNING` (a launch constraint violation),
-and launchd may remove a job that keeps failing. Boot each job out and bootstrap its
-plist again so launchd registers the replaced executable, then confirm one launch.
+and launchd may remove a job that keeps failing. A running job's installation claims
+also make `self update` refuse, even with `--force`. Once no job is running (booting
+out a running job terminates it), boot each job out, update, bootstrap each plist
+again so launchd registers the replaced executable, then confirm one launch.
 
 ## Emitted commands
 
