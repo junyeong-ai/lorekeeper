@@ -26,7 +26,8 @@ one source to infer that distinction.
 ## Verify changes
 
 - Run focused tests for the affected behavior; `scripts/check.sh` is the complete CI
-  gate runner. `cargo check` checks types; `cargo fmt` formats Rust.
+  gate runner. `cargo check` checks types; `cargo fmt` formats Rust. Tests serve HTTP
+  on loopback: clear inherited proxy variables for them, as the gate does.
 - For paths, aliases and Unicode, verify case-sensitive behavior: macOS may fold
   case and NFC/NFD where Linux does not. Probe legitimate platform differences.
 - CLI/config/generated page-format surface changes are at least MINOR; corrections

@@ -29,7 +29,10 @@ gate test
 # INSTA_UPDATE pinned: inherited from the environment, `always` makes a changed snapshot
 # rewrite itself and pass, so the gate would report green on a contract nobody read. Accepting
 # a deliberate change stays a separate, explicit `cargo insta accept`.
-INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets --no-fail-fast
+# Proxy variables cleared: tests serve HTTP on loopback, and an inherited proxy whose NO_PROXY
+# omits loopback intercepts those requests. CI runs without one; later gates keep the proxy.
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+  INSTA_UPDATE=no cargo nextest run --locked --workspace --all-targets --no-fail-fast
 cargo test --locked --workspace --doc
 
 gate nodex
