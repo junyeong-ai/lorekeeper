@@ -7,6 +7,8 @@ feature-depth = 1
 [advisories]
 version = 2
 yanked = "warn"
+# Transitive dependencies count: an unmaintained crate deep in the graph is still shipped.
+unmaintained = "all"
 ignore = [
   # Unmaintained, not vulnerable, and no release is patched. It is reached only through
   # feed-rs 3.0.0, whose move to jiff is feed-rs/feed-rs#310; drop this entry with that
