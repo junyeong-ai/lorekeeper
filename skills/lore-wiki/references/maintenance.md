@@ -196,6 +196,9 @@ The final audit reads every admitted body; screening creates no citation or comp
    Do not rewrite an imported source to make competing claims agree or manufacture
    a concept to hold a document-only finding. A scoped review may assess document
    paths directly and explicitly pin the actual sources supporting its judgment.
+   Cite and pin vault pages or verified originals. Queue history under
+   `.lorekeeper/queue/processed/` and stored Work expire under maintenance retention,
+   so a judgment resting on them later loses its evidence.
 5. Resolve tasks created by this batch through lore-process. Run `lore wiki refresh`
    once after those repairs, before the final audit plan or assessment recording.
    This explicitly prepares complete lexical discovery; recording checks corpus-wide
