@@ -513,6 +513,7 @@ fn build_curation(
         for subject in &assessment.subjects {
             crate::find_page_owner(root, Path::new(subject))?;
         }
+        let linked = KnowledgeReview::linked_pages(&path, &page);
         for change in request
             .concepts
             .iter()
@@ -553,7 +554,16 @@ fn build_curation(
                     Err(error) => return Err(error.into()),
                 }
             };
-            if source_revision(&crate::parse_page(&raw).map_err(invalid)?) != citation.revision {
+            let evidence = crate::parse_page(&raw).map_err(invalid)?;
+            if let Some(error) = KnowledgeReview::self_cited_concept_error(
+                root,
+                &linked,
+                &citation.path,
+                evidence.frontmatter.is_declared_concept(),
+            )? {
+                return Err(invalid(error));
+            }
+            if source_revision(&evidence) != citation.revision {
                 return Err(invalid(format!(
                     "review evidence revision does not match proposed state: {}",
                     citation.path
@@ -1357,6 +1367,40 @@ mod tests {
             before
         );
         assert!(!root.path().join(review).exists());
+    }
+
+    #[test]
+    fn review_curation_refuses_pinning_a_concept_the_review_links() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/a.md";
+        let source = "wiki/documents/source.md";
+        let concept_raw = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claims something.\n";
+        let source_raw = "---\ntype: document\ntitle: Source\n---\n## Summary\nThe observation.\n";
+        let writer = crate::VaultWriter::new(root.path());
+        writer
+            .write_page_sync(Path::new(concept), concept_raw)
+            .unwrap();
+        writer
+            .write_page_sync(Path::new(source), source_raw)
+            .unwrap();
+        let pin = |path: &str, raw: &str| json!([{"path":path,"revision":source_revision(&crate::parse_page(raw).unwrap())}]);
+        let plan = |evidence: serde_json::Value| {
+            let content = format!(
+                "---\ntype: exploration\ntitle: Review of A\nreview: {}\n---\n## Question\nDoes [A](../concepts/a.md) hold?\n",
+                json!({"status":"open","subjects":[concept],"evidence":evidence,"resolution":null})
+            );
+            serde_json::from_value::<CurationPlan>(json!({"evidence":[{"path":concept,"revision":file_revision(concept_raw)},{"path":source,"revision":file_revision(source_raw)}],"concepts":[],"reviews":[{"path":"wiki/explorations/review-of-a.md","revision":null,"content":content}]})).unwrap()
+        };
+        let refused = preview_curation(root.path(), &dirs, &[], plan(pin(concept, concept_raw)))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            refused.contains("cannot pin a concept it links"),
+            "{refused}"
+        );
+        preview_curation(root.path(), &dirs, &[], plan(pin(source, source_raw))).unwrap();
     }
 
     #[test]

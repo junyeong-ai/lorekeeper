@@ -118,6 +118,41 @@ impl KnowledgeReview {
         errors
     }
 
+    /// Pages the review body links, resolved as graph reconciliation resolves citations.
+    pub(crate) fn linked_pages(path: &Path, page: &crate::VaultPage) -> Vec<PathBuf> {
+        lk_core::link::extract_dests(&page.body)
+            .iter()
+            .filter(|dest| Path::new(dest).extension().is_some_and(|ext| ext == "md"))
+            .filter_map(|dest| lk_core::link::resolve_dest(path, dest))
+            .collect()
+    }
+
+    /// Refuse pinning a concept this review links. The link makes the review one of the
+    /// concept's citations, so the concept's next synthesis reads the review and changes the
+    /// pinned revision: the review would need reassessment after every assessment.
+    pub(crate) fn self_cited_concept_error(
+        root: &Path,
+        linked: &[PathBuf],
+        evidence: &str,
+        declares_concept: bool,
+    ) -> Result<Option<String>, VaultError> {
+        if !declares_concept {
+            return Ok(None);
+        }
+        let evidence_path = Path::new(evidence);
+        let mut entries = crate::ExistingEntryResolver::new(root);
+        for link in linked {
+            if link == evidence_path || entries.same_existing_entry(link, evidence_path)? {
+                return Ok(Some(format!(
+                    "{evidence}: a review cannot pin a concept it links, because the link makes \
+                     the review an input to that concept's synthesis; name the concept in \
+                     subjects and pin the sources it cites"
+                )));
+            }
+        }
+        Ok(None)
+    }
+
     /// Refuse removing historical evidence unless its exact recorded revision is
     /// verified in the archive. A surviving concept cannot substitute for it.
     pub fn ensure_evidence_paths_preserved(
@@ -839,6 +874,13 @@ struct ReviewMetadata {
     review: Option<KnowledgeReview>,
     errors: Vec<String>,
     scope: ReviewScope,
+    linked: Vec<PathBuf>,
+}
+
+/// One evidence page's state as review evaluation compares it, read once per capture.
+struct CurrentEvidence {
+    revision: String,
+    declares_concept: bool,
 }
 
 enum ReviewEntry {
@@ -851,7 +893,7 @@ enum ReviewEntry {
 pub struct ReviewInventory {
     root: std::path::PathBuf,
     entries: BTreeMap<String, ReviewEntry>,
-    revisions: BTreeMap<String, Result<String, VaultError>>,
+    revisions: BTreeMap<String, Result<CurrentEvidence, VaultError>>,
     archives: BTreeMap<String, Result<bool, String>>,
     associations: Option<BTreeMap<String, Vec<(String, bool)>>>,
 }
@@ -1065,6 +1107,7 @@ fn load_review_metadata(
         review: None,
         errors: Vec::new(),
         scope: ReviewScope::default(),
+        linked: Vec::new(),
     };
     let page = match crate::page_path(root, path)
         .map_err(VaultError::from)
@@ -1084,6 +1127,7 @@ fn load_review_metadata(
         return Ok(None);
     };
     metadata.scope = ReviewScope::from_metadata(value);
+    metadata.linked = KnowledgeReview::linked_pages(path, &page);
     for subject in &metadata.scope.subjects {
         read.check()?;
         if let Err(error) = crate::find_page_owner(root, Path::new(subject)) {
@@ -1107,7 +1151,7 @@ fn evaluate_review(
     root: &Path,
     path: &str,
     metadata: &ReviewMetadata,
-    revisions: &mut BTreeMap<String, Result<String, VaultError>>,
+    revisions: &mut BTreeMap<String, Result<CurrentEvidence, VaultError>>,
     archives: &mut BTreeMap<String, Result<bool, String>>,
     read: &crate::ReadControl,
 ) -> Result<ReviewReport, VaultError> {
@@ -1166,17 +1210,31 @@ fn evaluate_review(
                     Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
                     result => result,
                 }
-                .map(|(_, page)| lk_core::concept::source_revision(&page));
+                .map(|(_, page)| CurrentEvidence {
+                    revision: lk_core::concept::source_revision(&page),
+                    declares_concept: page.frontmatter.is_declared_concept(),
+                });
                 entry.insert(value);
             }
-            let revision = revisions
+            let current = revisions
                 .get(&citation.path)
                 .expect("captured source result");
-            match revision {
-                Ok(revision) if *revision != citation.revision => {
-                    report.changed_evidence.push(citation.path.clone())
+            match current {
+                Ok(current) => {
+                    if current.revision != citation.revision {
+                        report.changed_evidence.push(citation.path.clone());
+                    }
+                    match KnowledgeReview::self_cited_concept_error(
+                        root,
+                        &metadata.linked,
+                        &citation.path,
+                        current.declares_concept,
+                    ) {
+                        Ok(Some(error)) => report.errors.push(error),
+                        Ok(None) => {}
+                        Err(error) => report.errors.push(format!("{}: {error}", citation.path)),
+                    }
                 }
-                Ok(_) => {}
                 Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                     report.missing_evidence.push(citation.path.clone());
                     if !archived {
@@ -2038,6 +2096,40 @@ mod tests {
             report.effective_state == ReviewEffectiveState::Invalid
                 && report.effective_state.requires_attention()
         }));
+    }
+
+    #[test]
+    fn a_review_pinning_a_concept_it_links_is_invalid() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let writer = crate::VaultWriter::new(root.path());
+        let concept = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claims something.\n";
+        writer
+            .write_page_sync(Path::new("wiki/concepts/a.md"), concept)
+            .unwrap();
+        let revision = lk_core::concept::source_revision(&parse_page(concept).unwrap());
+        for (name, body) in [
+            ("linked.md", "Does [A](../concepts/a.md) hold?"),
+            ("named.md", "Does `A` hold?"),
+        ] {
+            let raw = format!(
+                "---\ntype: exploration\nreview: {{status: open, subjects: [wiki/concepts/a.md], evidence: [{{path: wiki/concepts/a.md, revision: {revision}}}]}}\n---\n{body}\n"
+            );
+            writer
+                .write_page_sync(&Path::new("wiki/explorations").join(name), &raw)
+                .unwrap();
+        }
+        let reports = list_reviews(root.path(), &dirs).unwrap();
+        let report = |name: &str| reports.iter().find(|r| r.path.ends_with(name)).unwrap();
+        assert_eq!(
+            report("linked.md").effective_state,
+            ReviewEffectiveState::Invalid
+        );
+        assert!(report("linked.md").errors[0].contains("cannot pin a concept it links"));
+        assert_eq!(
+            report("named.md").effective_state,
+            ReviewEffectiveState::Open
+        );
     }
 
     #[test]
