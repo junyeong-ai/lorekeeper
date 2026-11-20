@@ -85,7 +85,8 @@ schema generation replaces that file wholesale.
    and [source types](references/source-types.md) for its `input.source_type`.
    Follow the returned bounded plan before loading a growing resource roster;
    multi-part work requires complete guarded reduction. Extraction source observations
-   use the separate `work source-plan` phase described in discovery. See
+   use the separate `work source-plan` phase described in
+   [extraction discovery](references/discovery.md). See
    [reading workload and refinement](references/bounded-work.md#plan-and-resume).
 
    Extraction must follow the schema's convergence procedure: resolve every
