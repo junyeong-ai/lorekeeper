@@ -1,6 +1,7 @@
 # Optional Apple Silicon recognition runtime; separate from Paddle layout.
-mlx-vlm==0.7.10
+# Compile with MACOSX_DEPLOYMENT_TARGET=14.0, the vision runtime's macOS floor.
+mlx-vlm==0.8.0
 mlx==0.32.4
-transformers==5.20.2
+transformers==5.23.0
 pillow==13.0.0
-opencv-python==5.0.0.93
+opencv-python==5.1.0.95

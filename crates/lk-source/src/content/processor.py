@@ -19,7 +19,7 @@ import zipfile
 
 POLICY = "document-projection-v4"
 PACKAGES = {
-    "xberg": "1.3.9", "pypdfium2": "5.14.0", "openpyxl": "3.1.5",
+    "xberg": "1.3.9", "pypdfium2": "5.15.2", "openpyxl": "3.1.5",
     "defusedxml": "0.7.1", "et-xmlfile": "2.0.0", "pillow": "13.0.0",
 }
 MIMES = {

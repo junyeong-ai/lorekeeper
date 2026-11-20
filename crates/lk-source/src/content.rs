@@ -512,7 +512,7 @@ fn validate_projection_parts(
 ) -> Result<(), ProcessingError> {
     let expected: BTreeMap<_, _> = [
         ("xberg".into(), "1.3.9".into()),
-        ("pypdfium2".into(), "5.14.0".into()),
+        ("pypdfium2".into(), "5.15.2".into()),
         ("openpyxl".into(), "3.1.5".into()),
         ("defusedxml".into(), "0.7.1".into()),
         ("et-xmlfile".into(), "2.0.0".into()),
@@ -1148,7 +1148,7 @@ save('external-sheet.xlsx', invalid)
         for legacy in [true, false] {
             let mut projection = serde_json::json!({
                 "policy":PROJECTION_POLICY,"format":"pdf",
-                "packages":{"xberg":"1.3.9","pypdfium2":"5.14.0","openpyxl":"3.1.5","defusedxml":"0.7.1","et-xmlfile":"2.0.0","pillow":"13.0.0"},
+                "packages":{"xberg":"1.3.9","pypdfium2":"5.15.2","openpyxl":"3.1.5","defusedxml":"0.7.1","et-xmlfile":"2.0.0","pillow":"13.0.0"},
                 "units":[native_unit.clone()],"warnings":[]
             });
             if legacy {

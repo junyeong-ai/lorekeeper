@@ -2,7 +2,7 @@
 
 PACKAGES = {
     "paddleocr": "3.7.0", "paddlex": "3.7.2", "paddlepaddle": "3.3.1",
-    "pypdfium2": "5.14.0", "pillow": "13.0.0", "opencv-contrib-python": "4.10.0.84",
+    "pypdfium2": "5.15.2", "pillow": "13.0.0", "opencv-contrib-python": "4.10.0.84",
 }
 
 
