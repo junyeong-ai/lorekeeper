@@ -205,6 +205,48 @@ fn read_only_validation_does_not_provision_optional_installation_directories() {
 }
 
 #[test]
+fn commands_reading_no_skills_claim_nothing_in_their_working_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    assert_success(&fixture.deploy());
+    let entries = |path: &Path| {
+        std::fs::read_dir(path)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    for deployed in [false, true] {
+        let project = fixture
+            .directory
+            .path()
+            .join(format!("read-only project {deployed}"));
+        std::fs::create_dir(&project).unwrap();
+        if deployed {
+            assert_success(
+                &fixture
+                    .command(&fixture.config)
+                    .current_dir(&project)
+                    .args(["self", "deploy", "--skills", "project"])
+                    .output()
+                    .unwrap(),
+            );
+        }
+        let (project_before, home_before) = (entries(&project), entries(&fixture.home));
+        std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let output = fixture
+            .command(&fixture.config)
+            .current_dir(&project)
+            .arg("validate")
+            .output()
+            .unwrap();
+        std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_success(&output);
+        assert_eq!(entries(&project), project_before);
+        assert_eq!(entries(&fixture.home), home_before);
+    }
+}
+
+#[test]
 fn runtime_installation_children_inherit_set_proxy_variables_only() {
     use std::os::unix::fs::PermissionsExt;
     let fixture = Fixture::new();

@@ -123,8 +123,19 @@ impl Protection {
                     "installation handoff is only valid for delegated deployment"
                 ));
             }
+            // Host sessions and installation status read deployed skill trees; other
+            // commands read none, so they claim none and provision no lock beside them.
+            let skills = (!matches!(
+                command,
+                crate::Command::Run { .. }
+                    | crate::Command::Workflow { .. }
+                    | crate::Command::Installation {
+                        cmd: SelfCommand::Status { .. }
+                    }
+            ))
+            .then_some(SkillScope::None);
             let requests =
-                protection.requests(opts, Mode::Shared, AgentTarget::Both, None, false, false)?;
+                protection.requests(opts, Mode::Shared, AgentTarget::Both, skills, false, false)?;
             let lease = acquire(&requests)?;
             protection.validate_selection(override_dir)?;
             protection.validate_binary()?;
@@ -587,28 +598,24 @@ impl Protection {
         let mut requests = Vec::new();
         for engine in agent.engines() {
             let selected = installation.for_engine(*engine);
-            let levels = if mode == Mode::Shared {
-                match skills {
-                    Some(scope) => scope.level().into_iter().collect(),
-                    None => vec![SkillLevel::User, SkillLevel::Project],
-                }
-            } else {
-                match skills {
-                    Some(scope) => scope.level().into_iter().collect(),
-                    None => selected.deployed_skill_levels(),
-                }
+            let levels: Vec<SkillLevel> = match (skills, mode) {
+                (None, _) => selected.deployed_skill_levels(),
+                (Some(scope), Mode::Exclusive) => scope.level().into_iter().collect(),
+                // A reader depends only on a deployment that exists when it starts.
+                (Some(scope), Mode::Shared) => scope
+                    .level()
+                    .into_iter()
+                    .filter(|level| selected.deployed_skill_levels().contains(level))
+                    .collect(),
             };
             for level in levels {
                 if let Some(path) = selected.skills_dir(level) {
-                    if let Some(lock) = skill_lock(&path, mode)? {
-                        requests.push(Request {
-                            path: lock,
-                            scope: resolve_resource(&path).map_err(|error| {
-                                miette::miette!("resolve skill resource: {error}")
-                            })?,
-                            mode,
-                        });
-                    }
+                    requests.push(Request {
+                        path: skill_lock(&path)?,
+                        scope: resolve_resource(&path)
+                            .map_err(|error| miette::miette!("resolve skill resource: {error}"))?,
+                        mode,
+                    });
                     if std::fs::symlink_metadata(&path).is_ok() {
                         resources.push((path, mode));
                     }
@@ -713,7 +720,7 @@ fn destination_request(path: &Path, mode: Mode) -> miette::Result<Request> {
 }
 
 #[cfg(unix)]
-fn skill_lock(path: &Path, mode: Mode) -> miette::Result<Option<PathBuf>> {
+fn skill_lock(path: &Path) -> miette::Result<PathBuf> {
     let base = path
         .parent()
         .and_then(Path::parent)
@@ -721,19 +728,12 @@ fn skill_lock(path: &Path, mode: Mode) -> miette::Result<Option<PathBuf>> {
     let relative = path
         .strip_prefix(base)
         .expect("skill root is under its host");
-    if mode == Mode::Shared
-        && !base
-            .try_exists()
-            .map_err(|error| miette::miette!("inspect skill host {}: {error}", base.display()))?
-    {
-        return Ok(None);
-    }
     let base = resolve_resource(base)
         .map_err(|error| miette::miette!("resolve skill host {}: {error}", base.display()))?;
-    Ok(Some(base.join(format!(
+    Ok(base.join(format!(
         ".lorekeeper-{}.lock",
         lk_dist::sha256_hex(relative.as_os_str().as_encoded_bytes())
-    ))))
+    )))
 }
 
 #[cfg(all(test, unix))]
@@ -757,7 +757,7 @@ mod tests {
         let state = schema_state(&root).unwrap();
         assert!(!state.exists());
         let skill = root.join("absent/.agents/skills");
-        skill_lock(&skill, Mode::Exclusive).unwrap().unwrap();
+        skill_lock(&skill).unwrap();
         assert!(!root.join("absent").exists());
         symlink(root.join("missing-target"), root.join("broken")).unwrap();
         assert!(destination_request(&root.join("broken/runtime"), Mode::Exclusive).is_err());

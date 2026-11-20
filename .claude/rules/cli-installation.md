@@ -37,6 +37,9 @@ keeps unavailable inspection and invalid directory layout distinct from changed 
 neither is advice to force a redeploy.
 Unix dispatch retains shared installation claims on absolute selected destinations;
 schedule rendering creates no files and does not acquire installation claims.
+Shared claims cover what a command reads: only host sessions (`run`, `workflow`) and
+`self status` claim skill trees, and only at levels already holding a deployment, so
+other commands provision no lock beside an unrelated working directory.
 Mutators exclusively claim changed resources and the selected vault workflow before
 writing. Resolve coordinator paths without provisioning. Acquire existing claims
 before creating missing coordinators; containing resource scopes precede descendants,
