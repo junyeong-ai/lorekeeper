@@ -55,7 +55,7 @@ fn prepare(
             || path
                 .components()
                 .any(|part| !matches!(part, Component::Normal(_)))
-            || !lk_graph::scan::is_concept_page(path, &config.vault_dirs)
+            || !lk_core::vault_path::is_concept_page(path, &config.vault_dirs)
         {
             return Err("link repair requires exact vault-relative concept .md addresses".into());
         }

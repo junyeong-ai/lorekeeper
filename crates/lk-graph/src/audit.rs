@@ -1656,10 +1656,10 @@ const SUBJECT_KINDS: [AuditSubjectKind; 2] =
 /// Whether a page at this address could declare the kind, before its `type` is known.
 fn is_address_of(path: &Path, dirs: &VaultDirs, kind: AuditSubjectKind) -> bool {
     match kind {
-        AuditSubjectKind::Concept => crate::scan::is_concept_page(path, dirs),
+        AuditSubjectKind::Concept => lk_core::vault_path::is_concept_page(path, dirs),
         AuditSubjectKind::Document => {
             path.extension().is_some_and(|extension| extension == "md")
-                && crate::scan::under(
+                && lk_core::vault_path::is_under(
                     &lk_core::vault_path::path_slug(path),
                     &lk_core::vault_path::documents_dir(dirs),
                 )
@@ -1788,7 +1788,7 @@ fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, A
     pages
         .iter()
         .filter_map(|page| {
-            let kind = if crate::scan::is_concept_page(&page.path, dirs)
+            let kind = if lk_core::vault_path::is_concept_page(&page.path, dirs)
                 && page.format.as_deref() == Some("concept")
             {
                 AuditSubjectKind::Concept
@@ -1797,7 +1797,10 @@ fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, A
                     .path
                     .extension()
                     .is_some_and(|extension| extension == "md")
-                && crate::scan::under(&lk_core::vault_path::path_slug(&page.path), &documents)
+                && lk_core::vault_path::is_under(
+                    &lk_core::vault_path::path_slug(&page.path),
+                    &documents,
+                )
             {
                 AuditSubjectKind::Document
             } else {

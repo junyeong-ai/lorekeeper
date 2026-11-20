@@ -12,9 +12,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use lk_core::config::{GraphConfig, VaultDirs};
 use lk_core::frontmatter::{self, Frontmatter};
 use lk_core::link;
-use lk_core::vault_path::{
-    CONCEPTS_SUBDIR, DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, dir_slug, path_slug,
-};
+use lk_core::vault_path::{DOCUMENTS_SUBDIR, EXPLORATIONS_SUBDIR, is_under, path_slug};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -266,7 +264,7 @@ impl VaultViews {
 
         let managed = page_dirs(dirs);
         let in_scope = |page: &ScannedPage, scope: &[PathBuf]| {
-            scope.iter().any(|dir| under(&page.id, dir))
+            scope.iter().any(|dir| is_under(&page.id, dir))
                 && !excluded.matches(&page.path)
                 && !states_intent(page)
         };
@@ -313,25 +311,6 @@ pub fn is_citation_origin(
     existence: &VaultExistence,
 ) -> bool {
     is_valid_source(&page.path, dirs) && !states_intent(page) && !existence.is_reserved(&page.id)
-}
-
-/// Whether a page id sits under a configured vault-relative directory.
-///
-/// THE definition, shared by the analysis scope and by every consumer that asks what kind of
-/// page a path is. Two of them comparing differently is how a vault gets analysed by one and
-/// ignored by the other.
-///
-/// Compared on the ID, not the raw path: an id is the address after normalization, so a vault
-/// whose directory on disk is spelled `Wiki` while the config says `wiki` still matches. A raw
-/// prefix test answers no there — `is_dir` passes on a case-insensitive volume, so the directory
-/// "exists", no page ever matches it, and every graph command reports an empty vault and exits 0.
-pub(crate) fn under(id: &str, dir: &Path) -> bool {
-    let prefix = dir_slug(dir);
-    if prefix.is_empty() {
-        return true;
-    }
-    let folded = lk_core::fs::fold_name(id);
-    folded == prefix || folded.starts_with(&format!("{prefix}/"))
 }
 
 /// The directory a configured vault-relative path names, matched segment by segment under the
@@ -669,16 +648,6 @@ impl VaultExistence {
     }
 }
 
-/// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). Anchored to
-/// the configured `dirs.wiki` — never a hardcoded path segment — and shared by
-/// `backlinks` and the concept lints.
-pub fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
-    under(
-        &path_slug(path),
-        &Path::new(&dirs.wiki).join(CONCEPTS_SUBDIR),
-    ) && path.extension().is_some_and(|ext| ext == "md")
-}
-
 /// True iff this vault-relative path can act as a citation *source* — an event,
 /// work-log, synthesis, document, or exploration page where a concept appearance is
 /// meaningful provenance. Concept-to-concept links and navigation pages are excluded:
@@ -696,7 +665,7 @@ pub(crate) fn is_valid_source(path: &Path, dirs: &VaultDirs) -> bool {
         wiki.join(EXPLORATIONS_SUBDIR),
     ]
     .iter()
-    .any(|dir| under(&id, dir))
+    .any(|dir| is_under(&id, dir))
 }
 
 /// Page ids of the generated entry/schema guides under `wiki_dir`, e.g.
@@ -817,6 +786,7 @@ mod tests {
     }
 
     use super::*;
+    use lk_core::vault_path::is_concept_page;
 
     #[cfg(unix)]
     #[test]
@@ -1441,16 +1411,6 @@ mod tests {
         assert!(!ex.is_linked("daily/team-slack/2026-05-22"));
     }
 
-    /// A configured directory asks for the prefix its own pages carry. `daily_/` and `daily/`
-    /// are two directories, so a page under one is not under the other — the id rule that keeps
-    /// them apart is `lk_core::vault_path::path_slug`, and this is what reads it back.
-    #[test]
-    fn a_configured_directory_matches_only_its_own_pages() {
-        assert!(under("daily_/notes/2026-07-30", Path::new("daily_")));
-        assert!(!under("daily_/notes/2026-07-30", Path::new("daily")));
-        assert!(under("daily/notes/2026-07-30", Path::new("daily")));
-    }
-
     /// The board asserts intent, not knowledge: it is forward-looking and it SHRINKS when a box
     /// is ticked. As a citation source a concept's evidence would appear when a to-do was
     /// written down and disappear when it was finished; as a checked link source the nightly
@@ -1643,16 +1603,6 @@ mod tests {
     #[test]
     fn a_vault_root_that_is_not_there_is_an_error() {
         assert!(scan_vault(Path::new("/nonexistent-vault-root"), false).is_err());
-    }
-
-    #[test]
-    fn a_directory_matches_the_configured_spelling_the_filesystem_folded() {
-        // `is_dir` passes on a case-insensitive volume, so the directory "exists" while a raw
-        // prefix test matches no page — every graph command then reports an empty vault, green.
-        assert!(under("wiki/concepts/x", Path::new("Wiki")));
-        assert!(under("wiki/concepts/x", Path::new("wiki")));
-        assert!(!under("wikipedia/x", Path::new("wiki")));
-        assert!(under("anything", Path::new("")));
     }
 
     #[test]

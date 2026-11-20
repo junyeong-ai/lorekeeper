@@ -127,6 +127,22 @@ impl KnowledgeReview {
             .collect()
     }
 
+    /// Whether concept synthesis reads the pages citing this evidence: its verified owner is a
+    /// declared concept in the concepts collection, as graph reconciliation selects synthesis
+    /// targets. An evidence archive copy or a concept-typed page elsewhere is never one.
+    pub(crate) fn is_synthesized_concept(
+        root: &Path,
+        dirs: &VaultDirs,
+        evidence: &str,
+        frontmatter: &lk_core::frontmatter::Frontmatter,
+    ) -> Result<bool, VaultError> {
+        if !frontmatter.is_declared_concept() {
+            return Ok(false);
+        }
+        let owner = crate::resolve_page_owner(root, Path::new(evidence))?;
+        Ok(lk_core::vault_path::is_concept_page(&owner, dirs))
+    }
+
     /// Refuse pinning a concept this review links. The link makes the review one of the
     /// concept's citations, so the concept's next synthesis reads the review and changes the
     /// pinned revision: the review would need reassessment after every assessment.
@@ -134,9 +150,9 @@ impl KnowledgeReview {
         root: &Path,
         linked: &[PathBuf],
         evidence: &str,
-        declares_concept: bool,
+        synthesized_concept: bool,
     ) -> Result<Option<String>, VaultError> {
-        if !declares_concept {
+        if !synthesized_concept {
             return Ok(None);
         }
         let evidence_path = Path::new(evidence);
@@ -880,7 +896,7 @@ struct ReviewMetadata {
 /// One evidence page's state as review evaluation compares it, read once per capture.
 struct CurrentEvidence {
     revision: String,
-    declares_concept: bool,
+    synthesized_concept: bool,
 }
 
 enum ReviewEntry {
@@ -892,6 +908,7 @@ enum ReviewEntry {
 /// Keep this view within one capture; external editors do not hold the writer lock.
 pub struct ReviewInventory {
     root: std::path::PathBuf,
+    dirs: VaultDirs,
     entries: BTreeMap<String, ReviewEntry>,
     revisions: BTreeMap<String, Result<CurrentEvidence, VaultError>>,
     archives: BTreeMap<String, Result<bool, String>>,
@@ -928,6 +945,7 @@ impl ReviewInventory {
         read.check()?;
         Ok(Self {
             root,
+            dirs: dirs.clone(),
             entries,
             revisions: BTreeMap::new(),
             archives: BTreeMap::new(),
@@ -1000,6 +1018,7 @@ impl ReviewInventory {
         if let ReviewEntry::Metadata(metadata) = entry {
             let report = evaluate_review(
                 &self.root,
+                &self.dirs,
                 path,
                 metadata,
                 &mut self.revisions,
@@ -1149,6 +1168,7 @@ fn load_review_metadata(
 
 fn evaluate_review(
     root: &Path,
+    dirs: &VaultDirs,
     path: &str,
     metadata: &ReviewMetadata,
     revisions: &mut BTreeMap<String, Result<CurrentEvidence, VaultError>>,
@@ -1210,9 +1230,16 @@ fn evaluate_review(
                     Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
                     result => result,
                 }
-                .map(|(_, page)| CurrentEvidence {
-                    revision: lk_core::concept::source_revision(&page),
-                    declares_concept: page.frontmatter.is_declared_concept(),
+                .and_then(|(_, page)| {
+                    Ok(CurrentEvidence {
+                        revision: lk_core::concept::source_revision(&page),
+                        synthesized_concept: KnowledgeReview::is_synthesized_concept(
+                            root,
+                            dirs,
+                            &citation.path,
+                            &page.frontmatter,
+                        )?,
+                    })
                 });
                 entry.insert(value);
             }
@@ -1228,7 +1255,7 @@ fn evaluate_review(
                         root,
                         &metadata.linked,
                         &citation.path,
-                        current.declares_concept,
+                        current.synthesized_concept,
                     ) {
                         Ok(Some(error)) => report.errors.push(error),
                         Ok(None) => {}
@@ -2108,12 +2135,28 @@ mod tests {
             .write_page_sync(Path::new("wiki/concepts/a.md"), concept)
             .unwrap();
         let revision = lk_core::concept::source_revision(&parse_page(concept).unwrap());
-        for (name, body) in [
-            ("linked.md", "Does [A](../concepts/a.md) hold?"),
-            ("named.md", "Does `A` hold?"),
+        archive_evidence(root.path(), &["wiki/concepts/a.md".into()]).unwrap();
+        let archive = format!(".lorekeeper/evidence/{revision}.md");
+        for (name, evidence, body) in [
+            (
+                "linked.md",
+                "wiki/concepts/a.md",
+                "Does [A](../concepts/a.md) hold?".to_owned(),
+            ),
+            (
+                "named.md",
+                "wiki/concepts/a.md",
+                "Does `A` hold?".to_owned(),
+            ),
+            // An archive copy declares the concept's type, but synthesis never reads its citers.
+            (
+                "archived.md",
+                archive.as_str(),
+                format!("Did [A as assessed](../../{archive}) hold?"),
+            ),
         ] {
             let raw = format!(
-                "---\ntype: exploration\nreview: {{status: open, subjects: [wiki/concepts/a.md], evidence: [{{path: wiki/concepts/a.md, revision: {revision}}}]}}\n---\n{body}\n"
+                "---\ntype: exploration\nreview: {{status: open, subjects: [wiki/concepts/a.md], evidence: [{{path: {evidence}, revision: {revision}}}]}}\n---\n{body}\n"
             );
             writer
                 .write_page_sync(&Path::new("wiki/explorations").join(name), &raw)
@@ -2126,10 +2169,14 @@ mod tests {
             ReviewEffectiveState::Invalid
         );
         assert!(report("linked.md").errors[0].contains("cannot pin a concept it links"));
-        assert_eq!(
-            report("named.md").effective_state,
-            ReviewEffectiveState::Open
-        );
+        for name in ["named.md", "archived.md"] {
+            assert_eq!(
+                report(name).effective_state,
+                ReviewEffectiveState::Open,
+                "{:?}",
+                report(name).errors
+            );
+        }
     }
 
     #[test]

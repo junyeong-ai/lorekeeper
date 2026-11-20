@@ -149,6 +149,33 @@ pub fn concepts_dir(dirs: &VaultDirs) -> PathBuf {
     PathBuf::from(&dirs.wiki).join(CONCEPTS_SUBDIR)
 }
 
+/// Whether a page id sits under a configured vault-relative directory.
+///
+/// THE definition, shared by the analysis scope and by every consumer that asks what kind of
+/// page a path is. Two of them comparing differently is how a vault gets analysed by one and
+/// ignored by the other.
+///
+/// Compared on the ID, not the raw path: an id is the address after normalization, so a vault
+/// whose directory on disk is spelled `Wiki` while the config says `wiki` still matches. A raw
+/// prefix test answers no there — `is_dir` passes on a case-insensitive volume, so the directory
+/// "exists", no page ever matches it, and every graph command reports an empty vault and exits 0.
+pub fn is_under(id: &str, dir: &Path) -> bool {
+    let prefix = dir_slug(dir);
+    if prefix.is_empty() {
+        return true;
+    }
+    let folded = crate::fs::fold_name(id);
+    folded == prefix || folded.starts_with(&format!("{prefix}/"))
+}
+
+/// Whether a page is a concept page (`{dirs.wiki}/concepts/{slug}.md`). Anchored to
+/// the configured `dirs.wiki` — never a hardcoded path segment — and shared by
+/// graph reconciliation, the concept lints and review evidence checks.
+pub fn is_concept_page(path: &Path, dirs: &VaultDirs) -> bool {
+    is_under(&path_slug(path), &concepts_dir(dirs))
+        && path.extension().is_some_and(|ext| ext == "md")
+}
+
 /// Relative directory holding the document pages (`<wiki>/documents/`).
 pub fn documents_dir(dirs: &VaultDirs) -> PathBuf {
     PathBuf::from(&dirs.wiki).join(DOCUMENTS_SUBDIR)
@@ -229,6 +256,26 @@ fn join_segments(segments: impl Iterator<Item = String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A configured directory asks for the prefix its own pages carry. `daily_/` and `daily/`
+    /// are two directories, so a page under one is not under the other — the id rule that keeps
+    /// them apart is `lk_core::vault_path::path_slug`, and this is what reads it back.
+    #[test]
+    fn a_configured_directory_matches_only_its_own_pages() {
+        assert!(is_under("daily_/notes/2026-07-30", Path::new("daily_")));
+        assert!(!is_under("daily_/notes/2026-07-30", Path::new("daily")));
+        assert!(is_under("daily/notes/2026-07-30", Path::new("daily")));
+    }
+
+    #[test]
+    fn a_directory_matches_the_configured_spelling_the_filesystem_folded() {
+        // `is_dir` passes on a case-insensitive volume, so the directory "exists" while a raw
+        // prefix test matches no page — every graph command then reports an empty vault, green.
+        assert!(is_under("wiki/concepts/x", Path::new("Wiki")));
+        assert!(is_under("wiki/concepts/x", Path::new("wiki")));
+        assert!(!is_under("wikipedia/x", Path::new("wiki")));
+        assert!(is_under("anything", Path::new("")));
+    }
 
     #[test]
     fn addresses_use_wire_separators_without_rewriting_literal_unix_backslashes() {

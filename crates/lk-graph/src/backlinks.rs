@@ -28,7 +28,8 @@ use serde::Serialize;
 use crate::GraphError;
 
 mod capture_change;
-use crate::scan::{ScannedPage, VaultExistence, is_concept_page};
+use crate::scan::{ScannedPage, VaultExistence};
+use lk_core::vault_path::is_concept_page;
 
 /// Outcome of one concept page's reconciliation.
 #[derive(Debug, Clone, Serialize)]

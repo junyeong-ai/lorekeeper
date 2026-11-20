@@ -81,7 +81,7 @@ pub(super) fn request_selected(
         .find(|page| page.path == concept)
         .ok_or("concept must be an exact scanned path")?;
     if target.format.as_deref() != Some("concept")
-        || !lk_graph::scan::is_concept_page(concept, &config.vault_dirs)
+        || !lk_core::vault_path::is_concept_page(concept, &config.vault_dirs)
     {
         return Err(
             "target must be a declared concept under the configured concepts directory".into(),

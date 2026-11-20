@@ -559,7 +559,12 @@ fn build_curation(
                 root,
                 &linked,
                 &citation.path,
-                evidence.frontmatter.is_declared_concept(),
+                KnowledgeReview::is_synthesized_concept(
+                    root,
+                    dirs,
+                    &citation.path,
+                    &evidence.frontmatter,
+                )?,
             )? {
                 return Err(invalid(error));
             }

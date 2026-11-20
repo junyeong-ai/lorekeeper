@@ -95,8 +95,10 @@ canonical; SQLite navigation is derived.
   Recover typed subjects from the same metadata even when other review fields are
   invalid; discovery and audit share that scope without accepting the assessment.
   Review metadata is a mapping with named fields, never a positional array.
-  A review cannot pin a declared concept its body links: the link makes the review
-  that concept's synthesis input, so each synthesis would invalidate the pin.
+  A review cannot pin a concept its body links when that evidence's verified owner is a
+  declared concept in the concepts collection: the link makes the review that concept's
+  synthesis input, so each synthesis would invalidate the pin. Evidence archive copies
+  and concept-typed pages elsewhere are never synthesized from citations.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review
