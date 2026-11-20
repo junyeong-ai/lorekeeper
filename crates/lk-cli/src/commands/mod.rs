@@ -273,18 +273,6 @@ pub fn build_llm_client_for(
     }
 }
 
-/// Pad `text` to `width` COLUMNS, not to `width` characters.
-///
-/// Rust's `{:<n}` counts `char`s, and a Hangul syllable, a CJK ideograph, a kana and an emoji
-/// each occupy two columns in every terminal — so a Korean vault's every list came out ragged,
-/// with the annotation column landing wherever the titles happened to end. Measured through
-/// UAX#11 rather than a range table written here: "which characters are wide" is a Unicode
-/// question that gains a few answers per release, and a table copied into this repository would
-/// be right on the day it was written.
-///
-/// Over-long text is returned whole rather than cut. A truncated title is a title someone
-/// cannot search for, and a line that runs past the column is legible in a way a clipped one is
-/// not — the column exists to align the common case, not to enforce a width.
 /// Say that a concept page was minted beside one that already answers to a name it claimed.
 ///
 /// Printed by whoever WROTE the page, in the same step: both pages the merge names are on
@@ -310,6 +298,18 @@ pub fn report_refusals(page: &lk_pipeline::RenderResult, dry_run: bool) {
     }
 }
 
+/// Pad `text` to `width` COLUMNS, not to `width` characters.
+///
+/// Rust's `{:<n}` counts `char`s, and a Hangul syllable, a CJK ideograph, a kana and an emoji
+/// each occupy two columns in every terminal — so a Korean vault's every list came out ragged,
+/// with the annotation column landing wherever the titles happened to end. Measured through
+/// UAX#11 rather than a range table written here: "which characters are wide" is a Unicode
+/// question that gains a few answers per release, and a table copied into this repository would
+/// be right on the day it was written.
+///
+/// Over-long text is returned whole rather than cut. A truncated title is a title someone
+/// cannot search for, and a line that runs past the column is legible in a way a clipped one is
+/// not — the column exists to align the common case, not to enforce a width.
 pub fn pad(text: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let used = UnicodeWidthStr::width(text);
