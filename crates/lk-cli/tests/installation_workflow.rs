@@ -205,6 +205,58 @@ fn read_only_validation_does_not_provision_optional_installation_directories() {
 }
 
 #[test]
+fn runtime_installation_children_inherit_set_proxy_variables_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let witness = fixture.directory.path().join("child-environment");
+    let python = fixture.directory.path().join("python");
+    std::fs::write(
+        &python,
+        format!(
+            "#!/bin/sh\n/usr/bin/env > '{}'\nexit 1\n",
+            witness.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut command = fixture.command(&fixture.config);
+    for name in [
+        "HTTP_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "all_proxy",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command
+        .args(["input", "install"])
+        .arg(fixture.directory.path().join("document-runtime"))
+        .arg("--python")
+        .arg(&python)
+        .env("HTTPS_PROXY", "http://proxy.invalid:3128")
+        .env("https_proxy", "")
+        .env("no_proxy", "localhost")
+        .env("UNRELATED_INSTALLER_VALUE", "withheld")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let environment = std::fs::read_to_string(&witness).unwrap();
+    let lines: Vec<_> = environment.lines().collect();
+    for expected in [
+        "HTTPS_PROXY=http://proxy.invalid:3128",
+        "https_proxy=",
+        "no_proxy=localhost",
+    ] {
+        assert!(lines.contains(&expected), "{expected} missing: {lines:?}");
+    }
+    assert!(
+        !lines.iter().any(|line| line.starts_with("HTTP_PROXY=")
+            || line.starts_with("UNRELATED_INSTALLER_VALUE="))
+    );
+}
+
+#[test]
 fn an_explicit_skill_deployment_can_create_a_missing_home() {
     let fixture = Fixture::new();
     std::fs::remove_dir(&fixture.home).unwrap();

@@ -62,6 +62,8 @@ restore owner permissions afterward when a restrictive umask removed them.
 `input install` owns the optional native decoder environment. `input install-vision`
 owns separate Paddle layout and MLX recognition environments plus verified models;
 their dependencies must not share an environment. Installation is explicit, never
-an ingest fallback. Engine platform/version checks belong to the source adapter.
+an ingest fallback. Package installation children inherit set standard proxy
+variables (`lk_core::network`) unchanged. Engine platform/version checks belong to
+the source adapter.
 Credential wizard requires a TTY/dialoguer flow; persist shared credentials through
 atomic mode0600 writes. Avoid command-specific alternate credential stores.

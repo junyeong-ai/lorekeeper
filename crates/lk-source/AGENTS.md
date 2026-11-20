@@ -286,7 +286,8 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   units, provenance, coverage and resource/failure contracts without changing graph
   semantics. Package locks, model revisions, artifact digests and recipe determine
   cache identity; paths, selection and resource ceilings do not imply new meaning.
-  Inference is offline; model downloads belong only to explicit installation.
+  Inference is offline; model downloads belong only to explicit installation, the
+  only worker operation that inherits the standard proxy variables.
 - `cache.rs` checkpoints verified units and native projections before canonical
   publication under separate per-identity claims. Partial units are reusable work,
   never a completed source. Read-only inspection/dry run neither create cache files

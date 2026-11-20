@@ -17,6 +17,7 @@ pub mod link;
 pub mod manual_original;
 pub mod markdown;
 pub mod math;
+pub mod network;
 pub mod origin;
 pub mod rss_evidence;
 pub mod rss_original;

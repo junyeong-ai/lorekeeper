@@ -296,7 +296,10 @@ async fn install_step(
         "TMP",
         "TMPDIR",
         "HOME",
-    ] {
+    ]
+    .into_iter()
+    .chain(lk_core::network::PROXY_ENV_KEYS)
+    {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
         }

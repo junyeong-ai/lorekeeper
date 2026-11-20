@@ -290,6 +290,14 @@ fn command(
             command.env(name, value);
         }
     }
+    // Model installation is the only networked worker operation; decoding stays offline.
+    if operation == "install" {
+        for name in lk_core::network::PROXY_ENV_KEYS {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
     command
         .env("PYTHONIOENCODING", "utf-8")
         .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")

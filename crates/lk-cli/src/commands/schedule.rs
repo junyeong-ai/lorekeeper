@@ -1,3 +1,5 @@
+use lk_core::network::PROXY_ENV_KEYS;
+
 use super::{find_config, load_config};
 
 /// Output format for the generated schedule.
@@ -108,17 +110,6 @@ fn job_env(
     }
     Ok(env)
 }
-
-const PROXY_ENV_KEYS: [&str; 8] = [
-    "HTTP_PROXY",
-    "HTTPS_PROXY",
-    "ALL_PROXY",
-    "NO_PROXY",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "no_proxy",
-];
 
 /// Keep casing and explicit emptiness: each network client owns precedence.
 fn proxy_env(
