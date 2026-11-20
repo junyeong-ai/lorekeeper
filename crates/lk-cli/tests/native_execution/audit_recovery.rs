@@ -43,17 +43,7 @@ fn parallel_audit_writer_wait_replans_changed_reviews_without_pausing_scheduled_
             .unwrap();
         lock.lock().unwrap();
         std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
-        loop {
-            let error =
-                std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap();
-            if error.contains("Waiting for exclusive vault access...") {
-                break;
-            }
-            assert!(Instant::now() < deadline, "{error}");
-            assert!(child.try_wait().unwrap().is_none(), "{error}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        await_contention_writer_wait(&fixture, &mut child);
         assert!(bounded_calls(&fixture).is_empty());
         let predecessor = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
             .into_iter()

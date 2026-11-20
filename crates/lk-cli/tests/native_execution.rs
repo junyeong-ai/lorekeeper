@@ -6700,6 +6700,24 @@ fn start_contention_run(fixture: &Fixture) -> std::process::Child {
     child
 }
 
+/// Return once the contention run reports waiting for the vault writer, so a test releases
+/// the lock only after the run reached that wait rather than after a guessed delay.
+fn await_contention_writer_wait(fixture: &Fixture, child: &mut std::process::Child) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let error = std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap();
+        if error.contains("Waiting for exclusive vault access...") {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "native run never waited: {error}"
+        );
+        assert!(child.try_wait().unwrap().is_none(), "{error}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn finish_contention_run(fixture: &Fixture, mut child: std::process::Child) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(20);
     while child.try_wait().unwrap().is_none() {
@@ -6730,20 +6748,7 @@ fn native_writer_contention_replans_before_invocation_and_preserves_cancel_and_c
                 .join("vault/.lorekeeper/execution-cursor.json");
             let before_cursor = std::fs::read(&cursor).ok();
             std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                let error =
-                    std::fs::read_to_string(fixture.root().join("contention-stderr.log")).unwrap();
-                if error.contains("Waiting for exclusive vault access...") {
-                    break;
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "native run never waited: {error}"
-                );
-                assert!(child.try_wait().unwrap().is_none(), "{error}");
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            await_contention_writer_wait(&fixture, &mut child);
             assert!(child.try_wait().unwrap().is_none());
             assert!(bounded_calls(&fixture).is_empty());
             match outcome {
@@ -8189,8 +8194,7 @@ fn screening_writer_wait_discards_prepared_requests_and_recaptures_before_invoca
         .unwrap();
     lock.lock().unwrap();
     std::fs::write(fixture.root().join("writer-release"), "release").unwrap();
-    std::thread::sleep(Duration::from_millis(250));
-    assert!(child.try_wait().unwrap().is_none());
+    await_contention_writer_wait(&fixture, &mut child);
     assert!(!fixture.root().read_dir().unwrap().any(|entry| {
         entry
             .unwrap()
