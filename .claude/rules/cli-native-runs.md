@@ -72,6 +72,9 @@ paths:
   Verified selected audits can advance subsequent budgeted batches despite unrelated
   queue rejections; the campaign remains incomplete/nonzero. Batch-limit success does
   not establish full-corpus coverage. Existing receipts resume verified work.
+- Scheduled runs discard host stderr and uncaptured stdout (`ChildOutput::Discard`): a
+  host transcript repeats its request, source text included, and the typed report is the
+  unattended record. Attended runs forward both as they happen.
 - Report elapsed job time and agent-invocation time separately, including failures and
   cancellation. Invocation counts and wall time are not tokens or billed cost. Native
   work telemetry retains at most 1024 evidence/screening/finalizer steps and counts

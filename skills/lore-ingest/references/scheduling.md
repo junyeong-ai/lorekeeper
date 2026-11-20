@@ -18,8 +18,9 @@
 `lore schedule` prints definitions; OS registration is separate. On macOS use
 `lore schedule --format launchd --bin /absolute/path/to/lore`. On Linux review its
 cron output and merge with `crontab -e`; piping into `crontab -` replaces other jobs.
-Create the named log directory before loading launchd plists. Use `launchctl print`
-and an actual run to verify registration. Regenerate and replace definitions after
+Create the named log directory before loading launchd plists. Job logs keep Lore's
+report and progress, never host transcripts; reproduce a host failure by running the
+same command in a terminal. Use `launchctl print` and an actual run to verify registration. Regenerate and replace definitions after
 changing configuration or environment; unload disabled jobs too. Uninstall does
 not unregister OS jobs.
 

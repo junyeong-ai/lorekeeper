@@ -396,6 +396,36 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
 }
 
 #[test]
+fn scheduled_runs_keep_host_transcripts_out_of_their_job_output() {
+    for scheduled in [true, false] {
+        let fixture = Fixture::new(
+            "codex",
+            30,
+            "printf 'host-stderr-marker\\n' >&2\nprintf 'host-stdout-marker\\n'\nexit 7",
+        );
+        write_audit_concept(&fixture, "stable");
+        configure(&fixture, Some(4), 60);
+        let mut command = fixture.command();
+        command.args(["run", "knowledge", "--json"]);
+        if scheduled {
+            command.arg("--scheduled");
+        }
+        let output = command.output().unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let invoked = if scheduled {
+            calls(&report)
+        } else {
+            report["semantic_calls"].as_u64().unwrap()
+        };
+        assert!(invoked >= 1, "{report}");
+        let diagnostics = String::from_utf8_lossy(&output.stderr);
+        for marker in ["host-stderr-marker", "host-stdout-marker"] {
+            assert_eq!(diagnostics.contains(marker), !scheduled, "{diagnostics}");
+        }
+    }
+}
+
+#[test]
 fn scheduled_tool_free_failure_holds_its_input_without_pausing_or_refunding_calls() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, "exit 7");

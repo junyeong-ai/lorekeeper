@@ -6572,7 +6572,11 @@ mod native {
             None
         };
         let mut campaign = Campaign {
-            supervisor: execution::Supervisor::new()?,
+            supervisor: execution::Supervisor::new()?.with_child_output(if scheduled {
+                execution::ChildOutput::Discard
+            } else {
+                execution::ChildOutput::Forward
+            }),
             root: None,
             automation,
             audit_replans: AuditReplans::default(),

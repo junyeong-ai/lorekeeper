@@ -79,12 +79,24 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
     }
 }
 
+/// Where a supervised child's own diagnostics go: its stderr and any stdout not captured.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildOutput {
+    /// An attended run shows them as they happen.
+    Forward,
+    /// An unattended run has no reader for them, and a host transcript repeats its
+    /// request, source text included; the typed report is that run's record.
+    Discard,
+}
+
 #[cfg(unix)]
 pub(super) struct Supervisor {
     interrupt: tokio::signal::unix::Signal,
     terminate: tokio::signal::unix::Signal,
     read: lk_vault::ReadControl,
     signal_flags: Vec<signal_hook::SigId>,
+    output: ChildOutput,
 }
 
 #[cfg(unix)]
@@ -108,6 +120,7 @@ impl Supervisor {
                 .map_err(|e| miette::miette!("termination handler: {e}"))?,
             read: lk_vault::ReadControl::new(cancelled.clone()),
             signal_flags: Vec::new(),
+            output: ChildOutput::Forward,
         };
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
             let id = signal_hook::flag::register(signal, cancelled.clone())
@@ -183,6 +196,11 @@ impl Supervisor {
         }
     }
 
+    pub fn with_child_output(mut self, output: ChildOutput) -> Self {
+        self.output = output;
+        self
+    }
+
     pub async fn run(
         &mut self,
         command: tokio::process::Command,
@@ -210,7 +228,7 @@ impl Supervisor {
         capture_limit: Option<usize>,
         input: Option<&[u8]>,
     ) -> miette::Result<ChildResult> {
-        let mut child = RunningChild::spawn(command, input.is_some())?;
+        let mut child = RunningChild::spawn(command, input.is_some(), self.output)?;
         let cancellation = async {
             tokio::select! {
                 _ = self.interrupt.recv() => ChildCancellation::Interrupted,
@@ -227,7 +245,7 @@ impl Supervisor {
                 _ = self.terminate.recv() => ChildCancellation::Terminated,
             }
         };
-        run_children(requests, cancellation).await
+        run_children(requests, self.output, cancellation).await
     }
 }
 
@@ -259,18 +277,26 @@ struct RunningChild {
     child: tokio::process::Child,
     group: rustix::process::Pid,
     cleaned: bool,
+    output: ChildOutput,
 }
 
 #[cfg(unix)]
 impl RunningChild {
-    fn spawn(mut command: tokio::process::Command, input: bool) -> miette::Result<Self> {
+    fn spawn(
+        mut command: tokio::process::Command,
+        input: bool,
+        output: ChildOutput,
+    ) -> miette::Result<Self> {
         use rustix::process::Pid;
         command
             .process_group(0)
             .kill_on_drop(true)
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(match output {
+                ChildOutput::Forward => Stdio::inherit(),
+                ChildOutput::Discard => Stdio::null(),
+            });
         let child = command
             .spawn()
             .map_err(|e| miette::miette!("start child: {e}"))?;
@@ -284,6 +310,7 @@ impl RunningChild {
             child,
             group,
             cleaned: false,
+            output,
         })
     }
 
@@ -349,6 +376,7 @@ async fn run_child(
         Closed,
     }
 
+    let forward = running.output == ChildOutput::Forward;
     let child = &mut running.child;
     let mut stdout = child
         .stdout
@@ -391,7 +419,7 @@ async fn run_child(
                     ));
                 }
                 captured.extend_from_slice(&buffer[..count]);
-            } else {
+            } else if forward {
                 stderr.write_all(&buffer[..count]).await?;
             }
         }
@@ -458,6 +486,7 @@ async fn run_child(
 #[cfg(unix)]
 async fn run_children(
     requests: Vec<ChildRequest>,
+    output: ChildOutput,
     cancellation: impl std::future::Future<Output = ChildCancellation>,
 ) -> Vec<ChildAttempt> {
     use std::collections::HashMap;
@@ -472,7 +501,7 @@ async fn run_children(
     for (index, request) in requests.into_iter().enumerate() {
         let started = Instant::now();
         starts.push(started);
-        let running = match RunningChild::spawn(request.command, request.input.is_some()) {
+        let running = match RunningChild::spawn(request.command, request.input.is_some(), output) {
             Ok(running) => Arc::new(tokio::sync::Mutex::new(running)),
             Err(error) => {
                 results[index] = Some(child_attempt(started, Err(error)));
@@ -1142,7 +1171,7 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         for (ending, expected) in [("exit 1", Some(1)), ("kill -TERM $$", None)] {
             let mut command = tokio::process::Command::new("sh");
             command.args(["-c", &format!("printf '%s' '{{\"ok\":false}}'; {ending}")]);
-            let mut child = RunningChild::spawn(command, false).unwrap();
+            let mut child = RunningChild::spawn(command, false, ChildOutput::Forward).unwrap();
             let result = run_child(
                 &mut child,
                 Some(Duration::from_secs(5)),
@@ -1195,7 +1224,7 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
                 &format!("exec 0<&-; printf closed > \"$TEST_CLOSED_INPUT\"; {script}"),
             ])
             .env("TEST_CLOSED_INPUT", &marker);
-        let running = RunningChild::spawn(command, true).unwrap();
+        let running = RunningChild::spawn(command, true, ChildOutput::Forward).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             while !marker.is_file() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1416,7 +1445,7 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
                 .expect("both child groups must start");
                 reason
             };
-            let results = run_children(requests.into(), cancellation).await;
+            let results = run_children(requests.into(), ChildOutput::Forward, cancellation).await;
             for result in results {
                 let result = result.result.unwrap();
                 assert!(!result.success);
