@@ -2867,6 +2867,7 @@ mod native {
                     WorkStep::Staged
                 }
                 Ok(crate::commands::work::ResultFinish::DiscoveryRecorded) => {
+                    metrics.outcome = WorkOutcome::Recorded;
                     self.result
                         .work_telemetry
                         .retained_progress
@@ -3110,6 +3111,8 @@ mod native {
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             if staged {
                 metrics.outcome = WorkOutcome::Staged;
+            } else if recovered {
+                metrics.outcome = WorkOutcome::Recorded;
             }
             self.record_work_step(metrics);
             if failed {

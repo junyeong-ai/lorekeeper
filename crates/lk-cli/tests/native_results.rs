@@ -1252,6 +1252,18 @@ fn extraction_discovery_recovery_replans_selected_and_root_on_both_hosts() {
                     .any(|s| s["name"] == "extraction discovery recovery"),
                 "{report}"
             );
+            let outcomes = report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|step| step["outcome"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                outcomes.first(),
+                Some(&"recorded"),
+                "a recorded discovery is retained progress, not a rejection: {report}"
+            );
+            assert!(!outcomes.contains(&"rejected"), "{report}");
             let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
             let requests: Vec<Value> = calls
                 .lines()
