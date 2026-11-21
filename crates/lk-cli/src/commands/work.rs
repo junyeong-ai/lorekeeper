@@ -260,15 +260,24 @@ pub(crate) fn limits(config: &lk_core::config::Config) -> miette::Result<WorkLim
     })
 }
 
+/// The Work this preparation continues. A Work planned while context pages were read as
+/// exact bytes resumes, with its observations and holds, while every page it read keeps
+/// those bytes, and `prepared` then takes that reading. Otherwise the current reading
+/// continues its planned Work or plans one.
 fn expected(
     root: &Path,
-    prepared: &Prepared,
+    prepared: &mut Prepared,
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<Work> {
-    let legacy = expected_with_inspection(root, prepared, config, config_revision, None)?;
-    if legacy.is_planned(root)? {
-        return Ok(legacy);
+    if let Some(exact) = prepared.exact_context()
+        && let Some(work) = planned(root, &exact, config, config_revision)?
+    {
+        *prepared = exact;
+        return Ok(work);
+    }
+    if let Some(work) = planned(root, prepared, config, config_revision)? {
+        return Ok(work);
     }
     expected_with_inspection(
         root,
@@ -277,6 +286,22 @@ fn expected(
         config_revision,
         Some(lk_core::semantic::INSPECTION_CHARACTERS),
     )
+}
+
+/// The stored Work this preparation plans under either partition policy, if any.
+fn planned(
+    root: &Path,
+    prepared: &Prepared,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+) -> miette::Result<Option<Work>> {
+    for characters in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
+        let work = expected_with_inspection(root, prepared, config, config_revision, characters)?;
+        if work.is_planned(root)? {
+            return Ok(Some(work));
+        }
+    }
+    Ok(None)
 }
 
 fn expected_with_inspection(
@@ -341,7 +366,7 @@ fn persist_prepared(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
     config_revision: &str,
-    prepared: &Prepared,
+    prepared: &mut Prepared,
 ) -> miette::Result<Work> {
     let work = expected(session.root(), prepared, config, config_revision)?;
     let created = !work.is_planned(session.root())?;
@@ -358,11 +383,11 @@ fn guard_prepared(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
-    prepared: Prepared,
+    mut prepared: Prepared,
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<bool> {
-    let expected = expected(root, &prepared, config, config_revision)?;
+    let expected = expected(root, &mut prepared, config, config_revision)?;
     let manifest = root
         .join(".lorekeeper/work")
         .join(&expected.plan.id)
@@ -635,8 +660,8 @@ fn prepare_queue_publication_controlled(
     if scoped_extraction && !prepared.context["purpose"]["source_observations"].is_null() {
         let typed: lk_queue::TaskResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
-        let source = resources::source_task_controlled(&root, config, task_id, read)?;
-        let source_work = expected(&root, &source, config, config_revision)?;
+        let mut source = resources::source_task_controlled(&root, config, task_id, read)?;
+        let source_work = expected(&root, &mut source, config, config_revision)?;
         if prepared.context["purpose"]["source_observations"]["work_id"] != source_work.plan.id {
             return Err(publication_rejection(
                 RejectionKind::SemanticContextChanged,
@@ -719,8 +744,8 @@ pub(super) fn plan_section_recovery(
     if *revision == current || *revision == scope.legacy_revision(config_revision)? {
         return Ok(None);
     }
-    let prepared = resources::task_controlled(root, config, &task.task_id, read)?;
-    let work = expected(root, &prepared, config, config_revision)?;
+    let mut prepared = resources::task_controlled(root, config, &task.task_id, read)?;
+    let work = expected(root, &mut prepared, config, config_revision)?;
     let mut completions = std::collections::BTreeMap::new();
     if work.is_planned(root)? {
         if work.plan.max_part_characters.is_none() {
@@ -781,7 +806,9 @@ pub(super) fn task_context(
         task_id,
         super::queue::TaskSelection::CurrentOrDoneExtraction,
     )?;
-    let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts && is_progressive(config)? {
+    let mut prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
+        && is_progressive(config)?
+    {
         let retained = progressive_discovery(&root, &task, discovery)?;
         let Some(queries) = retained.as_deref() else {
             return Ok(json!({"status":"needs-discovery", "context_revision":null,
@@ -830,7 +857,7 @@ pub(super) fn task_context(
             None => resources::task(&root, config, task_id)?,
         }
     };
-    let work = expected(&root, &prepared, config, config_revision)?;
+    let work = expected(&root, &mut prepared, config, config_revision)?;
     let requires_bounded_work = work.plan.parts.len() > 1;
     let (prepared, context_revision) = if matches!(
         task.kind,
@@ -952,8 +979,8 @@ pub(super) fn needs_discovery(
     if task.kind != lk_queue::TaskKind::ExtractConcepts || has_current_discovery(root, task)? {
         return Ok(false);
     }
-    let prepared = resources::task(root, config, &task.task_id)?;
-    Ok(expected(root, &prepared, config, config_revision)?
+    let mut prepared = resources::task(root, config, &task.task_id)?;
+    Ok(expected(root, &mut prepared, config, config_revision)?
         .plan
         .parts
         .len()
@@ -1154,7 +1181,7 @@ fn screening_with_inventory(
         let (source, observations) = if fits {
             (whole, None)
         } else {
-            let work = expected(root, &inventory.source, config, config_revision)?;
+            let work = expected(root, &mut inventory.source, config, config_revision)?;
             let observed = if work.is_planned(root)? {
                 work.result_if_complete_with_guards(root, &inventory.source.resources)
                     .map_err(|error| match error.downcast_ref::<state::InputCapacity>() {
@@ -1589,7 +1616,8 @@ fn completed_source_observation(
     config_revision: &str,
     source: &Prepared,
 ) -> miette::Result<Option<(Value, std::collections::BTreeMap<PathBuf, String>)>> {
-    let work = expected(root, source, config, config_revision)?;
+    let mut source = source.clone();
+    let work = expected(root, &mut source, config, config_revision)?;
     if !work.is_planned(root)? {
         return Ok(None);
     }
@@ -1913,9 +1941,9 @@ fn validate_loaded_work(
     config: &lk_core::config::Config,
     config_revision: &str,
     work: Work,
-    prepared: Prepared,
+    mut prepared: Prepared,
 ) -> miette::Result<(Work, Prepared)> {
-    if expected(root, &prepared, config, config_revision)? != work {
+    if expected(root, &mut prepared, config, config_revision)? != work {
         return Err(publication_rejection(
             RejectionKind::SemanticContextChanged,
             "work inputs, configuration or bounded execution policy changed; replan",
@@ -2249,7 +2277,7 @@ fn prepare_task_in_session(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<TaskPreparation> {
     let root = session.root();
-    let prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
+    let mut prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
         && is_progressive(config)?
         && discovery::current(root, task)?.is_some()
     {
@@ -2288,8 +2316,8 @@ fn prepare_task_in_session(
                 }
                 .into());
             }
-            ScreeningPreparation::Source { work, prepared } => {
-                persist_prepared(session, config, config_revision, &prepared)?;
+            ScreeningPreparation::Source { work, mut prepared } => {
+                persist_prepared(session, config, config_revision, &mut prepared)?;
                 if let Some(reason) = inspection_admission(root, &work, &prepared.resources)? {
                     return Ok(TaskWork::Admission { reason }.into());
                 }
@@ -2319,7 +2347,7 @@ fn prepare_task_in_session(
     } else {
         resources::task_with_audit_controlled(root, config, &task.task_id, audit, read)?
     };
-    let work = expected(root, &prepared, config, config_revision)?;
+    let work = expected(root, &mut prepared, config, config_revision)?;
     let stored = root
         .join(".lorekeeper/work")
         .join(&work.plan.id)
@@ -2378,7 +2406,7 @@ fn prepare_task_in_session(
             }
         }
     }
-    persist_prepared(session, config, config_revision, &prepared)?;
+    persist_prepared(session, config, config_revision, &mut prepared)?;
     let mut preparation = TaskPreparation::from(TaskWork::Partitioned {
         id: work.plan.id.clone(),
     });
@@ -2542,8 +2570,8 @@ pub(super) fn prepare_audit_controlled(
     #[cfg(unix)]
     audit::validate_result_capacity(candidate, limits(config)?.max_result_bytes)?;
     let root = session.root();
-    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
-    let work = persist_prepared(session, config, config_revision, &prepared)?;
+    let mut prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = persist_prepared(session, config, config_revision, &mut prepared)?;
     Ok(work.plan.id)
 }
 
@@ -2555,8 +2583,8 @@ pub(super) fn audit_needs_work_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
     let root = session.root();
-    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
-    let work = expected(root, &prepared, config, config_revision)?;
+    let mut prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = expected(root, &mut prepared, config, config_revision)?;
     if work.plan.parts.len() > 1 || work.is_planned(root)? {
         return Ok(true);
     }
@@ -2665,8 +2693,8 @@ pub(super) fn audit_processing_hold_controlled(
         }
         return Ok(None);
     }
-    let prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
-    let work = match expected(root, &prepared, config, config_revision) {
+    let mut prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = match expected(root, &mut prepared, config, config_revision) {
         Ok(work) => work,
         Err(error) if state::is_input_capacity(&error) => {
             return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
@@ -4430,9 +4458,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 ScreeningPreparation::SourceBlocked { work_id } => {
                     return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
                 }
-                ScreeningPreparation::Source { work, prepared } => {
+                ScreeningPreparation::Source { work, mut prepared } => {
                     let session = super::publication::acquire_mutation_now(&root)?;
-                    persist_prepared(&session, &config, &config_revision, &prepared)?;
+                    persist_prepared(&session, &config, &config_revision, &mut prepared)?;
                     json!({
                         "status":"needs-source-observations",
                         "source_work":progress(&work, &root, &prepared, 20, 0)?,
@@ -4491,8 +4519,8 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         }
         WorkCommand::SourcePlan { task_id } => {
             let session = super::publication::acquire_mutation_now(&root)?;
-            let prepared = resources::source_task(&root, &config, &task_id)?;
-            let work = persist_prepared(&session, &config, &config_revision, &prepared)?;
+            let mut prepared = resources::source_task(&root, &config, &task_id)?;
+            let work = persist_prepared(&session, &config, &config_revision, &mut prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
         }
         WorkCommand::Discover { task_id, file } => {
@@ -4523,14 +4551,14 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             let session = super::publication::acquire_mutation_now(&root)?;
             let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
-            let prepared = match (task_id, path) {
+            let mut prepared = match (task_id, path) {
                 (Some(id), None) => {
                     task_for_plan(&root, &config, &config_revision, &id, discovery.as_deref())?
                 }
                 (None, Some(path)) => resources::audit(&root, &config, &path)?,
                 _ => return Err(miette::miette!("select exactly one task or audit path")),
             };
-            let work = persist_prepared(&session, &config, &config_revision, &prepared)?;
+            let work = persist_prepared(&session, &config, &config_revision, &mut prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
         }
         WorkCommand::Read { work_id, node_id } => {
@@ -5084,7 +5112,7 @@ mod tests {
         }];
         let screen =
             || screening(&root, &config, &config_revision, &task.task_id, &queries).unwrap();
-        let ScreeningPreparation::Source { work, prepared } = screen() else {
+        let ScreeningPreparation::Source { work, mut prepared } = screen() else {
             panic!("large raw source requires bounded observations");
         };
         let session = MutationSession::acquire(&root).unwrap();
@@ -5099,7 +5127,7 @@ mod tests {
             },
         )
         .unwrap();
-        let work = persist_prepared(&session, &config, &config_revision, &prepared)
+        let work = persist_prepared(&session, &config, &config_revision, &mut prepared)
             .map(|persisted| {
                 assert_eq!(persisted, *work);
                 persisted
@@ -5112,7 +5140,7 @@ mod tests {
         assert!(work.plan.parts.len() > 1);
         let before = work_snapshot(&root, &work.plan.id);
         assert_eq!(
-            persist_prepared(&session, &config, &config_revision, &prepared).unwrap(),
+            persist_prepared(&session, &config, &config_revision, &mut prepared).unwrap(),
             work
         );
         assert_eq!(work_snapshot(&root, &work.plan.id), before);
@@ -5486,7 +5514,7 @@ mod tests {
                     "legacy work cannot guess its original configuration"
                 );
             } else {
-                let (loaded, prepared) = resumed.unwrap();
+                let (loaded, mut prepared) = resumed.unwrap();
                 assert_eq!(loaded, work);
                 assert!(
                     loaded
@@ -5496,7 +5524,7 @@ mod tests {
                 );
                 let session = MutationSession::acquire(&root).unwrap();
                 assert_eq!(
-                    persist_prepared(&session, &config, &revision, &prepared).unwrap(),
+                    persist_prepared(&session, &config, &revision, &mut prepared).unwrap(),
                     work
                 );
             }
@@ -5523,6 +5551,112 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_planned_on_exact_context_bytes_resumes_with_its_observations_and_holds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let config_path = root.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "vault:\n  root: {}\n  locale: en\nidentity: {{name: Tester, email: tester@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  work: {{max_input_bytes: 8192, max_result_bytes: 2048}}\n",
+                serde_json::to_string(&root).unwrap()
+            ),
+        )
+        .unwrap();
+        let (config, revision) = lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        let related = "wiki/concepts/related.md";
+        let related_raw = "---\ntype: concept\ntitle: Related\nsource_count: 1\n---\n## Synthesis\nA related claim.\n";
+        write(&root, related, related_raw);
+        let path = "wiki/documents/subject.md";
+        write(
+            &root,
+            path,
+            &format!(
+                "---\ntype: document\ntitle: Subject\n---\n## Content\n[Related](../concepts/related.md)\n\n{}",
+                "A source-scoped observation.\n\n".repeat(500)
+            ),
+        );
+        let current = resources::audit(&root, &config, path).unwrap();
+        let exact = current
+            .exact_context()
+            .expect("the related page reads differently as exact bytes");
+        let session = MutationSession::acquire(&root).unwrap();
+        let work = Work::create(
+            &session,
+            &exact.resources,
+            &exact.revision(&revision).unwrap(),
+            exact.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        let (_, request) = work.prepare_inspection(&root, &exact.resources).unwrap();
+        let request = request.unwrap();
+        work.record(
+            &session,
+            WorkOutput {
+                work_id: work.plan.id.clone(),
+                node_id: request["node_id"].as_str().unwrap().into(),
+                input_revision: request["input_revision"].as_str().unwrap().into(),
+                summary: "Fixture read of every exact assigned observation.".into(),
+                findings: vec![],
+                source_questions: vec![],
+                unresolved: vec![],
+                resolutions: vec![],
+            },
+            &exact.resources,
+        )
+        .unwrap();
+        drop(session);
+        let (_, next) = work.prepare_inspection(&root, &exact.resources).unwrap();
+        let held = next.unwrap()["node_id"].as_str().unwrap().to_owned();
+        update_inspection_attempt(
+            &root,
+            &config,
+            &revision,
+            &work.plan.id,
+            &held,
+            state::AttemptUpdate::Hold("Operator review before another invocation.".into()),
+            false,
+        )
+        .unwrap();
+
+        let mut resumed = resources::audit(&root, &config, path).unwrap();
+        assert_eq!(
+            expected(&root, &mut resumed, &config, &revision).unwrap(),
+            work,
+            "unchanged pages resume the Work, its observations and its holds"
+        );
+        assert_eq!(
+            work.progress(&root, &resumed.resources).unwrap().completed,
+            1
+        );
+        assert!(
+            root.join(".lorekeeper/work")
+                .join(&work.plan.id)
+                .join("inspection-timeouts.json")
+                .exists()
+        );
+
+        write(
+            &root,
+            related,
+            &related_raw.replace("source_count: 1", "source_count: 2"),
+        );
+        let mut cited = resources::audit(&root, &config, path).unwrap();
+        assert_ne!(
+            expected(&root, &mut cited, &config, &revision).unwrap(),
+            work,
+            "an exact-bytes Work cannot resume once a page it read changed"
+        );
+        assert_eq!(
+            cited.revision(&revision).unwrap(),
+            current.revision(&revision).unwrap(),
+            "the current reading ignores the citation update"
+        );
     }
 
     #[test]
@@ -6306,8 +6440,8 @@ mod tests {
             &serde_json::to_string(&task).unwrap(),
         );
         let session = MutationSession::acquire(&root).unwrap();
-        let prepared = resources::task(&root, &config, &task.task_id).unwrap();
-        let work = persist_prepared(&session, &config, &config_revision, &prepared).unwrap();
+        let mut prepared = resources::task(&root, &config, &task.task_id).unwrap();
+        let work = persist_prepared(&session, &config, &config_revision, &mut prepared).unwrap();
         assert_eq!(work.plan.parts.len(), 1);
         let (progress, input) = work.prepare_inspection(&root, &prepared.resources).unwrap();
         let input = input.unwrap();

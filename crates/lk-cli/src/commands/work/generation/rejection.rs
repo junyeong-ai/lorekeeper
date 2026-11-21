@@ -308,9 +308,9 @@ pub(in crate::commands::work) fn plan_retry(
         .ok_or_else(|| miette::miette!("no retained native generation rejection for this task"))?;
     let (work, prepared) = match &receipt.input {
         Input::Selected => {
-            let prepared =
+            let mut prepared =
                 super::super::task_for_plan(root, config, config_revision, task_id, None)?;
-            let work = super::super::expected(root, &prepared, config, config_revision)?;
+            let work = super::super::expected(root, &mut prepared, config, config_revision)?;
             (work, prepared)
         }
         Input::Work { work_id } => super::super::load(root, config, config_revision, work_id)?,

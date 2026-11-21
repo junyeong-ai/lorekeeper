@@ -432,12 +432,12 @@ fn current_selected(
         Err(error) if super::is_semantic_context_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let prepared = match super::with_current_roster(root, config, config_revision, &prepared, read)?
-    {
-        super::RosterAdmission::Bound(bound) => (*bound).into_owned(),
-        super::RosterAdmission::Changed(_) => return Ok(None),
-    };
-    let work = super::expected(root, &prepared, config, config_revision)?;
+    let mut prepared =
+        match super::with_current_roster(root, config, config_revision, &prepared, read)? {
+            super::RosterAdmission::Bound(bound) => (*bound).into_owned(),
+            super::RosterAdmission::Changed(_) => return Ok(None),
+        };
+    let work = super::expected(root, &mut prepared, config, config_revision)?;
     let owner =
         lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path)).into_diagnostic()?;
     let current = super::native::selected_task(config, &task, &prepared, &work, &owner)?;

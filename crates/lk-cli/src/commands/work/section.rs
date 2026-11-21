@@ -83,8 +83,8 @@ pub(in crate::commands) fn prepare_controlled(
     if !crate::commands::execution::finalization::supports(task.kind) {
         return Err(miette::miette!("task requires interactive processing"));
     }
-    let original = super::resources::task_controlled(root, config, task_id, read)?;
-    let work = super::expected(root, &original, config, config_revision)?;
+    let mut original = super::resources::task_controlled(root, config, task_id, read)?;
+    let work = super::expected(root, &mut original, config, config_revision)?;
     if work.plan.parts.len() != 1 || work.is_planned(root)? {
         return Err(miette::miette!(
             "existing or partitioned work requires its guarded Work protocol"
@@ -335,11 +335,13 @@ mod tests {
             .unwrap();
         let body = "A proposal, not a verified deployment.".to_string();
         let result = if bounded {
-            let prepared = super::super::resources::task(&root, &config, &task.task_id).unwrap();
+            let mut prepared =
+                super::super::resources::task(&root, &config, &task.task_id).unwrap();
             let id = {
                 let session = lk_vault::MutationSession::acquire(&root).unwrap();
-                let work = super::super::persist_prepared(&session, &config, &revision, &prepared)
-                    .unwrap();
+                let work =
+                    super::super::persist_prepared(&session, &config, &revision, &mut prepared)
+                        .unwrap();
                 loop {
                     let (progress, request) =
                         work.prepare_inspection(&root, &prepared.resources).unwrap();
@@ -439,8 +441,9 @@ mod tests {
             serde_json::from_slice(&std::fs::read(root.join(&path)).unwrap()).unwrap();
         assert_eq!(retained.context_revision, result.context_revision);
         if bounded {
-            let prepared = super::super::resources::task(&root, &config, &task.task_id).unwrap();
-            let work = super::super::expected(&root, &prepared, &config, &revision).unwrap();
+            let mut prepared =
+                super::super::resources::task(&root, &config, &task.task_id).unwrap();
+            let work = super::super::expected(&root, &mut prepared, &config, &revision).unwrap();
             let nodes = root
                 .join(".lorekeeper/work")
                 .join(&work.plan.id)

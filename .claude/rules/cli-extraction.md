@@ -66,7 +66,9 @@ paths:
   no discovery. Context pages, such as selected owners, are read and bound as
   `lk_core::concept::semantic_text`: parsed frontmatter without `BOOKKEEPING_FIELDS`, so a
   citation or task-state update to one leaves the Work current whatever its YAML spelling;
-  an authored change does not, and an unparseable page keeps its exact bytes. Reuse still binds the owner's exact file at
+  an authored change does not, and an unparseable page keeps its exact bytes. A Work
+  planned while context pages were read as exact bytes resumes, with its observations and
+  holds, while every page it read keeps those bytes (`Prepared::exact_context`). Reuse still binds the owner's exact file at
   assembly and application. Rust binds the current completely decided roster where a
   result is assembled, before a finalizer call and again after it, and writes the result's
   `discovery` and `selection` itself. A roster that cannot be formed (screening capacity,

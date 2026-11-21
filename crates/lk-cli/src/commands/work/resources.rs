@@ -114,6 +114,27 @@ impl Prepared {
             .map(|(_, raw)| raw.as_str())
     }
 
+    /// This preparation as read before context pages were read through `semantic_text`:
+    /// every context resource carries its captured page's exact bytes. `None` when no
+    /// context resource reads differently.
+    pub(super) fn exact_context(&self) -> Option<Self> {
+        let mut exact = self.clone();
+        let mut differs = false;
+        for resource in &mut exact.resources {
+            if resource.authority != SemanticAuthority::Context {
+                continue;
+            }
+            if let Some(raw) = self.captured_page(&resource.address)
+                && resource.text != raw
+            {
+                resource.text = raw.to_owned();
+                resource.revision = file_revision(raw);
+                differs = true;
+            }
+        }
+        differs.then_some(exact)
+    }
+
     pub fn validate_audit_result(
         &self,
         result: &Value,
