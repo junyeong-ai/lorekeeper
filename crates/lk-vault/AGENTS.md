@@ -122,8 +122,11 @@ canonical; SQLite navigation is derived.
   Default scope concepts/documents/explorations; source scope adds managed pages,
   never task boards. Concept vocabulary honors declared non-concept types, retaining
   untyped legacy concepts. Build that vocabulary from headers; full discovery still
-  reads and validates complete bodies. Vocabulary metrics count consumed header/probe
-  bytes, excluding buffered read-ahead. Resolve aliases across scope before metadata filtering;
+  reads and validates complete bodies. A run's supervising `ReadControl` may supply a body
+  an earlier traversal read while the file keeps its device, inode, size, mtime and ctime,
+  never one changed within the settling window before that read (`read.rs`); matched
+  rereads and publication guards always read current bytes. Vocabulary metrics count
+  consumed header/probe bytes, excluding buffered read-ahead. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
   Search and brief enumerate the shared verified Markdown owners per collection:
   contained leaf aliases remain readable, duplicate aliases share an owner, and hard links

@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::{Duration, SystemTime};
 
 use crate::VaultError;
 
@@ -19,13 +21,22 @@ pub struct VerifiedFileRevision {
 #[derive(Clone, Debug, Default)]
 pub struct ReadControl {
     cancelled: Option<Arc<AtomicBool>>,
+    page_texts: Option<Arc<PageTexts>>,
 }
 
 impl ReadControl {
     pub fn new(cancelled: Arc<AtomicBool>) -> Self {
         Self {
             cancelled: Some(cancelled),
+            page_texts: None,
         }
+    }
+
+    /// Let this control's discovery traversals reuse page texts an earlier traversal read.
+    /// Clones share the reuse; guarded publication reads never consult it.
+    pub fn with_page_reuse(mut self) -> Self {
+        self.page_texts = Some(Arc::new(PageTexts::new(UNSETTLED)));
+        self
     }
 
     pub fn is_cancelled(&self) -> bool {
@@ -67,6 +78,124 @@ impl ReadControl {
             bytes.extend_from_slice(&buffer[..size]);
         }
     }
+
+    /// Page reuse that keeps even files written moments before their read, so tests can
+    /// exercise reuse without waiting out the settling window.
+    #[cfg(test)]
+    pub(crate) fn with_immediate_page_reuse(mut self) -> Self {
+        self.page_texts = Some(Arc::new(PageTexts::new(Duration::ZERO)));
+        self
+    }
+
+    /// A discovery page's complete text, and whether an earlier traversal supplied it.
+    /// Callers that guard publication or record evidence read with `read_to_string`.
+    pub(crate) fn page_text(&self, path: &Path) -> Result<(Arc<str>, bool), VaultError> {
+        let Some(texts) = &self.page_texts else {
+            return Ok((self.read_to_string(path)?.into(), false));
+        };
+        self.check()?;
+        let stamp = FileStamp::of(path);
+        if let Some(text) = stamp.and_then(|stamp| texts.find(path, stamp)) {
+            return Ok((text, true));
+        }
+        let started = SystemTime::now();
+        let text: Arc<str> = self.read_to_string(path)?.into();
+        if let Some(stamp) = stamp
+            && stamp.settled_before(started, texts.unsettled)
+            && FileStamp::of(path) == Some(stamp)
+        {
+            texts.keep(path, stamp, text.clone());
+        }
+        Ok((text, false))
+    }
+
+    /// The text an earlier traversal read, while the file still carries the same stamp.
+    pub(crate) fn reusable_page_text(&self, path: &Path) -> Option<Arc<str>> {
+        let texts = self.page_texts.as_ref()?;
+        texts.find(path, FileStamp::of(path)?)
+    }
+}
+
+/// Page texts keyed by path. An entry is reused only while the file keeps the device,
+/// inode, size and modification and status-change times it had when read. A file
+/// modified within `UNSETTLED` before its read is never kept: a later write in the same
+/// timestamp tick could leave every stamp field unchanged.
+struct PageTexts {
+    unsettled: Duration,
+    entries: Mutex<HashMap<PathBuf, (FileStamp, Arc<str>)>>,
+}
+
+impl std::fmt::Debug for PageTexts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let pages = self.entries.lock().map_or(0, |entries| entries.len());
+        f.debug_struct("PageTexts").field("pages", &pages).finish()
+    }
+}
+
+impl PageTexts {
+    fn new(unsettled: Duration) -> Self {
+        Self {
+            unsettled,
+            entries: Mutex::default(),
+        }
+    }
+
+    fn find(&self, path: &Path, stamp: FileStamp) -> Option<Arc<str>> {
+        let entries = self.entries.lock().ok()?;
+        entries
+            .get(path)
+            .filter(|(kept, _)| *kept == stamp)
+            .map(|(_, text)| text.clone())
+    }
+
+    fn keep(&self, path: &Path, stamp: FileStamp, text: Arc<str>) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(path.to_path_buf(), (stamp, text));
+        }
+    }
+}
+
+const UNSETTLED: Duration = Duration::from_secs(2);
+
+/// The status-change time cannot be set by `utimes`, so it bounds the last write even
+/// when the modification time was rewound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified: SystemTime,
+    changed: SystemTime,
+}
+
+impl FileStamp {
+    #[cfg(unix)]
+    fn of(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).ok()?;
+        let changed = SystemTime::UNIX_EPOCH.checked_add(Duration::new(
+            u64::try_from(metadata.ctime()).ok()?,
+            u32::try_from(metadata.ctime_nsec()).ok()?,
+        ))?;
+        Some(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified: metadata.modified().ok()?,
+            changed,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn of(_path: &Path) -> Option<Self> {
+        None
+    }
+
+    fn settled_before(self, read_started: SystemTime, unsettled: Duration) -> bool {
+        read_started
+            .checked_sub(unsettled)
+            .is_some_and(|settled| self.modified.max(self.changed) < settled)
+    }
 }
 
 #[cfg(test)]
@@ -95,5 +224,58 @@ mod tests {
             read.read_to_string(&directory.path().join("absent")),
             Err(VaultError::Cancelled)
         ));
+    }
+
+    fn reusing(unsettled: Duration) -> ReadControl {
+        ReadControl {
+            cancelled: None,
+            page_texts: Some(Arc::new(PageTexts::new(unsettled))),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn page_texts_are_reused_only_while_the_file_keeps_its_stamp() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("page.md");
+        std::fs::write(&path, "first").unwrap();
+        let read = ReadControl::default().with_immediate_page_reuse();
+        assert_eq!(read.page_text(&path).unwrap(), ("first".into(), false));
+        assert_eq!(read.page_text(&path).unwrap(), ("first".into(), true));
+        assert_eq!(read.reusable_page_text(&path).as_deref(), Some("first"));
+
+        std::fs::write(&path, "other").unwrap();
+        assert_eq!(read.reusable_page_text(&path), None);
+        assert_eq!(read.page_text(&path).unwrap(), ("other".into(), false));
+
+        let replacement = directory.path().join("replacement.md");
+        std::fs::write(&replacement, "moved").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(read.page_text(&path).unwrap(), ("moved".into(), false));
+
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(read.reusable_page_text(&path), None);
+        assert!(read.page_text(&path).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recently_changed_pages_and_plain_controls_are_always_read() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("page.md");
+        std::fs::write(&path, "fresh").unwrap();
+        let read = reusing(Duration::from_secs(3600));
+        for _ in 0..2 {
+            assert_eq!(read.page_text(&path).unwrap(), ("fresh".into(), false));
+        }
+        let plain = ReadControl::default();
+        for _ in 0..2 {
+            assert_eq!(plain.page_text(&path).unwrap(), ("fresh".into(), false));
+        }
+        assert_eq!(plain.reusable_page_text(&path), None);
+
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let read = ReadControl::new(cancelled).with_page_reuse();
+        assert!(matches!(read.page_text(&path), Err(VaultError::Cancelled)));
     }
 }

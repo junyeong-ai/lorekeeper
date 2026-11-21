@@ -650,9 +650,10 @@ fn visit_collections_controlled(
         read,
         |path, full, concept_collection, mut metrics| {
             let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-            let raw = read.read_to_string(full)?;
+            let (raw, reused) = read.page_text(full)?;
             if let Some(metrics) = metrics.as_mut() {
                 metrics.record_read(raw.len(), started_at.expect("measured read").elapsed());
+                metrics.reused_files += usize::from(reused);
             }
             let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
             let mut page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
@@ -797,12 +798,20 @@ impl ConceptVocabulary {
             read,
             |path, full, _, mut metrics| {
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-                let input = std::io::BufReader::new(std::fs::File::open(full)?);
-                let (header, bytes) =
-                    crate::store::read_frontmatter_header_controlled(input, read)?;
+                let reused = read.reusable_page_text(full);
+                let (header, bytes) = match &reused {
+                    Some(text) => {
+                        crate::store::read_frontmatter_header_controlled(text.as_bytes(), read)?
+                    }
+                    None => crate::store::read_frontmatter_header_controlled(
+                        std::io::BufReader::new(std::fs::File::open(full)?),
+                        read,
+                    )?,
+                };
                 if let Some(metrics) = metrics.as_mut() {
                     metrics
                         .record_read(bytes, started_at.expect("measured metadata read").elapsed());
+                    metrics.reused_files += usize::from(reused.is_some());
                 }
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
                 let metadata = match header {

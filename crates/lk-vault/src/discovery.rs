@@ -21,6 +21,9 @@ pub const DISCOVERY_CARD_MAX_BYTES: usize = 2048;
 #[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct DiscoveryReadMetrics {
     pub files: usize,
+    /// Files among `files` whose text an earlier traversal in this run read while the file
+    /// carried the same device, inode, size and modification and status-change times.
+    pub reused_files: usize,
     /// Logical bytes consumed: the header/probe for vocabulary, complete UTF-8
     /// text for knowledge and matched rereads. Excludes buffered read-ahead.
     pub bytes: usize,
@@ -42,6 +45,7 @@ impl DiscoveryReadMetrics {
 
     fn accumulate(&mut self, other: Self) {
         self.files += other.files;
+        self.reused_files += other.reused_files;
         self.bytes += other.bytes;
         self.enumeration_duration_us += other.enumeration_duration_us;
         self.address_duration_us += other.address_duration_us;
@@ -1256,6 +1260,60 @@ mod tests {
             assert_eq!(capture.guarded_pages(), shared.guarded_pages());
         }
         batch
+    }
+
+    #[test]
+    fn captures_reuse_unchanged_pages_and_observe_rewritten_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let page = |index: usize, term: &str| {
+            format!(
+                "---\ntype: concept\ntitle: Topic {index}\n---\n## Synthesis\nA {term} note {index}.\n"
+            )
+        };
+        for index in 0..300 {
+            let term = if index % 3 == 0 { "beacon" } else { "harbor" };
+            write(
+                root.path(),
+                &format!("wiki/concepts/topic-{index}.md"),
+                &page(index, term),
+            );
+        }
+        let recipes = complete(&[vec![DiscoveryQuery {
+            query: "beacon".into(),
+            phrase: false,
+            spacing: false,
+        }]]);
+        let capture = |read: &crate::ReadControl| {
+            let mut inventory = crate::ReviewInventory::load(root.path(), &dirs).unwrap();
+            let (captures, metrics) = capture_discovery_batch_with_inventory(
+                root.path(),
+                &dirs,
+                &recipes,
+                &mut inventory,
+                read,
+            )
+            .unwrap();
+            (
+                serialized(&captures).unwrap(),
+                metrics.knowledge.reused_files,
+            )
+        };
+        let reuse = crate::ReadControl::default().with_immediate_page_reuse();
+        let (first, reused) = capture(&reuse);
+        assert_eq!(reused, 0);
+        assert_eq!(capture(&reuse), (first.clone(), 300));
+        assert_eq!(capture(&crate::ReadControl::default()), (first.clone(), 0));
+
+        write(
+            root.path(),
+            "wiki/concepts/topic-0.md",
+            &page(0, "quiet harbor"),
+        );
+        let (changed, reused) = capture(&reuse);
+        assert_eq!(reused, 299);
+        assert_ne!(changed, first);
+        assert_eq!(capture(&crate::ReadControl::default()), (changed, 0));
     }
 
     #[test]

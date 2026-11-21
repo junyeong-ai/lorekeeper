@@ -118,7 +118,7 @@ impl Supervisor {
                 .map_err(|e| miette::miette!("interrupt handler: {e}"))?,
             terminate: signal(SignalKind::terminate())
                 .map_err(|e| miette::miette!("termination handler: {e}"))?,
-            read: lk_vault::ReadControl::new(cancelled.clone()),
+            read: lk_vault::ReadControl::new(cancelled.clone()).with_page_reuse(),
             signal_flags: Vec::new(),
         };
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
