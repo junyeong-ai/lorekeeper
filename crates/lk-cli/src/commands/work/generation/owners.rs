@@ -30,16 +30,17 @@ impl Owners {
         let mut owners = Vec::new();
         for resource in &prepared.resources {
             let path = std::path::Path::new(&resource.address);
-            let Some(revision) = prepared.page_file_revision(&resource.address) else {
+            let Some(raw) = prepared.captured_page(&resource.address) else {
                 continue;
             };
+            let revision = lk_core::concept::file_revision(raw);
             if !prepared.is_reuse_owner(&resource.address, &revision)
                 || !path.starts_with(&directory)
                 || path.extension().is_none_or(|extension| extension != "md")
             {
                 continue;
             }
-            let page = lk_vault::parse_page(&resource.text)
+            let page = lk_vault::parse_page(raw)
                 .map_err(|error| miette::miette!("{}: {error}", resource.address))?;
             if page.frontmatter.is_declared_concept() {
                 owners.push(ConceptOwner {

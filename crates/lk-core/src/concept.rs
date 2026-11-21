@@ -151,13 +151,39 @@ pub fn semantic_text(page: &crate::frontmatter::VaultPage) -> String {
         text.push_str("{}\n");
     }
     for (key, value) in fields {
-        let key = serde_json::to_string(key).expect("a string serializes");
-        let value = serde_json::to_string(value).expect("a frontmatter value serializes");
+        let key = yaml_json(key);
+        let value = yaml_json(value);
         text.push_str(&format!("{key}: {value}\n"));
     }
     text.push_str("---\n\n");
     text.push_str(&page.body);
     text
+}
+
+/// JSON that YAML reads back as the same value. JSON leaves DEL, C1 controls, line and
+/// paragraph separators, the BOM and the U+FFFE/U+FFFF noncharacters unescaped, and YAML
+/// excludes them from printable text or treats them as breaks, so they become `\uXXXX`.
+fn yaml_json(value: &impl serde::Serialize) -> String {
+    let json = serde_json::to_string(value).expect("a frontmatter value serializes");
+    let escaped = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{2028}' | '\u{2029}' | '\u{feff}' | '\u{fffe}' | '\u{ffff}'
+            )
+    };
+    if !json.chars().any(escaped) {
+        return json;
+    }
+    json.chars()
+        .map(|c| {
+            if escaped(c) {
+                format!("\\u{:04X}", u32::from(c))
+            } else {
+                c.to_string()
+            }
+        })
+        .collect()
 }
 
 /// Exact file bytes, including bookkeeping, used to guard publication against edits.
@@ -287,6 +313,15 @@ mod tests {
         let read = parse(&semantic_text(&bare));
         assert!(read.frontmatter.fields.is_empty());
         assert_eq!(read.body, bare.body);
+        for escape in [
+            "\\u007F", "\\u0080", "\\u0085", "\\u009F", "\\u2028", "\\uFEFF", "\\uFFFF",
+        ] {
+            let page = parse(&format!(
+                "---\ntitle: \"a{escape}b\"\n\"k{escape}\": [\"{escape}\"]\n---\nBody.\n"
+            ));
+            let read = parse(&semantic_text(&page));
+            assert_eq!(read.frontmatter.fields, page.frontmatter.fields, "{escape}");
+        }
     }
 
     fn identity(slug: &str, title: &str) -> ConceptIdentity {

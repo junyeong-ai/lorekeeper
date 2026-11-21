@@ -103,10 +103,15 @@ impl Prepared {
     }
 
     pub(super) fn page_file_revision(&self, address: &str) -> Option<String> {
+        self.captured_page(address).map(file_revision)
+    }
+
+    /// The exact bytes captured for a page, whatever reading its resource presents.
+    pub(super) fn captured_page(&self, address: &str) -> Option<&str> {
         self.pages
             .iter()
             .find(|(path, _)| lk_core::vault_path::address(path) == address)
-            .map(|(_, raw)| file_revision(raw))
+            .map(|(_, raw)| raw.as_str())
     }
 
     pub fn validate_audit_result(
