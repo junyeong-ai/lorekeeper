@@ -886,7 +886,7 @@ pub(super) fn task_context(
         }
     };
     let work = expected(&root, &mut prepared, config, config_revision)?;
-    let requires_bounded_work = work.plan.parts.len() > 1;
+    let requires_bounded_work = work.plan.parts.len() > 1 || work.is_planned(&root)?;
     let (prepared, context_revision) = if matches!(
         task.kind,
         lk_queue::TaskKind::ExtractConcepts | lk_queue::TaskKind::SynthesizeConcept
@@ -5972,6 +5972,20 @@ mod tests {
         )
         .unwrap();
         drop(session);
+        let context = task_context(
+            &root,
+            &config,
+            &config_revision,
+            &task.task_id,
+            Some(&discovery),
+            None,
+        )
+        .unwrap();
+        assert_eq!(context["part_count"], 1);
+        assert_eq!(
+            context["requires_bounded_work"], true,
+            "a stored Work continues through the Work protocol, however few its parts"
+        );
         let rejection = |result| {
             apply(result)
                 .err()
