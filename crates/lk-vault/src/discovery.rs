@@ -442,6 +442,123 @@ pub fn capture_discovery_batch_with_inventory(
     Ok((captures, metrics))
 }
 
+type CaptureMatches = Vec<(usize, BTreeMap<usize, QueryMatch>)>;
+
+/// The queries one page matches in each capture, by capture and query index.
+fn capture_page_matches(
+    mut page: search::Page,
+    captures: &[CapturePlan],
+    read: &crate::ReadControl,
+) -> Result<(search::Page, CaptureMatches), VaultError> {
+    read.check()?;
+    page.projection = Some(page.match_projection().into_owned());
+    let matches = {
+        let matcher = search::PageMatcher::from_page(&page);
+        captures
+            .iter()
+            .enumerate()
+            .filter_map(|(capture_index, capture)| {
+                let queries = capture
+                    .queries
+                    .iter()
+                    .zip(&capture.plans)
+                    .enumerate()
+                    .filter_map(|(index, (query, plan))| {
+                        let options = SearchOptions {
+                            query: Some(&query.query),
+                            phrase: query.phrase,
+                            spacing: query.spacing,
+                            knowledge_status: None,
+                            ..Default::default()
+                        };
+                        let (matched, phrase, spacing) = matcher.match_query(
+                            &options,
+                            &plan.spellings,
+                            &plan.terms,
+                            plan.identity.as_deref(),
+                        )?;
+                        Some((
+                            index,
+                            QueryMatch {
+                                rank: search::SearchRank::build(
+                                    &page, &options, matched, phrase, spacing,
+                                ),
+                                identity: matched == search::MatchField::Identity,
+                            },
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                (!queries.is_empty()).then_some((capture_index, queries))
+            })
+            .collect::<Vec<_>>()
+    };
+    Ok((page, matches))
+}
+
+/// Record one page's matches under its verified owner in each capture.
+fn merge_capture_matches(
+    root: &Path,
+    captures: &mut [CapturePlan],
+    page: &search::Page,
+    matches: CaptureMatches,
+) -> Result<(), VaultError> {
+    let owner_path = crate::page_path(root, &page.rel_path)?
+        .canonicalize()?
+        .strip_prefix(root)
+        .map_err(std::io::Error::other)?
+        .to_path_buf();
+    let owner = lk_core::vault_path::address(Path::new(
+        owner_path
+            .to_str()
+            .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?,
+    ));
+    let path = lk_core::vault_path::address(Path::new(
+        page.rel_path
+            .to_str()
+            .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?,
+    ));
+    for (capture_index, queries) in matches {
+        let capture = &mut captures[capture_index];
+        if capture.subject.as_deref() == Some(owner_path.as_path()) {
+            continue;
+        }
+        match capture.matched.entry(owner.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(MatchedOwner {
+                    owner: owner_path.clone(),
+                    path: path.clone(),
+                    file_revision: page.file_revision.clone(),
+                    concept: page.concept,
+                    queries,
+                });
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                let previous = entry.get_mut();
+                if previous.file_revision != page.file_revision {
+                    return Err(invalid("discovery owner changed during capture"));
+                }
+                if DiscoveryCandidate::preferred_path(&owner, &previous.path, &path) == path {
+                    previous.path.clone_from(&path);
+                    previous.concept = page.concept;
+                }
+                for (index, matched) in queries {
+                    match previous.queries.entry(index) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(matched);
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            if matched.rank < entry.get().rank {
+                                entry.insert(matched);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn capture_discovery_batch_inner(
     root: &Path,
     dirs: &VaultDirs,
@@ -527,122 +644,48 @@ fn capture_discovery_batch_inner(
     let measured = metrics.is_some();
     let mut projection_match_duration_us = 0;
     if has_queries {
+        // Every page is matched against every recipe's queries, so pages are matched in
+        // parallel. A batch bounds the pages held at once; matches merge in walk order, so
+        // the preferred path and best rank of each owner are chosen exactly as one pass would.
+        const BATCH_PAGES: usize = 256;
+        let mut batch = Vec::with_capacity(BATCH_PAGES);
+        let mut record = |batch: &mut Vec<search::Page>,
+                          captures: &mut Vec<CapturePlan>|
+         -> Result<(), VaultError> {
+            let matched = std::mem::take(batch)
+                .into_par_iter()
+                .map(|page| {
+                    let started_at = measured.then(std::time::Instant::now);
+                    let matched = capture_page_matches(page, captures, read)?;
+                    let elapsed =
+                        started_at.map_or(0, |started_at| started_at.elapsed().as_micros() as u64);
+                    Ok((matched, elapsed))
+                })
+                .collect::<Result<Vec<_>, VaultError>>()?;
+            for ((page, matches), elapsed) in matched {
+                projection_match_duration_us += elapsed;
+                read.check()?;
+                if !matches.is_empty() {
+                    merge_capture_matches(&root, captures, &page, matches)?;
+                }
+            }
+            Ok(())
+        };
         search::visit_pages_controlled(
             &root,
             dirs,
             false,
             metrics.as_mut().map(|metrics| &mut metrics.knowledge),
             read,
-            |mut page, _| {
-                read.check()?;
-                let started_at = measured.then(std::time::Instant::now);
-                page.projection = Some(page.match_projection().into_owned());
-                let matches = {
-                    let matcher = search::PageMatcher::from_page(&page);
-                    captures
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(capture_index, capture)| {
-                            let queries = capture
-                                .queries
-                                .iter()
-                                .zip(&capture.plans)
-                                .enumerate()
-                                .filter_map(|(index, (query, plan))| {
-                                    let options = SearchOptions {
-                                        query: Some(&query.query),
-                                        phrase: query.phrase,
-                                        spacing: query.spacing,
-                                        knowledge_status: None,
-                                        ..Default::default()
-                                    };
-                                    let (matched, phrase, spacing) = matcher.match_query(
-                                        &options,
-                                        &plan.spellings,
-                                        &plan.terms,
-                                        plan.identity.as_deref(),
-                                    )?;
-                                    Some((
-                                        index,
-                                        QueryMatch {
-                                            rank: search::SearchRank::build(
-                                                &page, &options, matched, phrase, spacing,
-                                            ),
-                                            identity: matched == search::MatchField::Identity,
-                                        },
-                                    ))
-                                })
-                                .collect::<BTreeMap<_, _>>();
-                            (!queries.is_empty()).then_some((capture_index, queries))
-                        })
-                        .collect::<Vec<_>>()
-                };
-                if let Some(started_at) = started_at {
-                    projection_match_duration_us += started_at.elapsed().as_micros() as u64;
-                }
-                read.check()?;
-                if matches.is_empty() {
-                    return Ok(());
-                }
-                let owner_path = crate::page_path(&root, &page.rel_path)?
-                    .canonicalize()?
-                    .strip_prefix(&root)
-                    .map_err(std::io::Error::other)?
-                    .to_path_buf();
-                let owner = lk_core::vault_path::address(Path::new(
-                    owner_path
-                        .to_str()
-                        .ok_or_else(|| invalid("discovery owner address is not UTF-8"))?,
-                ));
-                let path = lk_core::vault_path::address(Path::new(
-                    page.rel_path
-                        .to_str()
-                        .ok_or_else(|| invalid("discovery candidate address is not UTF-8"))?,
-                ));
-                for (capture_index, queries) in matches {
-                    let capture = &mut captures[capture_index];
-                    if capture.subject.as_deref() == Some(owner_path.as_path()) {
-                        continue;
-                    }
-                    match capture.matched.entry(owner.clone()) {
-                        std::collections::btree_map::Entry::Vacant(entry) => {
-                            entry.insert(MatchedOwner {
-                                owner: owner_path.clone(),
-                                path: path.clone(),
-                                file_revision: page.file_revision.clone(),
-                                concept: page.concept,
-                                queries,
-                            });
-                        }
-                        std::collections::btree_map::Entry::Occupied(mut entry) => {
-                            let previous = entry.get_mut();
-                            if previous.file_revision != page.file_revision {
-                                return Err(invalid("discovery owner changed during capture"));
-                            }
-                            if DiscoveryCandidate::preferred_path(&owner, &previous.path, &path)
-                                == path
-                            {
-                                previous.path.clone_from(&path);
-                                previous.concept = page.concept;
-                            }
-                            for (index, matched) in queries {
-                                match previous.queries.entry(index) {
-                                    std::collections::btree_map::Entry::Vacant(entry) => {
-                                        entry.insert(matched);
-                                    }
-                                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                        if matched.rank < entry.get().rank {
-                                            entry.insert(matched);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+            |page, _| {
+                batch.push(page);
+                if batch.len() == BATCH_PAGES {
+                    record(&mut batch, &mut captures)?;
                 }
                 Ok(())
             },
         )?;
+        record(&mut batch, &mut captures)?;
     }
     let coverage = captures
         .iter_mut()
