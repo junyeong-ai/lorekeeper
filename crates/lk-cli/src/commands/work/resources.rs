@@ -1461,15 +1461,19 @@ mod tests {
             ),
         );
         let anchored = admit(&[selected]).unwrap();
+        let reading = &anchored
+            .resources
+            .iter()
+            .find(|resource| resource.address == selected)
+            .unwrap()
+            .text;
+        let reread = lk_vault::parse_page(reading).unwrap();
         assert_eq!(
-            super::super::generation::Owners::build(&config, &anchored)
-                .unwrap()
-                .presentation()
-                .as_array()
-                .map(Vec::len),
-            Some(1),
-            "a context page that anchors a value on its bookkeeping still reads as valid YAML"
+            reread.frontmatter.fields["priority"],
+            json!(3),
+            "a context page that anchors a value on its bookkeeping reads as valid YAML"
         );
+        assert!(!reread.frontmatter.fields.contains_key("source_count"));
         write(&root, selected, &owner_raw);
         #[cfg(unix)]
         {

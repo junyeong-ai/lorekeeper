@@ -5622,12 +5622,16 @@ mod tests {
         lk_core::config::Config::load_with_revision(&config_path).unwrap()
     }
 
+    #[cfg(unix)]
     const CONTEXT_RELATED: &str = "wiki/concepts/related.md";
+    #[cfg(unix)]
     const CONTEXT_RELATED_RAW: &str = "---\ntype: concept\ntitle: Related\nsource_count: 1\n---\n## Synthesis\nA related claim.\n";
+    #[cfg(unix)]
     const CONTEXT_SUBJECT: &str = "wiki/documents/subject.md";
 
     /// An audit subject too long for one part that relates a page with bookkeeping, so its
     /// exact bytes and semantic reading differ.
+    #[cfg(unix)]
     fn context_audit_fixture(root: &Path) -> (lk_core::config::Config, String) {
         write(root, CONTEXT_RELATED, CONTEXT_RELATED_RAW);
         write(
