@@ -137,8 +137,9 @@ pub fn source_revision(page: &crate::frontmatter::VaultPage) -> String {
 
 /// A page as semantic work reads it when bookkeeping must not change the read: the parsed
 /// frontmatter without `BOOKKEEPING_FIELDS`, one `"key": value` line per field in key order
-/// with JSON values, then the body. Parsing first resolves anchors, quoting and flow style, so
-/// the text depends only on the field values, and it parses back to the same fields and body.
+/// with JSON-style flow values, then the body. Parsing first resolves anchors, quoting and
+/// flow style, so the text depends only on the field values, and it parses back to the same
+/// fields and body.
 pub fn semantic_text(page: &crate::frontmatter::VaultPage) -> String {
     let mut text = String::from("---\n");
     let mut fields = page
@@ -151,19 +152,60 @@ pub fn semantic_text(page: &crate::frontmatter::VaultPage) -> String {
         text.push_str("{}\n");
     }
     for (key, value) in fields {
-        let key = yaml_json(key);
-        let value = yaml_json(value);
-        text.push_str(&format!("{key}: {value}\n"));
+        let key = yaml_scalar(key);
+        let mut line = String::new();
+        write_flow(value, &mut line);
+        if key.chars().count() > IMPLICIT_KEY_CHARACTERS {
+            text.push_str(&format!("? {key}\n: {line}\n"));
+        } else {
+            text.push_str(&format!("{key}: {line}\n"));
+        }
     }
     text.push_str("---\n\n");
     text.push_str(&page.body);
     text
 }
 
-/// JSON that YAML reads back as the same value. JSON leaves DEL, C1 controls, line and
-/// paragraph separators, the BOM and the U+FFFE/U+FFFF noncharacters unescaped, and YAML
+/// YAML reads a longer mapping key only in the explicit `? key` form.
+const IMPLICIT_KEY_CHARACTERS: usize = 1024;
+
+/// `value` in YAML flow style that reads back as the same value.
+fn write_flow(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                write_flow(item, out);
+            }
+            out.push(']');
+        }
+        serde_json::Value::Object(fields) => {
+            out.push('{');
+            for (index, (key, item)) in fields.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                let key = yaml_scalar(key);
+                if key.chars().count() > IMPLICIT_KEY_CHARACTERS {
+                    out.push_str("? ");
+                }
+                out.push_str(&key);
+                out.push_str(": ");
+                write_flow(item, out);
+            }
+            out.push('}');
+        }
+        scalar => out.push_str(&yaml_scalar(scalar)),
+    }
+}
+
+/// A JSON scalar that YAML reads back as the same value. JSON leaves DEL, C1 controls, line
+/// and paragraph separators, the BOM and the U+FFFE/U+FFFF noncharacters unescaped, and YAML
 /// excludes them from printable text or treats them as breaks, so they become `\uXXXX`.
-fn yaml_json(value: &impl serde::Serialize) -> String {
+fn yaml_scalar(value: &impl serde::Serialize) -> String {
     let json = serde_json::to_string(value).expect("a frontmatter value serializes");
     let escaped = |c: char| {
         c.is_control()
@@ -321,6 +363,14 @@ mod tests {
             ));
             let read = parse(&semantic_text(&page));
             assert_eq!(read.frontmatter.fields, page.frontmatter.fields, "{escape}");
+        }
+        for length in [1022, 1023, 1024] {
+            let key = "z".repeat(length);
+            let page = parse(&format!(
+                "---\ntitle: X\n{key}: value\nnested:\n  {key}: [1, {{a: b}}]\n---\nBody.\n"
+            ));
+            let read = parse(&semantic_text(&page));
+            assert_eq!(read.frontmatter.fields, page.frontmatter.fields, "{length}");
         }
     }
 
