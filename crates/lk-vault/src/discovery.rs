@@ -3,6 +3,7 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rayon::prelude::*;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -986,32 +987,31 @@ pub fn discover_query_matches_controlled(
             .iter()
             .map(|(query, ..)| ((*query).clone(), Vec::new())),
     );
-    search::visit_pages_controlled(root, dirs, false, None, read, |mut page, _| {
-        page.projection = Some(page.match_projection().into_owned());
-        let matcher = search::PageMatcher::from_page(&page);
-        let mut revision = None;
-        for (query, identity, spellings, terms) in &plans {
-            read.check()?;
-            let options = SearchOptions {
-                query: Some(&query.query),
-                phrase: query.phrase,
-                spacing: query.spacing,
-                knowledge_status: None,
-                ..Default::default()
-            };
-            if matcher
-                .match_query(&options, spellings, terms, identity.as_deref())
-                .is_some()
-            {
-                let revision = revision.get_or_insert_with(|| source_revision(&page.page));
-                result
-                    .get_mut(*query)
-                    .expect("selected query")
-                    .push(Citation::at_revision(&page.rel_path, revision.clone()));
-            }
+    // Every page is matched against every query, so pages are matched in parallel. A batch
+    // bounds the pages held at once; matches are sorted below, so evaluation order is free.
+    const BATCH_PAGES: usize = 256;
+    let mut batch = Vec::with_capacity(BATCH_PAGES);
+    let mut record = |batch: &mut Vec<search::Page>| -> Result<(), VaultError> {
+        let matched = std::mem::take(batch)
+            .into_par_iter()
+            .map(|page| live_page_matches(page, &plans, read))
+            .collect::<Result<Vec<_>, VaultError>>()?;
+        for (index, citation) in matched.into_iter().flatten() {
+            result
+                .get_mut(plans[index].0)
+                .expect("selected query")
+                .push(citation);
+        }
+        Ok(())
+    };
+    search::visit_pages_controlled(root, dirs, false, None, read, |page, _| {
+        batch.push(page);
+        if batch.len() == BATCH_PAGES {
+            record(&mut batch)?;
         }
         Ok(())
     })?;
+    record(&mut batch)?;
     for matches in result.values_mut() {
         matches.sort();
         matches.dedup();
@@ -1029,6 +1029,41 @@ pub fn discover_query_matches_controlled(
         matches: result,
         query_revisions,
     })
+}
+
+type LivePlan<'a> = (&'a DiscoveryQuery, Option<String>, Vec<String>, Vec<String>);
+
+/// The queries one page matches, by plan index, with the page's citation at its revision.
+fn live_page_matches(
+    mut page: search::Page,
+    plans: &[LivePlan<'_>],
+    read: &crate::ReadControl,
+) -> Result<Vec<(usize, Citation)>, VaultError> {
+    page.projection = Some(page.match_projection().into_owned());
+    let matcher = search::PageMatcher::from_page(&page);
+    let mut revision = None;
+    let mut matched = Vec::new();
+    for (index, (query, identity, spellings, terms)) in plans.iter().enumerate() {
+        read.check()?;
+        let options = SearchOptions {
+            query: Some(&query.query),
+            phrase: query.phrase,
+            spacing: query.spacing,
+            knowledge_status: None,
+            ..Default::default()
+        };
+        if matcher
+            .match_query(&options, spellings, terms, identity.as_deref())
+            .is_some()
+        {
+            let revision = revision.get_or_insert_with(|| source_revision(&page.page));
+            matched.push((
+                index,
+                Citation::at_revision(&page.rel_path, revision.clone()),
+            ));
+        }
+    }
+    Ok(matched)
 }
 
 fn indexed_queries(

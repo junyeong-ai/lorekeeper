@@ -1178,8 +1178,26 @@ pub(super) struct QueryPlan {
 }
 
 pub(super) struct PageMatcher<'a> {
-    names: Vec<&'a str>,
+    names: Vec<NameKeys>,
     fields: [MatchText<'a>; 3],
+}
+
+/// The keys every query compares a page name by, derived once per page rather than once
+/// per page and query.
+struct NameKeys {
+    folded: String,
+    identity: Option<String>,
+    spacing: String,
+}
+
+impl NameKeys {
+    fn new(name: &str) -> Self {
+        Self {
+            folded: fold_name(name),
+            identity: identity_key(name),
+            spacing: spacing_key(name),
+        }
+    }
 }
 
 impl<'a> PageMatcher<'a> {
@@ -1188,9 +1206,10 @@ impl<'a> PageMatcher<'a> {
     }
 
     fn build(names: Vec<&'a str>, projection: Cow<'a, MatchProjection>) -> Self {
+        let names = names.into_iter().map(NameKeys::new).collect::<Vec<_>>();
         let name_text = names
             .iter()
-            .map(|name| fold_name(name))
+            .map(|name| name.folded.as_str())
             .collect::<Vec<_>>()
             .join("\n");
         let (summary, text) = match projection {
@@ -1234,7 +1253,7 @@ impl<'a> PageMatcher<'a> {
                 .spacing
                 .then(|| {
                     match_fields_by(terms, spellings, &self.fields(), |field, term| {
-                        contains_spacing_term(&field.text, term)
+                        field.contains_spacing(term)
                     })
                 })
                 .flatten()
@@ -1243,7 +1262,7 @@ impl<'a> PageMatcher<'a> {
             let phrase = fold_name(query);
             self.names
                 .iter()
-                .any(|name| contains_term(&fold_name(name), &phrase))
+                .any(|name| contains_term(&name.folded, &phrase))
                 || self.fields[2].contains(&phrase)
         });
         Some((
@@ -1265,16 +1284,16 @@ impl<'a> PageMatcher<'a> {
             && self
                 .names
                 .iter()
-                .any(|name| identity_key(name).as_deref() == Some(key))
+                .any(|name| name.identity.as_deref() == Some(key))
         {
             return Some(MatchField::Identity);
         }
         if let Some(key) = query_identity {
-            let compact = spacing_key(key);
+            let (folded, compact) = (fold_name(key), spacing_key(key));
             if self
                 .names
                 .iter()
-                .any(|name| fold_name(name) != fold_name(key) && spacing_key(name) == compact)
+                .any(|name| name.folded != folded && name.spacing == compact)
             {
                 return Some(MatchField::NameVariant);
             }
@@ -1288,6 +1307,7 @@ impl<'a> PageMatcher<'a> {
 struct MatchText<'a> {
     text: Cow<'a, str>,
     stems: RefCell<StemIndex>,
+    spacing: std::cell::OnceCell<Vec<SpacingLine>>,
 }
 
 impl<'a> MatchText<'a> {
@@ -1295,7 +1315,24 @@ impl<'a> MatchText<'a> {
         Self {
             text,
             stems: RefCell::new(StemIndex::default()),
+            spacing: std::cell::OnceCell::new(),
         }
+    }
+
+    /// [`contains_spacing_term`] over lines compacted once for every query of this page.
+    fn contains_spacing(&self, term: &str) -> bool {
+        let needle = spacing_key(term);
+        !needle.is_empty()
+            && self
+                .spacing
+                .get_or_init(|| {
+                    self.text
+                        .lines()
+                        .map(|line| SpacingLine::of(&self.text, line))
+                        .collect()
+                })
+                .iter()
+                .any(|line| line.contains(&self.text, &needle))
     }
 
     fn contains(&self, term: &str) -> bool {
@@ -1657,28 +1694,50 @@ fn has_term_boundaries(text: &str, term: &str, start: usize, end: usize) -> bool
 
 fn contains_spacing_term(text: &str, term: &str) -> bool {
     let needle = spacing_key(term);
-    if needle.is_empty() {
-        return false;
-    }
-    text.lines().any(|line| {
+    !needle.is_empty()
+        && text
+            .lines()
+            .any(|line| SpacingLine::of(text, line).contains(text, &needle))
+}
+
+/// One line of a text with its whitespace removed, keeping each kept byte's offset in the line
+/// so a match in the compacted form is checked for word boundaries in the original.
+struct SpacingLine {
+    line: Range<usize>,
+    compact: String,
+    original: Vec<usize>,
+}
+
+impl SpacingLine {
+    fn of(text: &str, line: &str) -> Self {
+        let start = line.as_ptr() as usize - text.as_ptr() as usize;
         let mut compact = String::new();
-        let mut original_bytes = Vec::new();
-        for (start, character) in line.char_indices() {
+        let mut original = Vec::new();
+        for (at, character) in line.char_indices() {
             if !character.is_whitespace() {
                 compact.push(character);
-                original_bytes.extend(start..start + character.len_utf8());
+                original.extend(at..at + character.len_utf8());
             }
         }
-        compact.match_indices(&needle).any(|(start, _)| {
+        Self {
+            line: start..start + line.len(),
+            compact,
+            original,
+        }
+    }
+
+    fn contains(&self, text: &str, needle: &str) -> bool {
+        let line = &text[self.line.clone()];
+        self.compact.match_indices(needle).any(|(start, _)| {
             let end = start + needle.len();
             has_term_boundaries(
                 line,
-                &needle,
-                original_bytes[start],
-                original_bytes[end - 1] + 1,
+                needle,
+                self.original[start],
+                self.original[end - 1] + 1,
             )
         })
-    })
+    }
 }
 
 /// What to show beside the hit. A page matched by name is introduced by what it says first;

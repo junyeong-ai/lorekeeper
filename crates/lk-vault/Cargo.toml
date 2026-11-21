@@ -24,6 +24,7 @@ unicode-normalization = { workspace = true }
 rust-stemmers = { workspace = true }
 rusqlite = { workspace = true }
 pulldown-cmark = { workspace = true, features = ["html"] }
+rayon = { workspace = true }
 html5ever = { workspace = true }
 markup5ever_rcdom = { workspace = true }
 walkdir = { workspace = true }
