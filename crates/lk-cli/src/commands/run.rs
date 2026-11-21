@@ -541,7 +541,9 @@ mod native {
         state: StageState,
         detail: Option<String>,
         /// When the stage was recorded, on the clock `lore.*` events report as
-        /// `elapsed_job_ms`; consecutive differences are the stages' durations.
+        /// `elapsed_job_ms`. The gap since the previous record also covers unrecorded work
+        /// and waits between them; planning, mutation access and workflow waits keep their
+        /// own duration fields.
         elapsed_job_ms: u64,
     }
 
