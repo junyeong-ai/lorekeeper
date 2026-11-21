@@ -200,6 +200,7 @@ pub(super) struct Control {
     resume: bool,
     deadline: Option<Instant>,
     wait_remaining: Duration,
+    turn_started: Option<Instant>,
     pub report: Report,
 }
 
@@ -217,6 +218,7 @@ pub(in crate::commands) struct Status {
     pub remaining_calls: Option<usize>,
     pub max_run_seconds: u64,
     pub max_wait_seconds: u64,
+    pub yield_after_seconds: u64,
     pub paused: BTreeMap<ExecutionOperation, Pause>,
 }
 
@@ -234,6 +236,7 @@ pub(in crate::commands) fn status(
             .map(|limit| limit.get().saturating_sub(usage.reserved_calls)),
         max_run_seconds: policy.max_run_seconds.get(),
         max_wait_seconds: policy.wait_duration().as_secs(),
+        yield_after_seconds: policy.yield_after_seconds,
         paused: usage.paused,
     })
 }
@@ -267,6 +270,7 @@ impl Control {
             resume,
             deadline: None,
             wait_remaining,
+            turn_started: None,
         })
     }
 
@@ -347,6 +351,12 @@ impl Control {
             && self.available() != 0
     }
 
+    /// Whether the current workflow turn has lasted long enough to yield to a waiter.
+    pub fn may_yield(&self) -> bool {
+        self.turn_started
+            .is_some_and(|started| started.elapsed() >= self.policy.yield_after())
+    }
+
     pub fn check_duration(&mut self) -> bool {
         if self.report.stop.is_none()
             && self
@@ -358,10 +368,12 @@ impl Control {
         self.report.stop.is_none()
     }
 
+    /// Starts a workflow turn: called once each time the run acquires the workflow.
     pub fn enter(&mut self, root: &Path) -> miette::Result<bool> {
         if !self.check_duration() {
             return Ok(false);
         }
+        self.turn_started = Some(Instant::now());
         if self.deadline.is_none() {
             self.deadline = Some(
                 Instant::now()
@@ -474,6 +486,7 @@ mod tests {
             max_calls_per_day: Some(limit.try_into().unwrap()),
             max_run_seconds: 60.try_into().unwrap(),
             max_wait_seconds: None,
+            yield_after_seconds: 600,
         }
     }
 
@@ -597,6 +610,32 @@ mod tests {
         assert!(!control.reserve(root, 1).unwrap());
         assert_eq!(control.report.stop, Some(Stop::RunDuration));
         assert_eq!(std::fs::read(path(root).unwrap()).unwrap(), before);
+    }
+
+    #[test]
+    fn a_workflow_turn_yields_only_after_its_configured_hold() {
+        let directory = fixture();
+        let mut holding = Control::new(policy(8), ExecutionOperation::Knowledge, false, 4).unwrap();
+        assert!(
+            !holding.may_yield(),
+            "a run without a turn has nothing to yield"
+        );
+        assert!(holding.enter(directory.path()).unwrap());
+        assert!(!holding.may_yield());
+        holding.turn_started = Some(Instant::now() - Duration::from_secs(600));
+        assert!(holding.may_yield());
+        assert!(holding.enter(directory.path()).unwrap());
+        assert!(
+            !holding.may_yield(),
+            "a reacquired workflow starts a new turn"
+        );
+        let immediate = AutomationConfig {
+            yield_after_seconds: 0,
+            ..policy(8)
+        };
+        let mut immediate = Control::new(immediate, ExecutionOperation::Process, false, 4).unwrap();
+        assert!(immediate.enter(directory.path()).unwrap());
+        assert!(immediate.may_yield());
     }
 
     #[test]

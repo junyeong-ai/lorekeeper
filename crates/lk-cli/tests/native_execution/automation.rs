@@ -563,11 +563,15 @@ fn a_waiting_workflow_gets_a_settled_parallel_wave_without_renewing_the_run_budg
         1,
     );
     let fixture = bounded_audit_fixture("codex", 4, &behavior);
+    configure(&fixture, None, 60);
     let config = std::fs::read_to_string(&fixture.config)
         .unwrap()
-        .replace("max_calls: 4}", "max_calls: 4, max_parallel: 2}");
+        .replace("max_calls: 4}", "max_calls: 4, max_parallel: 2}")
+        .replace(
+            "max_run_seconds: 60}",
+            "max_run_seconds: 60, yield_after_seconds: 0}",
+        );
     std::fs::write(&fixture.config, config).unwrap();
-    configure(&fixture, None, 60);
     let owner = fixture
         .command()
         .args(["run", "knowledge", "--scheduled", "--wait", "--json"])

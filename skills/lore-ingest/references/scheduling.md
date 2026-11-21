@@ -63,9 +63,13 @@ daily ingest's separate publication lease, or short writer-lock waits. Duration
 limits stop new agent calls; returned results remain recordable.
 The selected profile's `execution.work.max_calls` also caps the complete scheduled
 invocation across those batches; a batch boundary cannot renew that allowance.
-When workflow admission is contended, process/knowledge settle every launched call,
-yield the lease and continue with fresh preparation. `runs[].yield_reason` identifies
-these incomplete checkpoints; final success still requires normal completion checks.
+When workflow admission is contended and the current lease has been held for
+`yield_after_seconds` (default 600; 0 yields at the first checkpoint), process/knowledge
+settle every launched call, yield the lease and continue with fresh preparation. A
+waiting `lore workflow --wait` session or job therefore waits up to that hold plus the
+calls in flight; a shorter hold admits it sooner but repeats preparation more often.
+`runs[].yield_reason` identifies these incomplete checkpoints; final success still
+requires normal completion checks.
 Calls, execution/wait time and original-subject replan allowances remain cumulative.
 Optional `automation.knowledge_schedule` overrides the knowledge job's timing;
 omission retains `graph.audit.schedule`. It emits one stable job, not another audit

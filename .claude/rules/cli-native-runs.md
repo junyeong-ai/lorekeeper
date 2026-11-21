@@ -47,7 +47,9 @@ paths:
   remain one batch and the configured per-batch calls for manual runs. Scheduled
   process/knowledge campaigns continue within their single cumulative automation budget.
 - Scheduled process/knowledge runs may yield an owned workflow after new retained
-  progress when admission is contended. Settle every launched peer before checking
+  progress when admission is contended and the current turn has held it for
+  `execution.automation.yield_after_seconds`; each acquisition starts a new turn, so
+  handoff preparation cannot consume every turn. Settle every launched peer before checking
   contention; never yield from inside a paid recording wave. Probe admission only,
   leaving the owned workflow lock intact until the checkpoint returns. A yielded
   checkpoint is incomplete, not a failure or budget reset. Preserve genuine failed

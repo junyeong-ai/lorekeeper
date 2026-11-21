@@ -120,11 +120,24 @@ pub struct AutomationConfig {
     pub max_run_seconds: NonZeroU64,
     #[serde(default)]
     pub max_wait_seconds: Option<NonZeroU64>,
+    /// How long a scheduled run keeps an acquired workflow before yielding it to a waiting
+    /// workflow. Every handoff repeats the next holder's fresh preparation, so this bounds
+    /// the share of a turn that preparation takes; 0 yields at the first checkpoint.
+    #[serde(default = "default_yield_after_seconds")]
+    pub yield_after_seconds: u64,
+}
+
+fn default_yield_after_seconds() -> u64 {
+    600
 }
 
 impl AutomationConfig {
     pub fn wait_duration(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.max_wait_seconds.unwrap_or(self.max_run_seconds).get())
+    }
+
+    pub fn yield_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.yield_after_seconds)
     }
 }
 
@@ -562,6 +575,16 @@ mod tests {
             std::time::Duration::from_secs(900)
         );
         assert_eq!(
+            config.automation.as_ref().unwrap().yield_after(),
+            std::time::Duration::from_secs(600)
+        );
+        let immediate = policy.replace(
+            "max_run_seconds: 900",
+            "max_run_seconds: 900, yield_after_seconds: 0",
+        );
+        let immediate: ExecutionConfig = crate::yaml::from_str(&immediate).unwrap();
+        assert!(immediate.automation.unwrap().yield_after().is_zero());
+        assert_eq!(
             config.automation.unwrap().max_calls_per_day.unwrap().get(),
             256
         );
@@ -595,6 +618,10 @@ mod tests {
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: 2.5"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: false"),
             policy.replace("max_calls_per_day: 256", "max_calls_per_day: unlimited"),
+            policy.replace(
+                "max_run_seconds: 900",
+                "max_run_seconds: 900, yield_after_seconds: -1",
+            ),
             policy.replace(", max_run_seconds: 900", ""),
             policy.replace(
                 "max_run_seconds: 900",

@@ -1950,12 +1950,8 @@ mod native {
             if !self.configuration_is_current() {
                 return true;
             }
-            if !self
-                .automation
-                .as_ref()
-                .expect("scheduled checkpoint")
-                .has_remaining_budget()
-            {
+            let control = self.automation.as_ref().expect("scheduled checkpoint");
+            if !control.has_remaining_budget() || !control.may_yield() {
                 return false;
             }
             let Some(lease) = &self.lease else {

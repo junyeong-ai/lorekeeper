@@ -841,6 +841,7 @@ mod tests {
             max_calls_per_day: Some(256.try_into().unwrap()),
             max_run_seconds: 900.try_into().unwrap(),
             max_wait_seconds: None,
+            yield_after_seconds: 600,
         });
         let jobs = build_jobs(&config, &["--config".into(), "/tmp/config.yaml".into()]);
         for (name, operation) in [

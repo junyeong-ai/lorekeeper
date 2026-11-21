@@ -555,6 +555,7 @@ execution:
   #   max_calls_per_day: 256   # null removes only the shared daily cap; this field is required
   #   max_run_seconds: 900       # stop admitting new calls; retain returned results
   #   max_wait_seconds: 900      # semantic workflow acquisition; defaults to max_run_seconds
+  #   yield_after_seconds: 600   # hold an acquired workflow this long before yielding to a waiter
   # Bounded worker requests/results are compact JSON bytes, not model tokens or cost.
   # Native execution splits evidence and reduces observations in fresh sessions.
   work:
