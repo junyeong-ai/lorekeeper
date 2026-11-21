@@ -381,7 +381,7 @@ mod tests {
         lk_graph::audit::plan_selected_partitioned(
             root,
             &Default::default(),
-            &Default::default(),
+            lk_graph::audit::AuditCorpus::from(&lk_core::config::GraphAuditConfig::default()),
             &pages,
             1,
             &["wiki/documents/subject.md".into()],
@@ -680,7 +680,10 @@ mod tests {
         let plan = lk_graph::audit::plan_available_partitioned(
             root.path(),
             &Default::default(),
-            &[lk_graph::audit::AuditSubjectKind::Document].into(),
+            lk_graph::audit::AuditCorpus {
+                kinds: &[lk_graph::audit::AuditSubjectKind::Document].into(),
+                min_sources: 0,
+            },
             &pages,
             3,
             u64::MAX,

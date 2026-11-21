@@ -13,6 +13,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::{GraphError, scan::ScannedPage};
 
+/// What automatic plans and corpus coverage include: the subject kinds, and the fewest
+/// distinct source pages citing a concept that coverage requires to be assessed.
+#[derive(Clone, Copy, Debug)]
+pub struct AuditCorpus<'a> {
+    pub kinds: &'a BTreeSet<AuditSubjectKind>,
+    pub min_sources: usize,
+}
+
+impl<'a> From<&'a lk_core::config::GraphAuditConfig> for AuditCorpus<'a> {
+    fn from(config: &'a lk_core::config::GraphAuditConfig) -> Self {
+        Self {
+            kinds: &config.subjects,
+            min_sources: config.min_sources,
+        }
+    }
+}
+
 const STATE: &str = ".lorekeeper/knowledge-audit.json";
 const CONCEPT_POLICY: &str = "concept-audit-v3";
 const DOCUMENT_POLICY: &str = "document-audit-v2";
@@ -347,7 +364,7 @@ pub(crate) fn record_merge(
 pub fn verify_batch(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
@@ -355,7 +372,7 @@ pub fn verify_batch(
     verify_batch_controlled(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         batch,
         workflow_id,
@@ -513,7 +530,7 @@ pub fn resolve_batch_subjects_controlled(
 pub fn verify_batch_controlled(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
@@ -522,7 +539,7 @@ pub fn verify_batch_controlled(
     verify_batch_with_readiness_controlled(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         batch,
         workflow_id,
@@ -535,7 +552,7 @@ pub fn verify_batch_controlled(
 pub fn verify_batch_with_readiness_controlled(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     batch: &[AuditCandidate],
     workflow_id: &lk_core::execution::WorkflowId,
@@ -555,7 +572,8 @@ pub fn verify_batch_with_readiness_controlled(
         read,
     )?;
     let scope = Scope::Corpus {
-        kinds: subjects,
+        kinds: corpus.kinds,
+        min_sources: corpus.min_sources,
         named: paths.iter().map(String::as_str).collect(),
     };
     let candidates = inputs_controlled(root, dirs, pages, &receipts, &scope, read)?
@@ -597,6 +615,10 @@ pub fn verify_batch_with_readiness_controlled(
         coverage: AuditCoverage::build(
             scope.counts(candidates.values()),
             scope.excluded(&kinds),
+            (
+                scope.min_sources(),
+                scope.below_min_sources(candidates.values()),
+            ),
             scope.coverage_scope(),
         ),
     })
@@ -764,6 +786,11 @@ pub struct AuditPlan {
     /// Subjects of kinds outside `graph.audit.subjects`: counted, never planned or
     /// evaluated automatically. Empty for an exact selection.
     pub excluded_by_kind: BTreeMap<AuditSubjectKind, usize>,
+    /// `graph.audit.min_sources`; 0 for an exact selection.
+    pub min_sources: usize,
+    /// Concepts with fewer distinct citing pages: planned after every required subject
+    /// and left out of `total` and the other counts above.
+    pub below_min_sources: AuditCounts,
     pub limit: usize,
     pub input: AuditInputBound,
 }
@@ -775,6 +802,20 @@ pub struct AuditCounts {
     pub follow_up_current: usize,
     pub unreviewed: usize,
     pub changed: usize,
+}
+
+impl AuditCounts {
+    fn add(&mut self, candidate: &AuditCandidate) {
+        self.total += 1;
+        match candidate.reason {
+            AuditReason::Current => {
+                self.reviewed_current += 1;
+                self.follow_up_current += usize::from(candidate.priority.follow_up);
+            }
+            AuditReason::Changed => self.changed += 1,
+            AuditReason::Unreviewed => self.unreviewed += 1,
+        }
+    }
 }
 
 /// Corpus coverage is `reviewed_current` of `total` over the automatic subject kinds.
@@ -789,12 +830,15 @@ pub struct AuditCoverage {
     pub changed: usize,
     pub counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>,
     pub excluded_by_kind: BTreeMap<AuditSubjectKind, usize>,
+    pub min_sources: usize,
+    pub below_min_sources: AuditCounts,
 }
 
 impl AuditCoverage {
     fn build(
         counts_by_kind: BTreeMap<AuditSubjectKind, AuditCounts>,
         excluded_by_kind: BTreeMap<AuditSubjectKind, usize>,
+        (min_sources, below_min_sources): (usize, AuditCounts),
         coverage_scope: AuditCoverageScope,
     ) -> Self {
         Self {
@@ -812,6 +856,8 @@ impl AuditCoverage {
             changed: counts_by_kind.values().map(|count| count.changed).sum(),
             counts_by_kind,
             excluded_by_kind,
+            min_sources,
+            below_min_sources,
         }
     }
 }
@@ -821,6 +867,7 @@ impl AuditPlan {
         AuditCoverage::build(
             self.counts_by_kind.clone(),
             self.excluded_by_kind.clone(),
+            (self.min_sources, self.below_min_sources.clone()),
             self.coverage_scope,
         )
     }
@@ -1679,6 +1726,7 @@ enum Scope<'a> {
     /// operation names. Coverage counts the automatic kinds only.
     Corpus {
         kinds: &'a BTreeSet<AuditSubjectKind>,
+        min_sources: usize,
         named: BTreeSet<&'a str>,
     },
     /// Exact addresses of any kind.
@@ -1686,16 +1734,35 @@ enum Scope<'a> {
 }
 
 impl<'a> Scope<'a> {
-    fn corpus(kinds: &'a BTreeSet<AuditSubjectKind>) -> Self {
+    fn corpus(corpus: AuditCorpus<'a>) -> Self {
         Self::Corpus {
-            kinds,
+            kinds: corpus.kinds,
+            min_sources: corpus.min_sources,
             named: BTreeSet::new(),
+        }
+    }
+
+    /// Whether coverage requires this subject: a concept needs `min_sources` distinct
+    /// citing pages; documents and exact selections are always required.
+    fn requires(&self, kind: AuditSubjectKind, evidence_pages: usize) -> bool {
+        match self {
+            Self::Corpus { min_sources, .. } => {
+                kind != AuditSubjectKind::Concept || evidence_pages >= *min_sources
+            }
+            Self::Selection(_) => true,
+        }
+    }
+
+    fn min_sources(&self) -> usize {
+        match self {
+            Self::Corpus { min_sources, .. } => *min_sources,
+            Self::Selection(_) => 0,
         }
     }
 
     fn contains(&self, path: &Path, kind: AuditSubjectKind) -> bool {
         match self {
-            Self::Corpus { kinds, named } => {
+            Self::Corpus { kinds, named, .. } => {
                 kinds.contains(&kind) || named.contains(page_address(path).as_str())
             }
             Self::Selection(paths) => paths.contains(page_address(path).as_str()),
@@ -1734,20 +1801,30 @@ impl<'a> Scope<'a> {
             .map(|kind| (kind, AuditCounts::default()))
             .collect::<BTreeMap<_, _>>();
         for candidate in candidates {
-            let Some(count) = counts.get_mut(&candidate.kind) else {
+            if !self.requires(candidate.kind, candidate.priority.evidence_pages) {
                 continue;
-            };
-            count.total += 1;
-            match candidate.reason {
-                AuditReason::Current => {
-                    count.reviewed_current += 1;
-                    count.follow_up_current += usize::from(candidate.priority.follow_up);
-                }
-                AuditReason::Changed => count.changed += 1,
-                AuditReason::Unreviewed => count.unreviewed += 1,
+            }
+            if let Some(count) = counts.get_mut(&candidate.kind) {
+                count.add(candidate);
             }
         }
         counts
+    }
+
+    /// Receipt standing of counted concepts that coverage does not require.
+    fn below_min_sources<'c>(
+        &self,
+        candidates: impl IntoIterator<Item = &'c AuditCandidate>,
+    ) -> AuditCounts {
+        let mut below = AuditCounts::default();
+        for candidate in candidates {
+            if self.counts_kind(candidate.kind)
+                && !self.requires(candidate.kind, candidate.priority.evidence_pages)
+            {
+                below.add(candidate);
+            }
+        }
+        below
     }
 
     /// Subjects of the kinds this scope leaves out of automatic plans and coverage.
@@ -1823,7 +1900,10 @@ fn inputs(
         dirs,
         pages,
         receipts,
-        &Scope::corpus(&BTreeSet::from(SUBJECT_KINDS)),
+        &Scope::corpus(AuditCorpus {
+            kinds: &BTreeSet::from(SUBJECT_KINDS),
+            min_sources: 0,
+        }),
         &lk_vault::ReadControl::default(),
     )
 }
@@ -1837,11 +1917,23 @@ fn inputs_controlled(
     read: &lk_vault::ReadControl,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
     read.check().map_err(GraphError::from)?;
+    let evidence = crate::backlinks::concept_evidence_controlled(pages, root, dirs, read)?;
+    inputs_from_evidence(root, dirs, pages, receipts, scope, &evidence, read)
+}
+
+fn inputs_from_evidence(
+    root: &Path,
+    dirs: &VaultDirs,
+    pages: &[ScannedPage],
+    receipts: &Receipts,
+    scope: &Scope<'_>,
+    evidence: &BTreeMap<PathBuf, Vec<Citation>>,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<AuditCandidate>, GraphError> {
     let mut inventory =
         lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
     require_readable_subjects(pages, dirs, scope)?;
     let mut review_index = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
-    let evidence = crate::backlinks::concept_evidence_controlled(pages, root, dirs, read)?;
     let kinds = subject_kinds(pages, dirs);
     let selected = |path: &Path| {
         kinds
@@ -2158,14 +2250,14 @@ fn pending(candidates: Vec<AuditCandidate>, receipts: &Receipts) -> Vec<AuditCan
 pub fn coverage(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     read: &lk_vault::ReadControl,
 ) -> Result<AuditCoverage, GraphError> {
     read.check().map_err(GraphError::from)?;
     let (_, receipts) = load_controlled(root, read)?;
-    let corpus = Scope::corpus(subjects);
-    require_readable_subjects(pages, dirs, &corpus)?;
+    let scope = Scope::corpus(corpus);
+    require_readable_subjects(pages, dirs, &scope)?;
     let kinds = subject_kinds(pages, dirs);
     let assessed = receipts
         .entries
@@ -2173,32 +2265,60 @@ pub fn coverage(
         .filter(|path| {
             kinds
                 .get(Path::new(path))
-                .is_some_and(|kind| subjects.contains(kind))
+                .is_some_and(|kind| corpus.kinds.contains(kind))
         })
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
+    // Receipt holders' inputs and required standing share one backlink derivation.
+    let evidence = if assessed.is_empty() && corpus.min_sources == 0 {
+        BTreeMap::new()
+    } else {
+        crate::backlinks::concept_evidence_controlled(pages, root, dirs, read)?
+    };
     let candidates = if assessed.is_empty() {
         Vec::new()
     } else {
-        inputs_controlled(
+        inputs_from_evidence(
             root,
             dirs,
             pages,
             &receipts,
             &Scope::Selection(assessed),
+            &evidence,
             read,
         )?
     };
-    let mut counts = corpus.counts(&candidates);
+    let requires = |path: &PathBuf, kind: AuditSubjectKind| {
+        let sources = evidence.get(path).map_or(0, |citations| {
+            citations
+                .iter()
+                .map(|citation| citation.path.as_str())
+                .collect::<BTreeSet<_>>()
+                .len()
+        });
+        scope.requires(kind, sources)
+    };
+    let mut counts = scope.counts(&candidates);
     for (kind, count) in &mut counts {
-        let total = kinds.values().filter(|subject| *subject == kind).count();
+        let total = kinds
+            .iter()
+            .filter(|(path, subject)| *subject == kind && requires(path, *kind))
+            .count();
         count.unreviewed += total - count.total;
         count.total = total;
     }
+    let mut below = scope.below_min_sources(&candidates);
+    let below_total = kinds
+        .iter()
+        .filter(|(path, kind)| scope.counts_kind(**kind) && !requires(path, **kind))
+        .count();
+    below.unreviewed += below_total - below.total;
+    below.total = below_total;
     Ok(AuditCoverage::build(
         counts,
-        corpus.excluded(&kinds),
-        corpus.coverage_scope(),
+        scope.excluded(&kinds),
+        (scope.min_sources(), below),
+        scope.coverage_scope(),
     ))
 }
 
@@ -2209,19 +2329,19 @@ pub fn coverage(
 pub fn plan(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
-    plan_selected(root, dirs, subjects, pages, limit, &[], max_input_bytes)
+    plan_selected(root, dirs, corpus, pages, limit, &[], max_input_bytes)
 }
 
 /// Re-read exact batch members after repairs without expanding semantic work scope.
 pub fn plan_selected(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2230,7 +2350,7 @@ pub fn plan_selected(
     plan_selected_controlled(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2243,7 +2363,7 @@ pub fn plan_selected(
 pub fn plan_selected_controlled(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2253,7 +2373,7 @@ pub fn plan_selected_controlled(
     plan_selected_inner(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2269,18 +2389,18 @@ pub fn plan_selected_controlled(
 pub fn plan_partitioned(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     max_input_bytes: u64,
 ) -> Result<AuditPlan, GraphError> {
-    plan_selected_partitioned(root, dirs, subjects, pages, limit, &[], max_input_bytes)
+    plan_selected_partitioned(root, dirs, corpus, pages, limit, &[], max_input_bytes)
 }
 
 pub fn plan_selected_partitioned(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2289,7 +2409,7 @@ pub fn plan_selected_partitioned(
     plan_selected_partitioned_controlled(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2302,7 +2422,7 @@ pub fn plan_selected_partitioned(
 pub fn plan_selected_partitioned_controlled(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2312,7 +2432,7 @@ pub fn plan_selected_partitioned_controlled(
     plan_selected_inner(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2326,7 +2446,7 @@ pub fn plan_selected_partitioned_controlled(
 pub fn plan_available_partitioned(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     max_input_bytes: u64,
@@ -2335,7 +2455,7 @@ pub fn plan_available_partitioned(
     plan_selected_available_partitioned(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         &[],
@@ -2350,7 +2470,7 @@ pub fn plan_available_partitioned(
 pub fn plan_selected_available_partitioned(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2360,7 +2480,7 @@ pub fn plan_selected_available_partitioned(
     plan_selected_available_partitioned_controlled(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2374,7 +2494,7 @@ pub fn plan_selected_available_partitioned(
 pub fn plan_selected_available_partitioned_controlled(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2385,7 +2505,7 @@ pub fn plan_selected_available_partitioned_controlled(
     plan_selected_inner(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         selection,
@@ -2405,7 +2525,7 @@ pub fn plan_selected_available_partitioned_controlled(
 pub fn admit_available_partitioned(
     session: &MutationSession,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     max_input_bytes: u64,
@@ -2416,7 +2536,7 @@ pub fn admit_available_partitioned(
     admit_available_partitioned_controlled(
         session,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         max_input_bytes,
@@ -2431,7 +2551,7 @@ pub fn admit_available_partitioned(
 pub fn admit_available_partitioned_controlled(
     session: &MutationSession,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     max_input_bytes: u64,
@@ -2444,7 +2564,7 @@ pub fn admit_available_partitioned_controlled(
     let prepared = plan_selected_inner(
         root,
         dirs,
-        subjects,
+        corpus,
         pages,
         limit,
         &[],
@@ -2493,7 +2613,7 @@ struct PreparedAudit {
 fn plan_selected_inner(
     root: &Path,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     limit: usize,
     selection: &[String],
@@ -2516,7 +2636,7 @@ fn plan_selected_inner(
     }
     let (before, mut receipts) = load_controlled(root, read)?;
     let scope = if selection.is_empty() {
-        Scope::corpus(subjects)
+        Scope::corpus(corpus)
     } else {
         Scope::Selection(unique)
     };
@@ -2532,7 +2652,8 @@ fn plan_selected_inner(
             }
         }
     }
-    let total = candidates.len();
+    let below_min_sources = scope.below_min_sources(&candidates);
+    let total = candidates.len() - below_min_sources.total;
     let selected = select_candidates(&candidates, selection)?;
     let counts_by_kind = scope.counts(&candidates);
     let excluded_by_kind = scope.excluded(&subject_kinds(pages, dirs));
@@ -2552,11 +2673,18 @@ fn plan_selected_inner(
     let (mut changed, mut unreviewed): (Vec<_>, Vec<_>) = pending
         .into_iter()
         .partition(|candidate| candidate.reason == AuditReason::Changed);
-    let changed_count = changed.len();
-    let unreviewed_count = unreviewed.len();
-    // A stable sort keeps pending first-discovery order among equal priorities.
+    let changed_count = changed.len() - below_min_sources.changed;
+    let unreviewed_count = unreviewed.len() - below_min_sources.unreviewed;
+    // Required subjects precede the rest in each class, and the rotation below takes the
+    // other class's required subject before its own turn's unrequired one. A stable sort
+    // keeps pending first-discovery order among equal priorities.
     for class in [&mut changed, &mut unreviewed] {
-        class.sort_by_key(|candidate| candidate.priority.order());
+        class.sort_by_key(|candidate| {
+            (
+                !scope.requires(candidate.kind, candidate.priority.evidence_pages),
+                candidate.priority.order(),
+            )
+        });
     }
     let (mut changed, mut unreviewed) = (VecDeque::from(changed), VecDeque::from(unreviewed));
     let mut candidates = selected
@@ -2577,9 +2705,19 @@ fn plan_selected_inner(
     let mut next_class = receipts.next_class;
     while selection.is_empty() && candidates.len() < limit {
         read.check().map_err(GraphError::from)?;
-        let next = match next_class {
-            AuditClass::Changed => changed.pop_front().or_else(|| unreviewed.pop_front()),
-            AuditClass::Unreviewed => unreviewed.pop_front().or_else(|| changed.pop_front()),
+        let (turn, other) = match next_class {
+            AuditClass::Changed => (&mut changed, &mut unreviewed),
+            AuditClass::Unreviewed => (&mut unreviewed, &mut changed),
+        };
+        let required = |class: &VecDeque<AuditCandidate>| {
+            class.front().is_some_and(|candidate| {
+                scope.requires(candidate.kind, candidate.priority.evidence_pages)
+            })
+        };
+        let next = if required(turn) || !required(other) {
+            turn.pop_front().or_else(|| other.pop_front())
+        } else {
+            other.pop_front()
         };
         let Some(candidate) = next else { break };
         if unavailable.contains(&candidate.path) {
@@ -2646,6 +2784,8 @@ fn plan_selected_inner(
             changed: changed_count,
             counts_by_kind,
             excluded_by_kind,
+            min_sources: scope.min_sources(),
+            below_min_sources,
             limit,
             input,
         },
@@ -2796,7 +2936,7 @@ fn guard_candidate_controlled(
 pub fn record(
     session: &MutationSession,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     results: AuditResults,
     max_input_bytes: u64,
@@ -2804,7 +2944,7 @@ pub fn record(
     record_with_guard(
         session,
         dirs,
-        subjects,
+        corpus,
         pages,
         results,
         max_input_bytes,
@@ -2818,7 +2958,7 @@ pub fn record(
 pub fn record_with_guard(
     session: &MutationSession,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     results: AuditResults,
     max_input_bytes: u64,
@@ -2827,7 +2967,7 @@ pub fn record_with_guard(
     record_with_guard_controlled(
         session,
         dirs,
-        subjects,
+        corpus,
         pages,
         results,
         max_input_bytes,
@@ -2840,7 +2980,7 @@ pub fn record_with_guard(
 pub fn record_with_guard_controlled(
     session: &MutationSession,
     dirs: &VaultDirs,
-    subjects: &BTreeSet<AuditSubjectKind>,
+    corpus: AuditCorpus<'_>,
     pages: &[ScannedPage],
     results: AuditResults,
     max_input_bytes: u64,
@@ -2854,7 +2994,8 @@ pub fn record_with_guard_controlled(
     read.check().map_err(GraphError::from)?;
     let (before, mut receipts) = load_controlled(root, read)?;
     let scope = Scope::Corpus {
-        kinds: subjects,
+        kinds: corpus.kinds,
+        min_sources: corpus.min_sources,
         named: results
             .assessments
             .iter()
@@ -2955,8 +3096,13 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    static ALL: std::sync::LazyLock<BTreeSet<AuditSubjectKind>> =
+    static ALL_KINDS: std::sync::LazyLock<BTreeSet<AuditSubjectKind>> =
         std::sync::LazyLock::new(|| BTreeSet::from(SUBJECT_KINDS));
+    static ALL: std::sync::LazyLock<AuditCorpus<'static>> =
+        std::sync::LazyLock::new(|| AuditCorpus {
+            kinds: &ALL_KINDS,
+            min_sources: 0,
+        });
 
     fn record_legacy_discovery(
         session: &MutationSession,
@@ -3026,7 +3172,7 @@ mod tests {
         admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             2,
             u64::MAX,
@@ -3040,7 +3186,7 @@ mod tests {
         let selected = plan_selected_available_partitioned(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             2,
             &selection,
@@ -3067,7 +3213,7 @@ mod tests {
         let expected = plan_selected_partitioned(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             1,
             &selection[1..],
@@ -3079,7 +3225,7 @@ mod tests {
         let unavailable = plan_selected_available_partitioned(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             2,
             &selection,
@@ -3095,7 +3241,7 @@ mod tests {
             plan_selected_available_partitioned(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &pages,
                 2,
                 &selection,
@@ -3178,7 +3324,7 @@ mod tests {
         let result = admit_available_partitioned_controlled(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             1,
             u64::MAX,
@@ -3229,11 +3375,11 @@ mod tests {
             )
             .is_err()
         );
-        let selected = plan(root.path(), &dirs, &ALL, &pages, 1, u64::MAX).unwrap();
+        let selected = plan(root.path(), &dirs, *ALL, &pages, 1, u64::MAX).unwrap();
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             AuditResults {
                 assessments: vec![assessment(&selected.candidates[0])],
@@ -3245,7 +3391,7 @@ mod tests {
         let verification = verify_batch_controlled(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             &selected.candidates,
             &lk_core::execution::WorkflowId::from_bytes([7; 16]),
@@ -3256,7 +3402,7 @@ mod tests {
         let verification = verify_batch_with_readiness_controlled(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             &selected.candidates,
             &lk_core::execution::WorkflowId::from_bytes([7; 16]),
@@ -3297,7 +3443,7 @@ mod tests {
         );
         let pages = scan(root.path());
         let session = MutationSession::acquire(root.path()).unwrap();
-        let initial = plan_selected(root.path(), &dirs, &ALL, &pages, 1, &[a.into()], u64::MAX)
+        let initial = plan_selected(root.path(), &dirs, *ALL, &pages, 1, &[a.into()], u64::MAX)
             .unwrap()
             .candidates
             .remove(0);
@@ -3321,7 +3467,7 @@ mod tests {
             let candidate = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &pages,
                 1,
                 &[path.into()],
@@ -3365,7 +3511,7 @@ mod tests {
                 plan_selected(
                     root.path(),
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &pages,
                     1,
                     std::slice::from_ref(path),
@@ -3419,7 +3565,7 @@ mod tests {
             selection.iter().collect::<Vec<_>>()
         );
         assert!(
-            plan_selected(root.path(), &dirs, &ALL, &pages, 101, &selection, u64::MAX).is_err()
+            plan_selected(root.path(), &dirs, *ALL, &pages, 101, &selection, u64::MAX).is_err()
         );
         assert!(
             load_selected_inputs(
@@ -3532,7 +3678,7 @@ mod tests {
         let selected = plan_available_partitioned(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &files,
             1,
             u64::MAX,
@@ -3548,7 +3694,7 @@ mod tests {
             !root.path().join(STATE).exists(),
             "planning must not move durable pending order or create receipts"
         );
-        let resumed = plan_partitioned(root.path(), &dirs, &ALL, &files, 1, u64::MAX).unwrap();
+        let resumed = plan_partitioned(root.path(), &dirs, *ALL, &files, 1, u64::MAX).unwrap();
         assert_eq!(resumed.candidates[0].path, "wiki/documents/a.md");
     }
 
@@ -3562,14 +3708,14 @@ mod tests {
         let body = "---\ntype: document\n---\nA complete authored source.\n";
         write(root.path(), z, body);
         let planned =
-            plan_partitioned(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+            plan_partitioned(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(planned.candidates[0].path, z);
         assert!(!root.path().join(STATE).exists());
         let session = MutationSession::acquire(root.path()).unwrap();
         let admitted = admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             u64::MAX,
@@ -3589,13 +3735,13 @@ mod tests {
             write(root.path(), path, body);
         }
         let resumed =
-            plan_partitioned(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+            plan_partitioned(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(resumed.candidates[0].path, z);
         assert_eq!(load(root.path()).unwrap().0, before);
         let deferred = admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             u64::MAX,
@@ -3612,7 +3758,7 @@ mod tests {
         assert!(receipts.entries.is_empty());
         assert!(matches!(receipts.next_class, AuditClass::Changed));
         let ready =
-            plan_partitioned(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+            plan_partitioned(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(ready.candidates[0].path, z);
 
         let mut checked = Vec::new();
@@ -3620,7 +3766,7 @@ mod tests {
         let admitted = admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             u64::MAX,
@@ -3645,7 +3791,7 @@ mod tests {
         let all_held = admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             u64::MAX,
@@ -3661,7 +3807,7 @@ mod tests {
         let failed = admit_available_partitioned(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             u64::MAX,
@@ -3709,7 +3855,7 @@ mod tests {
             let rejected = admit_available_partitioned(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 u64::MAX,
@@ -3756,7 +3902,7 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let files = scan(root.path());
         let initial =
-            plan_selected(root.path(), &dirs, &ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
+            plan_selected(root.path(), &dirs, *ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
         record_legacy_discovery(
             &session,
             &dirs,
@@ -3797,7 +3943,7 @@ mod tests {
             &serde_json::to_string(&receipts).unwrap(),
         );
         let selected =
-            plan_selected(root.path(), &dirs, &ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
+            plan_selected(root.path(), &dirs, *ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
         assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
         assert_eq!(selected.total, 1);
         assert_eq!(selected.unreviewed, 1);
@@ -3806,7 +3952,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &files,
             AuditResults {
                 assessments: vec![assessment(&selected.candidates[0])],
@@ -3827,7 +3973,7 @@ mod tests {
             &serde_json::to_string(&receipts).unwrap(),
         );
         let selected =
-            plan_selected(root.path(), &dirs, &ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
+            plan_selected(root.path(), &dirs, *ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
         assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
         assert_eq!(selected.total, 1);
         assert_eq!(selected.reviewed_current, 1);
@@ -3851,7 +3997,7 @@ mod tests {
             );
         }
         assert!(
-            plan(root.path(), &dirs, &ALL, &files, 1, u64::MAX)
+            plan(root.path(), &dirs, *ALL, &files, 1, u64::MAX)
                 .err()
                 .unwrap()
                 .to_string()
@@ -3942,7 +4088,7 @@ mod tests {
             plan_selected_partitioned(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 &[subject.into()],
@@ -3988,7 +4134,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&discovered)],
@@ -4013,7 +4159,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&discovered)]
@@ -4061,11 +4207,11 @@ mod tests {
         );
         write(root.path(), "wiki/documents/b.md", body);
         let pages = scan(root.path());
-        let bounded = plan(root.path(), &dirs, &ALL, &pages, 1, body.len() as u64).unwrap();
+        let bounded = plan(root.path(), &dirs, *ALL, &pages, 1, body.len() as u64).unwrap();
         assert_eq!(bounded.candidates[0].path, "wiki/documents/b.md");
         assert_eq!(bounded.blocked_count, 1);
         let partitioned =
-            plan_partitioned(root.path(), &dirs, &ALL, &pages, 1, body.len() as u64).unwrap();
+            plan_partitioned(root.path(), &dirs, *ALL, &pages, 1, body.len() as u64).unwrap();
         assert_eq!(partitioned.candidates[0].path, path);
         assert_eq!(partitioned.input.status, AuditInputStatus::Oversized);
         assert!(partitioned.blocked.is_empty());
@@ -4074,7 +4220,7 @@ mod tests {
         let exact = plan_selected_partitioned(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             2,
             &selection,
@@ -4110,7 +4256,7 @@ mod tests {
         write(root.path(), proof, "Completed work bytes.");
         let pages = scan(root.path());
         let selected =
-            plan_partitioned(root.path(), &dirs, &ALL, &pages, 3, small.len() as u64).unwrap();
+            plan_partitioned(root.path(), &dirs, *ALL, &pages, 3, small.len() as u64).unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let results = || AuditResults {
             assessments: selected.candidates.iter().map(assessment).collect(),
@@ -4126,7 +4272,7 @@ mod tests {
         let failure = record_with_guard(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             results(),
             small.len() as u64,
@@ -4148,7 +4294,7 @@ mod tests {
         let rejected = record_with_guard(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             results(),
             small.len() as u64,
@@ -4169,7 +4315,7 @@ mod tests {
         record_with_guard(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             results(),
             small.len() as u64,
@@ -4178,7 +4324,7 @@ mod tests {
         .unwrap();
         let workflow = lk_core::execution::WorkflowId::from_bytes([9; 16]);
         std::fs::remove_file(root.path().join(proof)).unwrap();
-        let verified = verify_batch(root.path(), &dirs, &ALL, &pages, &pair, &workflow).unwrap();
+        let verified = verify_batch(root.path(), &dirs, *ALL, &pages, &pair, &workflow).unwrap();
         assert_eq!(verified.completed.len(), 2);
         assert!(verified.pending.is_empty());
         let receipt = std::fs::read(root.path().join(STATE)).unwrap();
@@ -4186,7 +4332,7 @@ mod tests {
         let unavailable = verify_batch_with_readiness_controlled(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             &pair,
             &workflow,
@@ -4207,7 +4353,7 @@ mod tests {
         let verified = verify_batch(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             &pair,
             &workflow,
@@ -4223,7 +4369,7 @@ mod tests {
         let verified = verify_batch(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             &pair,
             &workflow,
@@ -4253,7 +4399,7 @@ mod tests {
             let selected = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 std::slice::from_ref(&alias),
@@ -4267,7 +4413,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(candidate)],
@@ -4285,7 +4431,7 @@ mod tests {
             let prepared = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 std::slice::from_ref(&alias),
@@ -4297,7 +4443,7 @@ mod tests {
             let rejected = record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&prepared.candidates[0])],
@@ -4340,7 +4486,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[subject.into()],
@@ -4354,7 +4500,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(candidate)],
@@ -4378,7 +4524,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(candidate)]
@@ -4420,7 +4566,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4450,7 +4596,7 @@ mod tests {
             selected.counts_by_kind[&AuditSubjectKind::Document].unreviewed,
             1
         );
-        let corpus = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let corpus = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(corpus.coverage_scope, AuditCoverageScope::Corpus);
         assert_eq!(corpus.total, 4);
         assert_eq!(corpus.counts_by_kind[&AuditSubjectKind::Concept].total, 1);
@@ -4462,7 +4608,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(candidate)],
@@ -4473,7 +4619,7 @@ mod tests {
         let current = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4495,7 +4641,7 @@ mod tests {
             let stale = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 &[path.into()],
@@ -4508,7 +4654,7 @@ mod tests {
                 record(
                     &session,
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(candidate)]
@@ -4528,7 +4674,7 @@ mod tests {
         let unchanged = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4571,7 +4717,7 @@ mod tests {
         let ready = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4587,7 +4733,7 @@ mod tests {
         assert_eq!(ready.coverage_scope, AuditCoverageScope::Selection);
         assert_eq!(ready.counts_by_kind[&AuditSubjectKind::Concept].total, 0);
         assert_eq!(ready.counts_by_kind[&AuditSubjectKind::Document].total, 1);
-        let corpus = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let corpus = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(corpus.coverage_scope, AuditCoverageScope::Corpus);
         assert_eq!(corpus.counts_by_kind[&AuditSubjectKind::Document].total, 2);
         assert_eq!(ready.input.pages, 3);
@@ -4597,7 +4743,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![completed],
@@ -4608,7 +4754,7 @@ mod tests {
         let current = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4629,7 +4775,7 @@ mod tests {
         let stale = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4649,7 +4795,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(candidate)]
@@ -4678,7 +4824,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4689,7 +4835,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: selected.candidates.iter().map(assessment).collect(),
@@ -4701,7 +4847,7 @@ mod tests {
         let completion = verify_batch(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             &selected.candidates,
             &workflow,
@@ -4718,7 +4864,7 @@ mod tests {
             let failure = verify_batch(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 &selected.candidates,
                 &workflow,
@@ -4744,7 +4890,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4768,7 +4914,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(candidate)],
@@ -4776,7 +4922,7 @@ mod tests {
             u64::MAX,
         )
         .unwrap();
-        let current = plan(root.path(), &dirs, &ALL, &scan(root.path()), 2, u64::MAX).unwrap();
+        let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, u64::MAX).unwrap();
         assert_eq!(current.reviewed_current, 1);
         assert_eq!(
             current.counts_by_kind[&AuditSubjectKind::Concept].reviewed_current,
@@ -4797,7 +4943,7 @@ mod tests {
         let blocked = plan(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             body.len() as u64 - 1,
@@ -4815,7 +4961,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             2,
             &selection,
@@ -4852,7 +4998,7 @@ mod tests {
         let revision = source_revision(&lk_vault::parse_page(original).unwrap());
         let content = review_body(path, source, &revision);
         write(root.path(), review, &content);
-        let ready = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let ready = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         let dependency = &ready.candidates[0].reviews[0];
         assert_eq!(dependency.state, AuditReviewState::Open);
         assert!(dependency.evidence[0].archived.is_none());
@@ -4871,7 +5017,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![completed],
@@ -4881,10 +5027,10 @@ mod tests {
         .unwrap();
         let (_, receipts) = load(root.path()).unwrap();
         assert_eq!(receipts.entries[path].reviews, [review]);
-        let current = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(current.follow_up_current, 1);
         lk_vault::archive_evidence(root.path(), &[source.into()]).unwrap();
-        let archived = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let archived = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(
             archived.reviewed_current, 1,
             "identical archive creation adds history, not a new semantic input"
@@ -4892,7 +5038,7 @@ mod tests {
         let exact = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -4917,14 +5063,14 @@ mod tests {
             &content.replace("2026-01-01", "2026-10-19"),
         );
         assert_eq!(
-            plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX)
+            plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX)
                 .unwrap()
                 .reviewed_current,
             1
         );
         let changed = original.replace("Prior evidence.", "Revised evidence with another meaning.");
         write(root.path(), source, &changed);
-        let stale = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let stale = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(stale.changed, 1);
         assert_eq!(stale.reviewed_current, 0);
         let evidence = &stale.candidates[0].reviews[0].evidence[0];
@@ -4945,7 +5091,7 @@ mod tests {
         let rejected = record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&stale.candidates[0])],
@@ -4963,7 +5109,7 @@ mod tests {
         let verified = verify_batch(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             &ready.candidates,
             &workflow,
@@ -4974,7 +5120,7 @@ mod tests {
         let oversized = plan(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             stale.input.bytes - 1,
@@ -5014,13 +5160,13 @@ mod tests {
             &review_body(source, source, &revision)
                 .replace("\"evidence\":[", "\"invalid_field\":true,\"evidence\":["),
         );
-        let unrelated = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let unrelated = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert!(unrelated.candidates[0].reviews.is_empty());
         let session = MutationSession::acquire(root.path()).unwrap();
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&unrelated.candidates[0])],
@@ -5036,7 +5182,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -5051,7 +5197,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&selected.candidates[0])]
@@ -5073,7 +5219,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             &[path.into()],
@@ -5088,7 +5234,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&selected.candidates[0])]
@@ -5117,7 +5263,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             1,
             &["wiki/concepts/a.md".into()],
@@ -5129,7 +5275,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             AuditResults {
                 assessments: vec![assessment(&selected.candidates[0])],
@@ -5146,7 +5292,7 @@ mod tests {
             plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &pages,
                 1,
                 &["wiki/concepts/b.md".into()],
@@ -5172,7 +5318,7 @@ mod tests {
             &review_body(path, source, &archived.citations[0].revision),
         );
         std::fs::remove_file(root.path().join(source)).unwrap();
-        let ready = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let ready = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         let dep = &ready.candidates[0].reviews[0];
         assert_eq!(dep.state, AuditReviewState::Open);
         assert!(dep.evidence[0].current.is_none());
@@ -5190,7 +5336,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&ready.candidates[0])],
@@ -5200,7 +5346,7 @@ mod tests {
         .unwrap();
         std::fs::remove_file(root.path().join(review)).unwrap();
         assert_review_checkpoint_parity(root.path(), &dirs, &[path]);
-        let missing = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let missing = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         assert_eq!(
             missing.candidates[0].reviews[0].state,
             AuditReviewState::Missing
@@ -5209,7 +5355,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&missing.candidates[0])]
@@ -5275,7 +5421,7 @@ mod tests {
             &review_body(path, source, &archive.citations[0].revision),
         );
         write(root.path(), source, "Revised evidence.\n");
-        let ready = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+        let ready = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
         let dep = &ready.candidates[0].reviews[0];
         let session = MutationSession::acquire(root.path()).unwrap();
         for input in [
@@ -5310,7 +5456,7 @@ mod tests {
         write(root.path(), "wiki/concepts/b.md", related);
         let pages = scan(root.path());
         let expected = (source.len() + concept.len() + related.len()) as u64;
-        let ready = plan(root.path(), &dirs, &ALL, &pages, 2, expected).unwrap();
+        let ready = plan(root.path(), &dirs, *ALL, &pages, 2, expected).unwrap();
         assert_eq!(ready.input.bytes, expected);
         assert_eq!(ready.input.pages, 3);
         assert_eq!(ready.input.rss_payloads, 0);
@@ -5322,7 +5468,7 @@ mod tests {
             .map(|candidate| candidate.path.clone())
             .collect::<Vec<_>>();
         let oversized =
-            plan_selected(root.path(), &dirs, &ALL, &pages, 2, &paths, expected - 1).unwrap();
+            plan_selected(root.path(), &dirs, *ALL, &pages, 2, &paths, expected - 1).unwrap();
         assert_eq!(oversized.input.status, AuditInputStatus::Oversized);
         assert_eq!(oversized.blocked_count, 0);
         assert!(oversized.blocked.is_empty());
@@ -5348,7 +5494,7 @@ mod tests {
             "wiki/concepts/b.md".to_string(),
             "wiki/concepts/a.md".to_string(),
         ];
-        let exact = plan_selected(root.path(), &dirs, &ALL, &pages, 2, &selected, 1).unwrap();
+        let exact = plan_selected(root.path(), &dirs, *ALL, &pages, 2, &selected, 1).unwrap();
         assert_eq!(exact.candidates[0].path, selected[0]);
         assert_eq!(exact.candidates[1].path, selected[1]);
         assert_eq!(exact.input.bytes, expected);
@@ -5357,24 +5503,24 @@ mod tests {
         let results = || AuditResults {
             assessments: ready.candidates.iter().map(assessment).collect(),
         };
-        let rejected = record(&session, &dirs, &ALL, &pages, results(), expected - 1).unwrap_err();
+        let rejected = record(&session, &dirs, *ALL, &pages, results(), expected - 1).unwrap_err();
         assert!(rejected.to_string().contains("oversized"));
         assert!(!root.path().join(STATE).exists());
-        record(&session, &dirs, &ALL, &pages, results(), expected).unwrap();
+        record(&session, &dirs, *ALL, &pages, results(), expected).unwrap();
         let before = std::fs::read(root.path().join(STATE)).unwrap();
-        assert!(record(&session, &dirs, &ALL, &pages, results(), 1).is_err());
+        assert!(record(&session, &dirs, *ALL, &pages, results(), 1).is_err());
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         let workflow = lk_core::execution::WorkflowId::from_bytes([1; 16]);
         verify_batch(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &pages,
             &ready.candidates,
             &workflow,
         )
         .unwrap();
-        assert!(plan(root.path(), &dirs, &ALL, &pages, 2, 0).is_err());
+        assert!(plan(root.path(), &dirs, *ALL, &pages, 2, 0).is_err());
     }
 
     #[test]
@@ -5388,11 +5534,11 @@ mod tests {
             let session = MutationSession::acquire(root.path()).unwrap();
             if previously_reviewed {
                 let initial =
-                    plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+                    plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
                 record(
                     &session,
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(&initial.candidates[0])],
@@ -5409,14 +5555,14 @@ mod tests {
             let cap = small.len() as u64;
             for expected in ["wiki/concepts/b.md", "wiki/concepts/c.md"] {
                 let before = std::fs::read(root.path().join(STATE)).ok();
-                let selected = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+                let selected = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
                 assert_eq!(selected.candidates.len(), 1);
                 assert_eq!(selected.candidates[0].path, expected);
                 assert_eq!(selected.input.status, AuditInputStatus::Ready);
                 assert_eq!(selected.blocked_count, 1);
                 assert_eq!(selected.blocked[0].path, large);
                 assert_eq!(selected.blocked[0].input.bytes, large_body.len() as u64);
-                let repeated = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+                let repeated = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
                 assert_eq!(repeated.candidates[0].path, expected);
                 assert_eq!(
                     repeated.blocked[0].input_revision,
@@ -5426,7 +5572,7 @@ mod tests {
                 record(
                     &session,
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(&selected.candidates[0])],
@@ -5436,7 +5582,7 @@ mod tests {
                 .unwrap();
             }
             let before = std::fs::read(root.path().join(STATE)).unwrap();
-            let blocked = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+            let blocked = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
             assert!(blocked.candidates.is_empty());
             assert_eq!(blocked.blocked_count, 1);
             assert_eq!(blocked.reviewed_current, 2);
@@ -5445,7 +5591,7 @@ mod tests {
             assert_eq!(blocked.input.bytes, 0);
             assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
 
-            let resumed = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, u64::MAX).unwrap();
+            let resumed = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, u64::MAX).unwrap();
             assert_eq!(resumed.candidates[0].path, large);
             assert_eq!(resumed.blocked_count, 0);
             assert_eq!(
@@ -5479,7 +5625,7 @@ mod tests {
                 record(
                     &session,
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(candidate)],
@@ -5488,7 +5634,7 @@ mod tests {
                 )
                 .unwrap();
             };
-            let initial = plan(root.path(), &dirs, &ALL, &scan(root.path()), 2, u64::MAX).unwrap();
+            let initial = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, u64::MAX).unwrap();
             for candidate in &initial.candidates {
                 complete(candidate);
             }
@@ -5513,7 +5659,7 @@ mod tests {
                 &format!("{changed}{}", "Context.\n".repeat(100)),
             );
             let cap = changed.len() as u64;
-            let first = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+            let first = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
             assert_eq!(
                 first.candidates[0].path, fitting,
                 "an oversized member must not pass its class turn to the other class (prefer_changed={prefer_changed})"
@@ -5521,10 +5667,10 @@ mod tests {
             assert_eq!(first.blocked_count, 1);
             assert_eq!(first.blocked[0].path, blocked);
             complete(&first.candidates[0]);
-            let opposite = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+            let opposite = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
             assert_eq!(opposite.candidates[0].path, other_first);
             complete(&opposite.candidates[0]);
-            let exhausted = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, cap).unwrap();
+            let exhausted = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, cap).unwrap();
             assert_eq!(exhausted.candidates[0].path, other_second);
             assert_eq!(exhausted.blocked[0].path, blocked);
         }
@@ -5539,7 +5685,7 @@ mod tests {
             write(root.path(), path, concept);
         }
         let cap = concept.len() as u64;
-        let selected = plan(root.path(), &dirs, &ALL, &scan(root.path()), 2, cap).unwrap();
+        let selected = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, cap).unwrap();
         assert_eq!(selected.candidates.len(), 1);
         assert_eq!(selected.candidates[0].path, "wiki/concepts/a.md");
         assert_eq!(selected.input.bytes, cap);
@@ -5549,7 +5695,7 @@ mod tests {
         let exact = plan_selected(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             2,
             &["wiki/concepts/b.md".into(), "wiki/concepts/a.md".into()],
@@ -5576,7 +5722,7 @@ mod tests {
                 concept,
             );
         }
-        let blocked = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 1).unwrap();
+        let blocked = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 1).unwrap();
         assert!(blocked.candidates.is_empty());
         assert_eq!(blocked.blocked_count, 102);
         assert_eq!(blocked.blocked.len(), 100);
@@ -5589,7 +5735,7 @@ mod tests {
         let selected = plan(
             root.path(),
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             1,
             small.len() as u64,
@@ -5640,7 +5786,7 @@ mod tests {
         for path in ["wiki/concepts/a.md", "wiki/concepts/b.md"] {
             write(root.path(), path, concept);
         }
-        let ready = plan(root.path(), &dirs, &ALL, &scan(root.path()), 2, u64::MAX).unwrap();
+        let ready = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, u64::MAX).unwrap();
         let mut resources = InputResources::default();
         resources
             .include_candidate(root.path(), &ready.candidates[0])
@@ -5722,7 +5868,7 @@ mod tests {
             write(root.path(), path, concept);
         }
         let expected = (source.len() + 2 * concept.len() + capture.payloads[0].len()) as u64;
-        let input = plan(root.path(), &dirs, &ALL, &scan(root.path()), 2, expected).unwrap();
+        let input = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, expected).unwrap();
         assert_eq!(input.input.status, AuditInputStatus::Ready);
         assert_eq!(input.input.bytes, expected);
         assert_eq!(input.input.pages, 3);
@@ -5754,7 +5900,7 @@ mod tests {
         write(root.path(), "wiki/documents/source.md", source);
         write(root.path(), "wiki/concepts/a.md", concept);
         write(root.path(), "wiki/concepts/b.md", related);
-        let first = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let first = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(first.total, 3);
         assert_eq!(first.unreviewed, 3);
         assert_eq!(
@@ -5773,7 +5919,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&first.candidates[0])],
@@ -5781,7 +5927,7 @@ mod tests {
             262_144,
         )
         .unwrap();
-        let next = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let next = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(next.reviewed_current, 1);
         assert_eq!(next.candidates[0].path, "wiki/concepts/b.md");
         write(
@@ -5792,7 +5938,7 @@ mod tests {
                 .replace("source_count: 1", "source_count: 2"),
         );
         assert_eq!(
-            plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144)
+            plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .reviewed_current,
             1
@@ -5810,7 +5956,7 @@ mod tests {
             ),
         ] {
             write(root.path(), path, &changed);
-            let stale = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+            let stale = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
             assert_eq!(stale.changed, 1);
             assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
             assert_eq!(stale.candidates[0].path, "wiki/concepts/a.md");
@@ -5819,7 +5965,7 @@ mod tests {
                 record(
                     &session,
                     &dirs,
-                    &ALL,
+                    *ALL,
                     &scan(root.path()),
                     AuditResults {
                         assessments: vec![assessment(&first.candidates[0])]
@@ -5837,14 +5983,17 @@ mod tests {
     fn automatic_scope_counts_excluded_kinds_and_exact_selection_still_audits_them() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
-        let concepts = BTreeSet::from([AuditSubjectKind::Concept]);
+        let concepts = AuditCorpus {
+            kinds: &BTreeSet::from([AuditSubjectKind::Concept]),
+            min_sources: 0,
+        };
         let (concept, document) = ("wiki/concepts/a.md", "wiki/documents/a.md");
         write(root.path(), concept, "---\ntype: concept\n---\nA claim.\n");
         for path in [document, "wiki/documents/b.md"] {
             write(root.path(), path, "---\ntype: document\n---\nA source.\n");
         }
         let session = MutationSession::acquire(root.path()).unwrap();
-        let admit = |subjects: &BTreeSet<AuditSubjectKind>| {
+        let admit = |subjects: AuditCorpus<'_>| {
             admit_available_partitioned(
                 &session,
                 &dirs,
@@ -5858,7 +6007,7 @@ mod tests {
             )
             .unwrap()
         };
-        let automatic = admit(&concepts);
+        let automatic = admit(concepts);
         assert_eq!(automatic.candidates.len(), 1);
         assert_eq!(automatic.candidates[0].path, concept);
         assert_eq!(
@@ -5871,6 +6020,11 @@ mod tests {
                     "unreviewed": 1, "changed": 0,
                 }},
                 "excluded_by_kind": {"document": 2},
+                "min_sources": 0,
+                "below_min_sources": {
+                    "total": 0, "reviewed_current": 0, "follow_up_current": 0,
+                    "unreviewed": 0, "changed": 0,
+                },
             })
         );
         assert_eq!(load(root.path()).unwrap().1.pending, [concept]);
@@ -5878,7 +6032,7 @@ mod tests {
         let selected = plan_selected(
             root.path(),
             &dirs,
-            &concepts,
+            concepts,
             &scan(root.path()),
             1,
             &[document.into()],
@@ -5894,7 +6048,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &concepts,
+            concepts,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&selected.candidates[0])],
@@ -5905,7 +6059,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &concepts,
+            concepts,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![assessment(&automatic.candidates[0])],
@@ -5924,7 +6078,7 @@ mod tests {
         let settled = plan(
             root.path(),
             &dirs,
-            &concepts,
+            concepts,
             &scan(root.path()),
             100,
             u64::MAX,
@@ -5932,7 +6086,7 @@ mod tests {
         .unwrap();
         assert!(settled.candidates.is_empty());
         assert_eq!((settled.reviewed_current, settled.total), (1, 1));
-        for subjects in [&concepts, &*ALL] {
+        for subjects in [concepts, *ALL] {
             assert_eq!(
                 json!(coverage(root.path(), &dirs, subjects, &scan(root.path()), &read).unwrap()),
                 json!(
@@ -5949,7 +6103,7 @@ mod tests {
                 ),
             );
         }
-        let included = admit(&ALL);
+        let included = admit(*ALL);
         assert_eq!(included.candidates[0].path, "wiki/documents/b.md");
         assert_eq!((included.reviewed_current, included.total), (2, 3));
         assert!(included.excluded_by_kind.is_empty());
@@ -6007,7 +6161,7 @@ mod tests {
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>()
         };
-        let unreviewed = plan(root.path(), &dirs, &ALL, &scan(root.path()), 100, u64::MAX).unwrap();
+        let unreviewed = plan(root.path(), &dirs, *ALL, &scan(root.path()), 100, u64::MAX).unwrap();
         assert_eq!(
             order(&unreviewed),
             [
@@ -6043,7 +6197,7 @@ mod tests {
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: assessments.into(),
@@ -6062,7 +6216,7 @@ mod tests {
         for name in ["hub", "m"] {
             write(root.path(), &concept(name), &body("A changed claim."));
         }
-        let rotated = plan(root.path(), &dirs, &ALL, &scan(root.path()), 100, u64::MAX).unwrap();
+        let rotated = plan(root.path(), &dirs, *ALL, &scan(root.path()), 100, u64::MAX).unwrap();
         assert_eq!(
             order(&rotated),
             [
@@ -6083,6 +6237,109 @@ mod tests {
     }
 
     #[test]
+    fn min_sources_bounds_required_coverage_and_plans_required_subjects_first() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = |name: &str| format!("wiki/concepts/{name}.md");
+        let body = |claim: &str| format!("---\ntype: concept\n---\n## Synthesis\n{claim}\n");
+        for name in ["lone", "narrow", "wide"] {
+            write(root.path(), &concept(name), &body("A scoped claim."));
+        }
+        let source = |links: &[&str]| {
+            let links = links
+                .iter()
+                .map(|name| format!("- [{name}](../concepts/{name}.md)\n"))
+                .collect::<String>();
+            format!("---\ntype: document\n---\n## Related Concepts\n{links}")
+        };
+        write(
+            root.path(),
+            "wiki/documents/s1.md",
+            &source(&["narrow", "wide"]),
+        );
+        write(root.path(), "wiki/documents/s2.md", &source(&["wide"]));
+        let corpus = AuditCorpus {
+            kinds: &BTreeSet::from([AuditSubjectKind::Concept]),
+            min_sources: 2,
+        };
+        let read = lk_vault::ReadControl::default();
+        let order = |plan: &AuditPlan| {
+            plan.candidates
+                .iter()
+                .map(|candidate| candidate.path.clone())
+                .collect::<Vec<_>>()
+        };
+        let counts = |total, unreviewed, changed| {
+            json!({
+                "total": total, "reviewed_current": 0, "follow_up_current": 0,
+                "unreviewed": unreviewed, "changed": changed,
+            })
+        };
+
+        let first = plan(
+            root.path(),
+            &dirs,
+            corpus,
+            &scan(root.path()),
+            100,
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(
+            order(&first),
+            [concept("wide"), concept("narrow"), concept("lone")]
+        );
+        assert_eq!(
+            (first.total, first.unreviewed, first.min_sources),
+            (1, 1, 2)
+        );
+        assert_eq!(json!(first.below_min_sources), counts(2, 2, 0));
+        assert_eq!(
+            json!(coverage(root.path(), &dirs, corpus, &scan(root.path()), &read).unwrap()),
+            json!(first.coverage())
+        );
+
+        let session = MutationSession::acquire(root.path()).unwrap();
+        record(
+            &session,
+            &dirs,
+            corpus,
+            &scan(root.path()),
+            AuditResults {
+                assessments: vec![assessment(&first.candidates[1])],
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        write(root.path(), &concept("narrow"), &body("A changed claim."));
+        let next = plan(root.path(), &dirs, corpus, &scan(root.path()), 1, u64::MAX).unwrap();
+        assert_eq!(
+            order(&next),
+            [concept("wide")],
+            "the changed turn yields to an unreviewed required subject"
+        );
+        assert_eq!((next.total, next.unreviewed, next.changed), (1, 1, 0));
+        assert_eq!(json!(next.below_min_sources), counts(2, 1, 1));
+        assert_eq!(
+            json!(coverage(root.path(), &dirs, corpus, &scan(root.path()), &read).unwrap()),
+            json!(next.coverage())
+        );
+
+        let selected = plan_selected(
+            root.path(),
+            &dirs,
+            corpus,
+            &scan(root.path()),
+            1,
+            &[concept("lone")],
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(order(&selected), [concept("lone")]);
+        assert_eq!((selected.total, selected.min_sources), (1, 0));
+    }
+
+    #[test]
     fn classes_rotate_under_continuous_changes_and_new_prefixes() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -6096,7 +6353,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(candidate)],
@@ -6105,24 +6362,24 @@ mod tests {
             )
             .unwrap();
         };
-        let first = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let first = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         complete(&first.candidates[0]);
         write(root.path(), a, &concept.replace("Scoped", "Changed"));
         write(root.path(), "wiki/concepts/aa.md", concept);
-        let changed = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let changed = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(changed.candidates[0].path, a);
         complete(&changed.candidates[0]);
         write(root.path(), a, &concept.replace("Scoped", "Changed again"));
         write(root.path(), "wiki/concepts/ab.md", concept);
-        let waiting = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let waiting = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(waiting.candidates[0].path, z);
         complete(&waiting.candidates[0]);
-        let changed = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let changed = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(changed.candidates[0].path, a);
         complete(&changed.candidates[0]);
         write(root.path(), "wiki/concepts/aaa.md", concept);
         assert_eq!(
-            plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144)
+            plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .candidates[0]
                 .path,
@@ -6161,7 +6418,7 @@ mod tests {
             let selected = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 &[path.into()],
@@ -6176,7 +6433,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![assessment(&selected.candidates[0])],
@@ -6191,7 +6448,7 @@ mod tests {
             let rejected = record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![result.clone()],
@@ -6214,7 +6471,7 @@ mod tests {
             let reopened = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 &[path.into()],
@@ -6240,7 +6497,7 @@ mod tests {
             let selected = plan_selected(
                 root.path(),
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 1,
                 &[path.into()],
@@ -6252,7 +6509,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![result],
@@ -6270,7 +6527,7 @@ mod tests {
         let path = "wiki/concepts/a.md";
         let body = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn unsupported definition.\n";
         write(root.path(), path, body);
-        let input = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let input = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         let mut result = assessment(&input.candidates[0]);
         result.disposition = AuditDisposition::FollowUp;
         let session = MutationSession::acquire(root.path()).unwrap();
@@ -6281,7 +6538,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![copy(&result)]
@@ -6311,7 +6568,7 @@ mod tests {
             record(
                 &session,
                 &dirs,
-                &ALL,
+                *ALL,
                 &scan(root.path()),
                 AuditResults {
                     assessments: vec![copy(&result)]
@@ -6322,13 +6579,13 @@ mod tests {
         );
         assert!(!root.path().join(STATE).exists());
         write(root.path(), review, &content);
-        let refreshed = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let refreshed = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         result.file_revision = refreshed.candidates[0].file_revision.clone();
         result.input_revision = refreshed.candidates[0].input_revision.clone();
         record(
             &session,
             &dirs,
-            &ALL,
+            *ALL,
             &scan(root.path()),
             AuditResults {
                 assessments: vec![result],
@@ -6336,12 +6593,12 @@ mod tests {
             262_144,
         )
         .unwrap();
-        let current = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(current.reviewed_current, 1);
         assert_eq!(current.follow_up_current, 1);
         assert!(current.candidates.is_empty());
         std::fs::remove_file(root.path().join(review)).unwrap();
-        let missing = plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).unwrap();
+        let missing = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!(missing.reviewed_current, 0);
         assert_eq!(missing.changed, 1);
         assert_eq!(missing.candidates[0].path, path);
@@ -6351,19 +6608,19 @@ mod tests {
             &content.replace(&revision, &"0".repeat(32)),
         );
         assert_eq!(
-            plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144)
+            plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .changed,
             1
         );
         write(root.path(), review, &content);
         assert_eq!(
-            plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144)
+            plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144)
                 .unwrap()
                 .reviewed_current,
             1
         );
         std::fs::write(root.path().join(STATE), "{invalid").unwrap();
-        assert!(plan(root.path(), &dirs, &ALL, &scan(root.path()), 1, 262_144).is_err());
+        assert!(plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).is_err());
     }
 }

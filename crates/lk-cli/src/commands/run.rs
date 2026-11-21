@@ -5484,7 +5484,7 @@ mod native {
             let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
-                &self.config.graph.audit.subjects,
+                lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                 &pages,
                 self.config.graph.audit.batch_size,
                 &[],
@@ -5535,7 +5535,7 @@ mod native {
             let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
                 &self.root,
                 &self.config.vault.dirs,
-                &self.config.graph.audit.subjects,
+                lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                 &pages,
                 self.config.graph.audit.batch_size,
                 paths,
@@ -5990,7 +5990,7 @@ mod native {
             let plan = lk_graph::audit::admit_available_partitioned_controlled(
                 &session,
                 &self.config.vault.dirs,
-                &self.config.graph.audit.subjects,
+                lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                 &pages,
                 self.config.graph.audit.batch_size,
                 self.config.graph.audit.max_input_bytes,
@@ -6082,7 +6082,7 @@ mod native {
             let verified = lk_graph::audit::verify_batch_with_readiness_controlled(
                 &self.root,
                 &self.config.vault.dirs,
-                &self.config.graph.audit.subjects,
+                lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                 &pages,
                 batch,
                 workflow.id(),

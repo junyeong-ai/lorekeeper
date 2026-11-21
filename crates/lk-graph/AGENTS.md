@@ -91,6 +91,11 @@ and CLI discovery, not a second graph authority.
   over those kinds. Other kinds are counted in `excluded_by_kind` without deriving
   their inputs. They keep their receipts and recorded discovery and stay auditable as
   exact selections; a named subject of an excluded kind never enters corpus counts.
+  `graph.audit.min_sources` narrows required corpus coverage to concepts with at least
+  that many distinct citing pages from the backlink authority; documents and exact
+  selections are always required. Unrequired concepts are counted in
+  `below_min_sources`, outside `total`, and planned after every required subject: the
+  class rotation takes the other class's required subject before its own unrequired one.
   `coverage` derives inputs only for receipt holders and equals an automatic plan's.
 - Check unreadable potential subjects of an included kind before filtering on parsed
   `type`; an unknown format cannot shrink corpus coverage. Exact selections require

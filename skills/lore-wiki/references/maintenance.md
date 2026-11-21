@@ -136,6 +136,8 @@ The final audit reads every admitted body; screening creates no citation or comp
    nested addresses. Automatic plans include the kinds in `graph.audit.subjects`,
    concepts by default. Aggregate counts and `counts_by_kind` cover those kinds, so
    coverage is `reviewed_current` of `total`; `excluded_by_kind` only counts the others.
+   With `graph.audit.min_sources`, `total` covers only concepts cited by at least that
+   many distinct pages; `below_min_sources` counts the rest, planned after them.
    An excluded document stays auditable through its exact `--path`, where it needs no
    corresponding concept to be selectable.
    A subject with unfinished semantic work in its actual subject, evidence, context or

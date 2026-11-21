@@ -508,6 +508,7 @@ concepts:
 #     schedule: "0 7 * * 0"         # weekly semantic maintenance, independent of synthesis
 #     batch_size: 5                # changed and first-time subjects rotate; each class plans by typed risk (1..100)
 #     subjects: [concept]          # kinds automatic plans and coverage include; add document for source documents
+#     min_sources: 0               # coverage requires concepts cited by this many distinct pages; the rest are assessed after them
 #     max_input_bytes: 262144      # whole distinct audit footprint; oversized subjects require completed bounded work
 #                                  # requires an explicit execution profile and deployed skills
 #   scope:

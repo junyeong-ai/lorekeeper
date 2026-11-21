@@ -178,8 +178,11 @@ pub async fn run(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> 
 
     let coverage = audit_coverage(&vault_root, &config);
     match &coverage {
-        Ok(coverage) if coverage.total + coverage.excluded_by_kind.values().sum::<usize>() == 0 => {
-        }
+        Ok(coverage)
+            if coverage.total
+                + coverage.below_min_sources.total
+                + coverage.excluded_by_kind.values().sum::<usize>()
+                == 0 => {}
         Ok(coverage) => subsystems.push(Subsystem {
             name: "audit",
             ok: true,
@@ -309,7 +312,7 @@ fn audit_coverage(
     lk_graph::audit::coverage(
         root,
         &config.vault.dirs,
-        &config.graph.audit.subjects,
+        lk_graph::audit::AuditCorpus::from(&config.graph.audit),
         &pages,
         &lk_vault::ReadControl::default(),
     )
@@ -319,6 +322,13 @@ fn audit_state(coverage: &lk_graph::audit::AuditCoverage) -> String {
     let mut state = format!("{}/{} current", coverage.reviewed_current, coverage.total);
     if coverage.changed > 0 {
         let _ = write!(state, " · {} changed", coverage.changed);
+    }
+    if coverage.below_min_sources.total > 0 {
+        let _ = write!(
+            state,
+            " · {} under {} sources",
+            coverage.below_min_sources.total, coverage.min_sources
+        );
     }
     let excluded = coverage.excluded_by_kind.values().sum::<usize>();
     if excluded > 0 {
@@ -465,25 +475,31 @@ mod tests {
     }
 
     #[test]
-    fn audit_coverage_names_current_changed_and_excluded_subjects() {
-        use lk_graph::audit::{AuditCoverage, AuditCoverageScope, AuditSubjectKind};
+    fn audit_coverage_names_current_changed_unrequired_and_excluded_subjects() {
+        use lk_graph::audit::{AuditCounts, AuditCoverage, AuditCoverageScope, AuditSubjectKind};
         let mut coverage = AuditCoverage {
             coverage_scope: AuditCoverageScope::Corpus,
-            total: 4943,
+            total: 1257,
             reviewed_current: 87,
             follow_up_current: 5,
-            unreviewed: 4795,
+            unreviewed: 1109,
             changed: 61,
             counts_by_kind: Default::default(),
             excluded_by_kind: [(AuditSubjectKind::Document, 2318)].into(),
+            min_sources: 3,
+            below_min_sources: AuditCounts {
+                total: 3702,
+                ..AuditCounts::default()
+            },
         };
         assert_eq!(
             super::audit_state(&coverage),
-            "87/4943 current · 61 changed · 2318 excluded"
+            "87/1257 current · 61 changed · 3702 under 3 sources · 2318 excluded"
         );
         coverage.changed = 0;
         coverage.excluded_by_kind.clear();
-        assert_eq!(super::audit_state(&coverage), "87/4943 current");
+        coverage.below_min_sources = AuditCounts::default();
+        assert_eq!(super::audit_state(&coverage), "87/1257 current");
     }
 
     #[test]

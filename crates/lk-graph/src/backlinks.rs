@@ -2304,7 +2304,7 @@ mod tests {
                 let audit = crate::audit::plan_selected(
                     root.path(),
                     &dirs,
-                    &Default::default(),
+                    crate::audit::AuditCorpus::from(&lk_core::config::GraphAuditConfig::default()),
                     &pages,
                     1,
                     &[concept.to_string_lossy().into_owned()],

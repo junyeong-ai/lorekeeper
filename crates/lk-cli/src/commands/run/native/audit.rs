@@ -145,7 +145,7 @@ impl Runner<'_> {
                 lk_graph::audit::plan_selected_partitioned_controlled(
                     &self.root,
                     &self.config.vault.dirs,
-                    &self.config.graph.audit.subjects,
+                    lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                     &pages,
                     paths.len(),
                     &paths,

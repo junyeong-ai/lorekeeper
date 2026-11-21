@@ -595,7 +595,9 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
         && let Some(audit) = graph
             .get_mut("audit")
             .and_then(serde_json::Value::as_object_mut)
-        && audit.remove("subjects").is_some()
+        && [audit.remove("subjects"), audit.remove("min_sources")]
+            .iter()
+            .any(Option::is_some)
         && audit.is_empty()
     {
         graph.remove("audit");
@@ -1600,6 +1602,9 @@ pub struct GraphAuditConfig {
     /// Subject kinds automatic plans and coverage include. An exact selection may
     /// still name a subject of any kind.
     pub subjects: BTreeSet<AuditSubjectKind>,
+    /// Concepts cited by fewer distinct source pages fall outside required coverage;
+    /// automatic plans still assess them after every required subject. 0 requires all.
+    pub min_sources: usize,
 }
 
 impl Default for GraphAuditConfig {
@@ -1609,6 +1614,7 @@ impl Default for GraphAuditConfig {
             batch_size: 5,
             max_input_bytes: 262_144,
             subjects: BTreeSet::from([AuditSubjectKind::Concept]),
+            min_sources: 0,
         }
     }
 }
@@ -1890,12 +1896,13 @@ mod tests {
             original.semantic_work_revision(),
             unlimited.semantic_work_revision()
         );
-        for subjects in ["[concept]", "[concept, document]"] {
-            std::fs::write(
-                &path,
-                format!("{base}graph: {{audit: {{subjects: {subjects}}}}}\n"),
-            )
-            .unwrap();
+        for audit in [
+            "subjects: [concept]",
+            "subjects: [concept, document]",
+            "min_sources: 3",
+            "subjects: [concept], min_sources: 3",
+        ] {
+            std::fs::write(&path, format!("{base}graph: {{audit: {{{audit}}}}}\n")).unwrap();
             assert_eq!(
                 original.semantic_work_revision(),
                 Config::load(&path).unwrap().semantic_work_revision()

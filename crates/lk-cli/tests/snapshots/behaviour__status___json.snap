@@ -7,6 +7,13 @@ exit: 0
 {
   "data": {
     "audit": {
+      "below_min_sources": {
+        "changed": 0,
+        "follow_up_current": 0,
+        "reviewed_current": 0,
+        "total": 0,
+        "unreviewed": 0
+      },
       "changed": 0,
       "counts_by_kind": {
         "concept": {
@@ -22,6 +29,7 @@ exit: 0
         "document": 0
       },
       "follow_up_current": 0,
+      "min_sources": 0,
       "reviewed_current": 0,
       "total": 4,
       "unreviewed": 4

@@ -106,7 +106,9 @@ lint alone cannot perform the semantic read. `graph.audit.subjects` lists the ki
 automatic plans include: `[concept]` by default, `[concept, document]` to add declared
 source documents. Coverage is `reviewed_current` of `total` over those kinds, shown by
 `lore status` and `lore wiki audit-plan`; other kinds appear only as `excluded_by_kind`
-counts and stay auditable through explicit `audit-plan --path`. Subjects are planned by
+counts and stay auditable through explicit `audit-plan --path`. `graph.audit.min_sources`
+(default 0) requires only concepts cited by at least that many distinct pages; the others
+are counted in `below_min_sources` and planned after every required subject. Subjects are planned by
 typed risk, so lower-risk pages can wait: coverage is reported, not promised. Documents
 have no citing pages, so with `document` included they follow every cited concept of
 the same class.
