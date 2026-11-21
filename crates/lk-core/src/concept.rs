@@ -138,8 +138,8 @@ pub fn source_revision(page: &crate::frontmatter::VaultPage) -> String {
 /// A page as semantic work reads it when bookkeeping must not change the read: the parsed
 /// frontmatter without `BOOKKEEPING_FIELDS`, one `"key": value` line per field in key order
 /// with JSON-style flow values, then the body. Parsing first resolves anchors, quoting and
-/// flow style, so the text depends only on the field values, and it parses back to the same
-/// fields and body.
+/// flow style, so the text depends only on the field values, and within the parser's budgets it
+/// parses back to the same fields and body.
 pub fn semantic_text(page: &crate::frontmatter::VaultPage) -> String {
     let mut text = String::from("---\n");
     let mut fields = page
