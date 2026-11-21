@@ -63,8 +63,12 @@ paths:
   `extraction_scope.policy` and `selected`; recipes, the roster and unread candidates
   stay outside it. Candidate churn that leaves the selected set unchanged neither
   refuses recorded inspections nor replans the Work, and reading that evidence captures
-  no discovery. Rust binds the current completely decided roster where a result is
-  assembled, before a finalizer call and again after it, and writes the result's
+  no discovery. Context pages, such as selected owners, are read and bound without their
+  bookkeeping frontmatter (`lk_core::concept::BOOKKEEPING_FIELDS`,
+  `lk_vault::without_bookkeeping`), so a citation or task-state update to one leaves the
+  Work current; an authored change does not. Reuse still binds the owner's exact file at
+  assembly and application. Rust binds the current completely decided roster where a
+  result is assembled, before a finalizer call and again after it, and writes the result's
   `discovery` and `selection` itself. A roster that cannot be formed (screening capacity,
   a blocked or incomplete source), is not completely decided, or admits different
   evidence at either point is changed scope, never a retagged result; other roster churn

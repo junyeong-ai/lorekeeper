@@ -24,6 +24,8 @@ canonical; SQLite navigation is derived.
   a top-level key; `set_llm_input` changes a child of block-style `llm_inputs`;
   `record_llm_input` may establish that mapping. Missing placement returns `None`,
   never appends markers to body. Callers serialize values and handle failure.
+  `without_bookkeeping` removes the same top-level bookkeeping entries, with their
+  continuation lines, for semantic reads; every other byte stays.
 - Read `continuation_span` before changing setters: deeper indentation belongs to
   an entry; siblings end it; blank lines don't belong/end; comments belong to the
   following entry except inside per-line-tracked block scalars (including `- |`).

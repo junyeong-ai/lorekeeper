@@ -30,7 +30,10 @@ impl Owners {
         let mut owners = Vec::new();
         for resource in &prepared.resources {
             let path = std::path::Path::new(&resource.address);
-            if !prepared.is_reuse_owner(&resource.address, &resource.revision)
+            let Some(revision) = prepared.page_file_revision(&resource.address) else {
+                continue;
+            };
+            if !prepared.is_reuse_owner(&resource.address, &revision)
                 || !path.starts_with(&directory)
                 || path.extension().is_none_or(|extension| extension != "md")
             {
@@ -41,7 +44,7 @@ impl Owners {
             if page.frontmatter.is_declared_concept() {
                 owners.push(ConceptOwner {
                     path: resource.address.clone(),
-                    revision: resource.revision.clone(),
+                    revision,
                 });
             }
         }
@@ -52,10 +55,19 @@ impl Owners {
         format!("o{index}")
     }
 
+    /// The roster a host chooses from. The owner's file revision stays out: the resources
+    /// already pin what was read, and a citation update to the owner must not change the
+    /// request. Rust expands a chosen reference with the file revision current at assembly.
     pub(in crate::commands::work) fn presentation(&self) -> Value {
-        json!(self.0.iter().enumerate().map(|(index, owner)| json!({
-            "owner_ref":Self::reference(index), "path":owner.path, "revision":owner.revision,
-        })).collect::<Vec<_>>())
+        json!(
+            self.0
+                .iter()
+                .enumerate()
+                .map(|(index, owner)| json!({
+                    "owner_ref":Self::reference(index), "path":owner.path,
+                }))
+                .collect::<Vec<_>>()
+        )
     }
 
     pub(super) fn resolve(

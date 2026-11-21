@@ -116,14 +116,19 @@ impl Citation {
     }
 }
 
+/// Top-level frontmatter that records the tooling's state rather than what a page states:
+/// task input/completion markers, the last-update date and the citation count change
+/// whenever citations or task state change, without changing what the page says.
+pub const BOOKKEEPING_FIELDS: [&str; 3] = [
+    crate::frontmatter::field::LLM_INPUTS,
+    "updated",
+    crate::frontmatter::field::SOURCE_COUNT,
+];
+
 /// Authored input, excluding bookkeeping that does not change what a source states.
 pub fn source_revision(page: &crate::frontmatter::VaultPage) -> String {
     let mut fields = page.frontmatter.fields.clone();
-    for key in [
-        crate::frontmatter::field::LLM_INPUTS,
-        "updated",
-        crate::frontmatter::field::SOURCE_COUNT,
-    ] {
+    for key in BOOKKEEPING_FIELDS {
         fields.remove(key);
     }
     let bytes = serde_json::to_vec(&(fields, &page.body)).expect("page values serialize");

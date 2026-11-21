@@ -87,6 +87,8 @@ pub(super) struct SelectionInventory {
 }
 
 impl Prepared {
+    /// Whether `address` is a reusable owner captured at the exact file revision `revision`.
+    /// Reuse publication writes the owner, so it binds the file, not the context read.
     pub(super) fn is_reuse_owner(&self, address: &str, revision: &str) -> bool {
         self.resources.iter().any(|resource| {
             self.selected_owners
@@ -95,8 +97,16 @@ impl Prepared {
                     owners.contains(address)
                 })
                 && resource.address == address
-                && resource.revision == revision
-        })
+        }) && self
+            .page_file_revision(address)
+            .is_some_and(|current| current == revision)
+    }
+
+    pub(super) fn page_file_revision(&self, address: &str) -> Option<String> {
+        self.pages
+            .iter()
+            .find(|(path, _)| lk_core::vault_path::address(path) == address)
+            .map(|(_, raw)| file_revision(raw))
     }
 
     pub fn validate_audit_result(
@@ -268,15 +278,20 @@ impl<'a> Capture<'a> {
             ));
         }
         let address = lk_core::vault_path::address(&relative);
-        let exact = file_revision(&raw);
-        self.pages.insert(relative, raw.clone());
+        // A context page is read without its bookkeeping, so a citation or task-state update
+        // to it leaves the work that read it current.
+        let text = match authority {
+            SemanticAuthority::Context => lk_vault::without_bookkeeping(&raw).into_owned(),
+            _ => raw.clone(),
+        };
+        self.pages.insert(relative, raw);
         self.resources
             .entry(address.clone())
             .or_insert_with(|| SemanticResource {
                 address,
-                revision: exact,
+                revision: file_revision(&text),
                 authority,
-                text: raw.clone(),
+                text,
             });
         Ok(())
     }
@@ -1352,6 +1367,34 @@ mod tests {
             )
         };
         let admitted = admit(&[selected]).unwrap();
+        let owner_raw = std::fs::read_to_string(root.join(selected)).unwrap();
+        let bookkept = owner_raw.replacen(
+            "title: Candidate owner\n",
+            "title: Candidate owner\nsource_count: 3\nupdated: 2026-11-21\nllm_inputs:\n  synthesis: \"a\"\n",
+            1,
+        );
+        write(&root, selected, &bookkept);
+        let cited = admit(&[selected]).unwrap();
+        assert_eq!(
+            cited.revision("config").unwrap(),
+            admitted.revision("config").unwrap(),
+            "a citation or task-state update to a context page leaves the work that read it current"
+        );
+        assert!(cited.is_reuse_owner(selected, &file_revision(&bookkept)));
+        assert!(
+            !cited.is_reuse_owner(selected, &file_revision(&owner_raw)),
+            "reuse binds the exact file it will write"
+        );
+        write(
+            &root,
+            selected,
+            &bookkept.replace("declared scope", "narrower scope"),
+        );
+        assert_ne!(
+            admit(&[selected]).unwrap().revision("config").unwrap(),
+            admitted.revision("config").unwrap()
+        );
+        write(&root, selected, &owner_raw);
         #[cfg(unix)]
         {
             let roster = |prepared: &Prepared| {

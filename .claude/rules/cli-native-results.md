@@ -96,8 +96,9 @@ paths:
   quotes/escapes, not character count. Signal/cleanup errors and failed fresh scope
   validation stay fatal.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
-  admitted-owner roster. Rust expands it to the unchanged canonical path/file-revision
-  contract. Screened extraction admits only its explicit selected owners, possibly none;
+  admitted-owner roster, which presents references and paths, never revisions. Rust
+  expands it to the unchanged canonical path/file-revision contract with the file revision
+  current at assembly. Screened extraction admits only its explicit selected owners, possibly none;
   full-context extraction admits a resource with `SemanticAuthority::Context`.
   Review-only and unselected pages grant no reuse.
   Reserve per-occurrence expansion bytes, including repeated references, while retaining
