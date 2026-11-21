@@ -135,6 +135,31 @@ pub fn source_revision(page: &crate::frontmatter::VaultPage) -> String {
     blake3::hash(&bytes).to_hex()[..32].to_string()
 }
 
+/// A page as semantic work reads it when bookkeeping must not change the read: the parsed
+/// frontmatter without `BOOKKEEPING_FIELDS`, one `"key": value` line per field in key order
+/// with JSON values, then the body. Parsing first resolves anchors, quoting and flow style, so
+/// the text depends only on the field values, and it parses back to the same fields and body.
+pub fn semantic_text(page: &crate::frontmatter::VaultPage) -> String {
+    let mut text = String::from("---\n");
+    let mut fields = page
+        .frontmatter
+        .fields
+        .iter()
+        .filter(|(key, _)| !BOOKKEEPING_FIELDS.contains(&key.as_str()))
+        .peekable();
+    if fields.peek().is_none() {
+        text.push_str("{}\n");
+    }
+    for (key, value) in fields {
+        let key = serde_json::to_string(key).expect("a string serializes");
+        let value = serde_json::to_string(value).expect("a frontmatter value serializes");
+        text.push_str(&format!("{key}: {value}\n"));
+    }
+    text.push_str("---\n\n");
+    text.push_str(&page.body);
+    text
+}
+
 /// Exact file bytes, including bookkeeping, used to guard publication against edits.
 pub fn file_revision(content: &str) -> String {
     blake3::hash(content.as_bytes()).to_hex().to_string()
@@ -231,6 +256,38 @@ impl ConceptRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn semantic_text_ignores_bookkeeping_spelling_and_round_trips() {
+        let parse = |raw: &str| crate::frontmatter::parse_page(raw).unwrap();
+        let base = "---\ntitle: \"X\"\naliases: [X, Ex]\nsource_count: 1\nllm_inputs:\n  synthesis: \"a\"\n---\n\n# X\n\n---\nBody.\n";
+        let expected = semantic_text(&parse(base));
+        for spelling in [
+            base.replace("source_count: 1", "source_count: 2"),
+            base.replace("source_count: 1", "\"source_count\": 3"),
+            base.replace(
+                "llm_inputs:\n  synthesis: \"a\"\n",
+                "llm_inputs: {synthesis: b}\n",
+            ),
+            base.replace("title: \"X\"", "title: X\nupdated: 2026-11-21"),
+        ] {
+            assert_eq!(semantic_text(&parse(&spelling)), expected, "{spelling}");
+        }
+        assert_ne!(
+            semantic_text(&parse(&base.replace("Body.", "Changed."))),
+            expected
+        );
+        let anchored = "---\nsource_count: &count 2\npriority: *count\ntitle: X\n---\nBody.\n";
+        let page = parse(anchored);
+        let read = parse(&semantic_text(&page));
+        assert_eq!(read.frontmatter.fields["priority"], serde_json::json!(2));
+        assert!(!read.frontmatter.fields.contains_key("source_count"));
+        assert_eq!(read.body, page.body);
+        let bare = parse("---\nupdated: 2026-11-21\n---\n\n\nBody.\n");
+        let read = parse(&semantic_text(&bare));
+        assert!(read.frontmatter.fields.is_empty());
+        assert_eq!(read.body, bare.body);
+    }
 
     fn identity(slug: &str, title: &str) -> ConceptIdentity {
         ConceptIdentity {

@@ -279,9 +279,13 @@ impl<'a> Capture<'a> {
         }
         let address = lk_core::vault_path::address(&relative);
         // A context page is read without its bookkeeping, so a citation or task-state update
-        // to it leaves the work that read it current.
+        // to it leaves the work that read it current. A page whose frontmatter does not parse
+        // keeps its exact bytes, as every read of it did before.
         let text = match authority {
-            SemanticAuthority::Context => lk_vault::without_bookkeeping(&raw).into_owned(),
+            SemanticAuthority::Context => lk_vault::parse_page(&raw).map_or_else(
+                |_| raw.clone(),
+                |page| lk_core::concept::semantic_text(&page),
+            ),
             _ => raw.clone(),
         };
         self.pages.insert(relative, raw);
@@ -1393,6 +1397,25 @@ mod tests {
         assert_ne!(
             admit(&[selected]).unwrap().revision("config").unwrap(),
             admitted.revision("config").unwrap()
+        );
+        write(
+            &root,
+            selected,
+            &owner_raw.replacen(
+                "title: Candidate owner\n",
+                "title: Candidate owner\nsource_count: &cited 3\npriority: *cited\n",
+                1,
+            ),
+        );
+        let anchored = admit(&[selected]).unwrap();
+        assert_eq!(
+            super::super::generation::Owners::build(&config, &anchored)
+                .unwrap()
+                .presentation()
+                .as_array()
+                .map(Vec::len),
+            Some(1),
+            "a context page that anchors a value on its bookkeeping still reads as valid YAML"
         );
         write(&root, selected, &owner_raw);
         #[cfg(unix)]

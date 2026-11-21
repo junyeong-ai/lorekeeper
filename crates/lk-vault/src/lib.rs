@@ -121,7 +121,7 @@ pub use self::search_index::{
 pub use self::section::{
     PageSection, SectionKey, clear_llm_input, record_llm_input, replace_section,
     replace_section_checked, resolve_section, section_body, section_headings,
-    set_frontmatter_field, set_llm_input, without_bookkeeping,
+    set_frontmatter_field, set_llm_input,
 };
 pub use self::store::{
     FsVault, InMemoryVault, MarkdownInventory, VaultStore, load_concept_registry,

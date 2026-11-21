@@ -408,41 +408,6 @@ pub fn set_frontmatter_field(content: &str, key: &str, value: &str) -> Option<St
     Some(splice_lines(bom, &lines, replaced, &line))
 }
 
-/// The page without its top-level bookkeeping frontmatter (`lk_core::concept::BOOKKEEPING_FIELDS`)
-/// and those entries' continuation lines; every other byte is kept. Semantic work reads a
-/// context page through this, so a citation or task-state update to the page does not change
-/// what the work read. A page without a frontmatter block is returned unchanged.
-pub fn without_bookkeeping(content: &str) -> std::borrow::Cow<'_, str> {
-    let (bom, body) = split_bom(content);
-    let lines: Vec<&str> = body.split_inclusive('\n').collect();
-    let Some(block) = frontmatter_block(&lines) else {
-        return content.into();
-    };
-    let mut removed = vec![false; lines.len()];
-    for at in block.clone() {
-        let is_bookkeeping = lk_core::concept::BOOKKEEPING_FIELDS.iter().any(|key| {
-            lines[at]
-                .strip_prefix(key)
-                .is_some_and(|rest| rest.starts_with(':'))
-        });
-        if is_bookkeeping {
-            let end = continuation_span(&lines, at, block.end).map_or(at + 1, |span| span.end);
-            removed[at..end].fill(true);
-        }
-    }
-    if !removed.contains(&true) {
-        return content.into();
-    }
-    let mut out = String::with_capacity(content.len());
-    out.push_str(bom);
-    for (line, removed) in lines.iter().zip(removed) {
-        if !removed {
-            out.push_str(line);
-        }
-    }
-    out.into()
-}
-
 /// Set `llm_inputs.<key>` in a page's frontmatter, leaving every other line byte-identical.
 ///
 /// The completion markers live one level down, so [`set_frontmatter_field`] — which owns
@@ -590,31 +555,6 @@ mod tests {
     }
 
     use super::*;
-
-    #[test]
-    fn without_bookkeeping_drops_only_top_level_bookkeeping_entries() {
-        let page = "\u{feff}---\nid: x\nupdated: 2026-11-20\nsource_count: 32\naliases:\n  - X\nllm_inputs:\n  synthesis: \"a\"\n  # kept with the next key\n  synthesis_done: \"b\"\ncategory: c\n---\n\nupdated: body text\n## Core\nsource_count: 3\n";
-        let expected = "\u{feff}---\nid: x\naliases:\n  - X\ncategory: c\n---\n\nupdated: body text\n## Core\nsource_count: 3\n";
-        assert_eq!(without_bookkeeping(page), expected);
-        let changed = page
-            .replace("source_count: 32", "source_count: 33")
-            .replace("synthesis: \"a\"", "synthesis: \"c\"")
-            .replace("2026-11-20", "2026-11-21");
-        assert_eq!(without_bookkeeping(&changed), expected);
-        assert_ne!(
-            without_bookkeeping(&page.replace("category: c", "category: d")),
-            expected
-        );
-        for unchanged in [
-            "# No frontmatter\nupdated: 2026\n",
-            "---\nid: x\n---\nBody\n",
-        ] {
-            assert!(matches!(
-                without_bookkeeping(unchanged),
-                std::borrow::Cow::Borrowed(text) if text == unchanged
-            ));
-        }
-    }
 
     #[test]
     fn set_frontmatter_field_inserts_when_absent() {
