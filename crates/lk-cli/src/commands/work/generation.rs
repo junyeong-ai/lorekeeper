@@ -404,7 +404,7 @@ fn input_queries(input: &Value) -> miette::Result<Vec<lk_core::discovery::Discov
 /// The selected task's fresh inputs, or `None` when its discovery, candidate roster or captured
 /// scope changed after `input` was prepared; a changed scope never relabels an answer to the old
 /// input.
-fn current_selected(
+pub(super) fn current_selected(
     root: &Path,
     config: &lk_core::config::Config,
     config_revision: &str,
@@ -438,6 +438,11 @@ fn current_selected(
             super::RosterAdmission::Changed(_) => return Ok(None),
         };
     let work = super::expected(root, &mut prepared, config, config_revision)?;
+    // A selected request reads whole input, so a task now continuing stored or partitioned
+    // Work has a changed scope.
+    if work.plan.parts.len() != 1 || work.is_planned(root)? {
+        return Ok(None);
+    }
     let owner =
         lk_vault::resolve_page_owner(root, Path::new(&task.target.vault_path)).into_diagnostic()?;
     let current = super::native::selected_task(config, &task, &prepared, &work, &owner)?;

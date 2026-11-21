@@ -2620,7 +2620,7 @@ pub(super) fn audit_needs_work_controlled(
     }
     #[cfg(unix)]
     {
-        let subject = audit::capture_prepared(root, config_revision, candidate, prepared)?;
+        let subject = audit::capture_prepared(root, config_revision, candidate, prepared, &work)?;
         let request = audit::whole_request(config, &[subject]);
         match request {
             Ok(request) => {
@@ -5803,6 +5803,57 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_audit_capture_changes_once_a_stored_work_continues_its_subject() {
+        // A semantic Work keeps the revision and is told apart by the stored Work; a revived
+        // exact-bytes Work also changes the reading.
+        for reading in [
+            resources::ContextReading::Semantic,
+            resources::ContextReading::Exact,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let (config, revision) = context_audit_fixture(&root);
+            let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+            let candidate = lk_graph::audit::plan_selected(
+                &root,
+                &config.vault.dirs,
+                lk_graph::audit::AuditCorpus::from(&config.graph.audit),
+                &pages,
+                1,
+                &[CONTEXT_SUBJECT.into()],
+                u64::MAX,
+            )
+            .unwrap()
+            .candidates
+            .remove(0);
+            let read = lk_vault::ReadControl::default();
+            let capture =
+                || audit::capture_controlled(&root, &config, &revision, &candidate, &read).unwrap();
+            let whole = capture();
+            assert!(whole.same_input(&capture()));
+            let stored = resources::audit_candidate(&root, &config, &candidate)
+                .unwrap()
+                .read_as(reading)
+                .unwrap();
+            let session = MutationSession::acquire(&root).unwrap();
+            Work::create(
+                &session,
+                &stored.resources,
+                &stored.revision(&revision).unwrap(),
+                stored.context.clone(),
+                limits(&config).unwrap(),
+            )
+            .unwrap();
+            drop(session);
+            assert!(
+                !whole.same_input(&capture()),
+                "{reading:?}: a whole judgment cannot complete the stored Work now continuing the subject"
+            );
+        }
+    }
+
     #[test]
     fn a_reading_beyond_the_input_bound_leaves_the_other_reading_to_continue() {
         let directory = tempfile::tempdir().unwrap();
@@ -6016,6 +6067,91 @@ mod tests {
         assert_eq!(
             rejection(drafted(&exact)),
             Some(RejectionKind::SemanticContextChanged)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_selected_request_is_a_changed_scope_once_a_stored_work_continues_its_task() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (mut config, config_revision) = bounded_config(&root, 8192, 2048);
+        config.execution.work.extraction_context =
+            lk_core::execution::ExtractionContext::FullContext;
+        let target = "wiki/documents/source.md";
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: "Selected Candidate has source-scoped evidence.".into(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 20),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: target.into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        write(
+            &root,
+            target,
+            &format!(
+                "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nSelected Candidate has attributed source material.\n\n## Related Concepts\n",
+                task.cache_hash
+            ),
+        );
+        // The comment fills several parts as exact bytes and vanishes from the semantic reading.
+        write(
+            &root,
+            "wiki/concepts/canonical.md",
+            &format!(
+                "---\ntype: concept\ntitle: Selected Candidate\n{}---\n## Synthesis\nExisting scoped interpretation.\n",
+                "# An authored comment the parsed frontmatter does not keep.\n".repeat(400)
+            ),
+        );
+        write(
+            &root,
+            ".lorekeeper/queue/fixture.jsonl",
+            &serde_json::to_string(&task).unwrap(),
+        );
+        let discovery = vec![lk_core::discovery::DiscoveryQuery {
+            query: "Selected Candidate".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let mut prepared =
+            resources::task_with_discovery(&root, &config, &task.task_id, &discovery).unwrap();
+        let work = expected(&root, &mut prepared, &config, &config_revision).unwrap();
+        assert_eq!(work.plan.parts.len(), 1);
+        let owner = lk_vault::resolve_page_owner(&root, Path::new(target)).unwrap();
+        let input = native::selected_task(&config, &task, &prepared, &work, &owner).unwrap();
+        let read = lk_vault::ReadControl::default();
+        let current = || {
+            generation::current_selected(&root, &config, &config_revision, &input, &read).unwrap()
+        };
+        assert!(current().is_some());
+        let exact = prepared.read_as(resources::ContextReading::Exact).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let stored = Work::create(
+            &session,
+            &exact.resources,
+            &exact.revision(&config_revision).unwrap(),
+            exact.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        drop(session);
+        assert!(stored.plan.parts.len() > 1);
+        assert!(
+            current().is_none(),
+            "the task now continues its stored exact-bytes Work instead of the selected request"
         );
     }
 

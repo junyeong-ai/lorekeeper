@@ -123,6 +123,8 @@ pub(in crate::commands) struct WholeSubject {
     prepared: Prepared,
     pub candidate: lk_graph::audit::AuditCandidate,
     revision: String,
+    /// The stored Work that continues this subject, which a whole judgment cannot complete.
+    stored_work: Option<String>,
     contract_revision: String,
     action: Option<crate::commands::audit::action::Snapshot>,
     attempt: Option<String>,
@@ -147,6 +149,7 @@ impl WholeSubject {
     pub fn same_input(&self, other: &Self) -> bool {
         self.candidate.path == other.candidate.path
             && self.revision == other.revision
+            && self.stored_work == other.stored_work
             && self.contract_revision == other.contract_revision
     }
 
@@ -210,20 +213,24 @@ pub(in crate::commands) fn capture_controlled(
     candidate: &lk_graph::audit::AuditCandidate,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<WholeSubject> {
-    let prepared = super::resources::audit_candidate_controlled(root, config, candidate, read)?;
-    capture_prepared(root, config_revision, candidate, prepared)
+    let mut prepared = super::resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = super::expected(root, &mut prepared, config, config_revision)?;
+    capture_prepared(root, config_revision, candidate, prepared, &work)
 }
 
+/// `prepared` as a whole subject; `work` is the Work it continues (`expected()`).
 pub(super) fn capture_prepared(
     root: &std::path::Path,
     config_revision: &str,
     candidate: &lk_graph::audit::AuditCandidate,
     prepared: Prepared,
+    work: &super::Work,
 ) -> miette::Result<WholeSubject> {
     let revision = prepared.revision(config_revision)?;
     Ok(WholeSubject {
         attempt: assessment_binding(&prepared, &revision, &json!({}))?.held(root)?,
         revision,
+        stored_work: work.is_planned(root)?.then(|| work.plan.id.clone()),
         prepared,
         candidate: candidate.clone(),
         contract_revision: contract_revision()?,
