@@ -35,7 +35,7 @@ impl ReadControl {
     /// Let this control's discovery traversals reuse page texts an earlier traversal read.
     /// Clones share the reuse; guarded publication reads never consult it.
     pub fn with_page_reuse(mut self) -> Self {
-        self.page_texts = Some(Arc::new(PageTexts::new(UNSETTLED)));
+        self.page_texts = Some(Arc::new(PageTexts::new(UNSETTLED, REUSE_BUDGET)));
         self
     }
 
@@ -83,7 +83,7 @@ impl ReadControl {
     /// exercise reuse without waiting out the settling window.
     #[cfg(test)]
     pub(crate) fn with_immediate_page_reuse(mut self) -> Self {
-        self.page_texts = Some(Arc::new(PageTexts::new(Duration::ZERO)));
+        self.page_texts = Some(Arc::new(PageTexts::new(Duration::ZERO, REUSE_BUDGET)));
         self
     }
 
@@ -100,12 +100,10 @@ impl ReadControl {
         }
         let started = SystemTime::now();
         let text: Arc<str> = self.read_to_string(path)?.into();
-        if let Some(stamp) = stamp
-            && stamp.settled_before(started, texts.unsettled)
-            && FileStamp::of(path) == Some(stamp)
-        {
-            texts.keep(path, stamp, text.clone());
-        }
+        let settled = stamp.filter(|stamp| {
+            stamp.settled_before(started, texts.unsettled) && FileStamp::of(path) == Some(*stamp)
+        });
+        texts.replace(path, settled.map(|stamp| (stamp, text.clone())));
         Ok((text, false))
     }
 
@@ -120,22 +118,41 @@ impl ReadControl {
 /// inode, size and modification and status-change times it had when read. A file
 /// modified within `UNSETTLED` before its read is never kept: a later write in the same
 /// timestamp tick could leave every stamp field unchanged.
+///
+/// Kept texts total at most `budget` bytes. Once it is full, further pages are read on
+/// every traversal rather than evicting others: traversals walk the corpus in the same
+/// order, so evicting the oldest entry would discard each page just before it is needed
+/// again, while refusing admission keeps reuse for the pages that fit.
 struct PageTexts {
     unsettled: Duration,
-    entries: Mutex<HashMap<PathBuf, (FileStamp, Arc<str>)>>,
+    budget: usize,
+    entries: Mutex<Entries>,
+}
+
+#[derive(Default)]
+struct Entries {
+    texts: HashMap<PathBuf, (FileStamp, Arc<str>)>,
+    bytes: usize,
 }
 
 impl std::fmt::Debug for PageTexts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let pages = self.entries.lock().map_or(0, |entries| entries.len());
-        f.debug_struct("PageTexts").field("pages", &pages).finish()
+        let (pages, bytes) = self
+            .entries
+            .lock()
+            .map_or((0, 0), |entries| (entries.texts.len(), entries.bytes));
+        f.debug_struct("PageTexts")
+            .field("pages", &pages)
+            .field("bytes", &bytes)
+            .finish()
     }
 }
 
 impl PageTexts {
-    fn new(unsettled: Duration) -> Self {
+    fn new(unsettled: Duration, budget: usize) -> Self {
         Self {
             unsettled,
+            budget,
             entries: Mutex::default(),
         }
     }
@@ -143,19 +160,34 @@ impl PageTexts {
     fn find(&self, path: &Path, stamp: FileStamp) -> Option<Arc<str>> {
         let entries = self.entries.lock().ok()?;
         entries
+            .texts
             .get(path)
             .filter(|(kept, _)| *kept == stamp)
             .map(|(_, text)| text.clone())
     }
 
-    fn keep(&self, path: &Path, stamp: FileStamp, text: Arc<str>) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(path.to_path_buf(), (stamp, text));
+    /// Drops the path's previous text, which can no longer match, and keeps `read` when
+    /// it is present and fits the budget.
+    fn replace(&self, path: &Path, read: Option<(FileStamp, Arc<str>)>) {
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        if let Some((_, previous)) = entries.texts.remove(path) {
+            entries.bytes -= previous.len();
+        }
+        if let Some((stamp, text)) = read
+            && entries.bytes + text.len() <= self.budget
+        {
+            entries.bytes += text.len();
+            entries.texts.insert(path.to_path_buf(), (stamp, text));
         }
     }
 }
 
 const UNSETTLED: Duration = Duration::from_secs(2);
+
+/// Three times a 7,400-page vault's 43 MiB of Markdown.
+const REUSE_BUDGET: usize = 128 << 20;
 
 /// The status-change time cannot be set by `utimes`, so it bounds the last write even
 /// when the modification time was rewound.
@@ -226,10 +258,10 @@ mod tests {
         ));
     }
 
-    fn reusing(unsettled: Duration) -> ReadControl {
+    fn reusing(unsettled: Duration, budget: usize) -> ReadControl {
         ReadControl {
             cancelled: None,
-            page_texts: Some(Arc::new(PageTexts::new(unsettled))),
+            page_texts: Some(Arc::new(PageTexts::new(unsettled, budget))),
         }
     }
 
@@ -264,7 +296,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("page.md");
         std::fs::write(&path, "fresh").unwrap();
-        let read = reusing(Duration::from_secs(3600));
+        let read = reusing(Duration::from_secs(3600), REUSE_BUDGET);
         for _ in 0..2 {
             assert_eq!(read.page_text(&path).unwrap(), ("fresh".into(), false));
         }
@@ -277,5 +309,26 @@ mod tests {
         let cancelled = Arc::new(AtomicBool::new(true));
         let read = ReadControl::new(cancelled).with_page_reuse();
         assert!(matches!(read.page_text(&path), Err(VaultError::Cancelled)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_full_reuse_budget_keeps_earlier_pages_and_rereads_the_rest() {
+        let directory = tempfile::tempdir().unwrap();
+        let [first, second] = ["first.md", "second.md"].map(|name| directory.path().join(name));
+        std::fs::write(&first, "1234").unwrap();
+        std::fs::write(&second, "5678").unwrap();
+        let read = reusing(Duration::ZERO, 6);
+        assert_eq!(read.page_text(&first).unwrap(), ("1234".into(), false));
+        for _ in 0..2 {
+            assert_eq!(read.page_text(&second).unwrap(), ("5678".into(), false));
+        }
+        assert_eq!(read.page_text(&first).unwrap(), ("1234".into(), true));
+
+        std::fs::write(&first, "1").unwrap();
+        assert_eq!(read.page_text(&first).unwrap(), ("1".into(), false));
+        assert_eq!(read.page_text(&second).unwrap(), ("5678".into(), false));
+        assert_eq!(read.page_text(&second).unwrap(), ("5678".into(), true));
+        assert_eq!(read.page_text(&first).unwrap(), ("1".into(), true));
     }
 }

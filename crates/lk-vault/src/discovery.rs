@@ -645,10 +645,13 @@ fn capture_discovery_batch_inner(
     let mut projection_match_duration_us = 0;
     if has_queries {
         // Every page is matched against every recipe's queries, so pages are matched in
-        // parallel. A batch bounds the pages held at once; matches merge in walk order, so
-        // the preferred path and best rank of each owner are chosen exactly as one pass would.
+        // parallel. A batch bounds the pages and source bytes held at once; matches merge in
+        // walk order, so the preferred path and best rank of each owner are chosen exactly
+        // as one pass would.
         const BATCH_PAGES: usize = 256;
+        const BATCH_BYTES: usize = 16 << 20;
         let mut batch = Vec::with_capacity(BATCH_PAGES);
+        let mut batch_bytes = 0;
         let mut record = |batch: &mut Vec<search::Page>,
                           captures: &mut Vec<CapturePlan>|
          -> Result<(), VaultError> {
@@ -678,9 +681,15 @@ fn capture_discovery_batch_inner(
             metrics.as_mut().map(|metrics| &mut metrics.knowledge),
             read,
             |page, _| {
+                batch_bytes += page
+                    .page
+                    .original
+                    .as_ref()
+                    .map_or(page.page.body.len(), String::len);
                 batch.push(page);
-                if batch.len() == BATCH_PAGES {
+                if batch.len() == BATCH_PAGES || batch_bytes >= BATCH_BYTES {
                     record(&mut batch, &mut captures)?;
+                    batch_bytes = 0;
                 }
                 Ok(())
             },

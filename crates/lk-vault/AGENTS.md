@@ -124,7 +124,9 @@ canonical; SQLite navigation is derived.
   untyped legacy concepts. Build that vocabulary from headers; full discovery still
   reads and validates complete bodies. A run's supervising `ReadControl` may supply a body
   an earlier traversal read while the file keeps its device, inode, size, mtime and ctime,
-  never one changed within the settling window before that read (`read.rs`); matched
+  never one changed within the settling window before that read (`read.rs`). Kept bodies
+  stay within a byte budget that refuses admission rather than evicting, and capture
+  matching batches bound held pages by count and bytes. Matched
   rereads and publication guards always read current bytes. Vocabulary metrics count
   consumed header/probe bytes, excluding buffered read-ahead. Resolve aliases across scope before metadata filtering;
   ambiguity doesn't expand. Declared names match phrases, other queries every term.
