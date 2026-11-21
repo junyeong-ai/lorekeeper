@@ -69,7 +69,8 @@ settle every launched call, yield the lease and continue with fresh preparation.
 waiting `lore workflow --wait` session or job therefore waits up to that hold plus the
 calls in flight; a shorter hold admits it sooner but repeats preparation more often.
 `runs[].yield_reason` identifies these incomplete checkpoints; final success still
-requires normal completion checks.
+requires normal completion checks. Each `runs[].stages[]` entry records `elapsed_job_ms`,
+when it ended on the run's clock, so consecutive differences give stage durations.
 Calls, execution/wait time and original-subject replan allowances remain cumulative.
 Optional `automation.knowledge_schedule` overrides the knowledge job's timing;
 omission retains `graph.audit.schedule`. It emits one stable job, not another audit

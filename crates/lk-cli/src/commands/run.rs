@@ -540,6 +540,9 @@ mod native {
         name: String,
         state: StageState,
         detail: Option<String>,
+        /// When the stage was recorded, on the clock `lore.*` events report as
+        /// `elapsed_job_ms`; consecutive differences are the stages' durations.
+        elapsed_job_ms: u64,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -829,6 +832,7 @@ mod native {
                 name: name.into(),
                 state,
                 detail,
+                elapsed_job_ms: self.started_at.elapsed().as_millis() as u64,
             });
             success
         }
@@ -6820,6 +6824,7 @@ mod native {
                 name: "required evidence".into(),
                 state: StageState::Failed,
                 detail: None,
+                elapsed_job_ms: 0,
             });
             assert!(!result.is_successful_yield());
             result.halt = Some(automation::HaltCause::new("required evidence", None));

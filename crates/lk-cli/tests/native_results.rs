@@ -1264,6 +1264,13 @@ fn extraction_discovery_recovery_replans_selected_and_root_on_both_hosts() {
                 "a recorded discovery is retained progress, not a rejection: {report}"
             );
             assert!(!outcomes.contains(&"rejected"), "{report}");
+            let elapsed = report["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|stage| stage["elapsed_job_ms"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            assert!(elapsed.is_sorted(), "{report}");
             let calls = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
             let requests: Vec<Value> = calls
                 .lines()
