@@ -1352,7 +1352,7 @@ async fn notify(plane: &IntentPlane) -> miette::Result<()> {
                 command = tokio::process::Command::new("notify-send");
                 command.args(["--app-name=lore", "--", "lore", text]);
             }
-            let result = supervisor.run(command, Some(std::time::Duration::from_secs(10)), false).await?;
+            let result = supervisor.run(command, Some(std::time::Duration::from_secs(10)), false, super::execution::ChildOutput::Forward).await?;
             if !result.success {
                 return Err(miette::miette!("notification not accepted; reminder retained: {}", result.detail.unwrap_or_else(|| "notifier failed".into())));
             }

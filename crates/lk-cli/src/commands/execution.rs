@@ -83,10 +83,11 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChildOutput {
-    /// An attended run shows them as they happen.
+    /// Shown as they happen: every Lore stage command, whose progress and errors are
+    /// the job's own record, and an attended run's host invocations.
     Forward,
-    /// An unattended run has no reader for them, and a host transcript repeats its
-    /// request, source text included; the typed report is that run's record.
+    /// An unattended host invocation has no reader for them, and a host transcript
+    /// repeats its request, source text included; the typed report is that run's record.
     Discard,
 }
 
@@ -96,7 +97,6 @@ pub(super) struct Supervisor {
     terminate: tokio::signal::unix::Signal,
     read: lk_vault::ReadControl,
     signal_flags: Vec<signal_hook::SigId>,
-    output: ChildOutput,
 }
 
 #[cfg(unix)]
@@ -120,7 +120,6 @@ impl Supervisor {
                 .map_err(|e| miette::miette!("termination handler: {e}"))?,
             read: lk_vault::ReadControl::new(cancelled.clone()),
             signal_flags: Vec::new(),
-            output: ChildOutput::Forward,
         };
         for signal in [signal_hook::consts::SIGINT, signal_hook::consts::SIGTERM] {
             let id = signal_hook::flag::register(signal, cancelled.clone())
@@ -196,18 +195,14 @@ impl Supervisor {
         }
     }
 
-    pub fn with_child_output(mut self, output: ChildOutput) -> Self {
-        self.output = output;
-        self
-    }
-
     pub async fn run(
         &mut self,
         command: tokio::process::Command,
         timeout: Option<Duration>,
         capture: bool,
+        output: ChildOutput,
     ) -> miette::Result<ChildResult> {
-        self.run_with_output(command, timeout, capture.then_some(16384))
+        self.run_with_output(command, timeout, capture.then_some(16384), output)
             .await
     }
 
@@ -216,8 +211,9 @@ impl Supervisor {
         command: tokio::process::Command,
         timeout: Option<Duration>,
         capture_limit: Option<usize>,
+        output: ChildOutput,
     ) -> miette::Result<ChildResult> {
-        self.run_request(command, timeout, capture_limit, None)
+        self.run_request(command, timeout, capture_limit, None, output)
             .await
     }
 
@@ -227,8 +223,9 @@ impl Supervisor {
         timeout: Option<Duration>,
         capture_limit: Option<usize>,
         input: Option<&[u8]>,
+        output: ChildOutput,
     ) -> miette::Result<ChildResult> {
-        let mut child = RunningChild::spawn(command, input.is_some(), self.output)?;
+        let mut child = RunningChild::spawn(command, input.is_some(), output)?;
         let cancellation = async {
             tokio::select! {
                 _ = self.interrupt.recv() => ChildCancellation::Interrupted,
@@ -238,14 +235,18 @@ impl Supervisor {
         run_child(&mut child, timeout, capture_limit, input, cancellation).await
     }
 
-    pub async fn run_requests(&mut self, requests: Vec<ChildRequest>) -> Vec<ChildAttempt> {
+    pub async fn run_requests(
+        &mut self,
+        requests: Vec<ChildRequest>,
+        output: ChildOutput,
+    ) -> Vec<ChildAttempt> {
         let cancellation = async {
             tokio::select! {
                 _ = self.interrupt.recv() => ChildCancellation::Interrupted,
                 _ = self.terminate.recv() => ChildCancellation::Terminated,
             }
         };
-        run_children(requests, self.output, cancellation).await
+        run_children(requests, output, cancellation).await
     }
 }
 
@@ -1076,6 +1077,7 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
                         Some(Duration::from_secs(10)),
                         Some(131072),
                         Some(&input),
+                        ChildOutput::Forward,
                     )
                     .await
                     .unwrap();
@@ -1206,7 +1208,10 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
     async fn incomplete_stdin_delivery_cannot_report_success() {
         let mut request = shell_request("exec 0<&-; printf ready; exit 0");
         request.input = Some(vec![b'x'; 262144]);
-        let results = Supervisor::new().unwrap().run_requests(vec![request]).await;
+        let results = Supervisor::new()
+            .unwrap()
+            .run_requests(vec![request], ChildOutput::Forward)
+            .await;
         let completed = results.into_iter().next().unwrap().result.unwrap();
         assert!(!completed.success);
         assert!(!completed.cancelled);
@@ -1335,7 +1340,9 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         );
         second.command.env("TEST_ROOT", directory.path());
         let mut supervisor = Supervisor::new().unwrap();
-        let results = supervisor.run_requests(vec![first, second]).await;
+        let results = supervisor
+            .run_requests(vec![first, second], ChildOutput::Forward)
+            .await;
         assert_eq!(results.len(), 2);
         for result in &results {
             let result = result.result.as_ref().unwrap();
@@ -1361,13 +1368,16 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         overflow.capture_limit = Some(2);
         let results = Supervisor::new()
             .unwrap()
-            .run_requests(vec![
-                refused,
-                shell_request("printf accepted"),
-                timed,
-                overflow,
-                shell_request("exit 7"),
-            ])
+            .run_requests(
+                vec![
+                    refused,
+                    shell_request("printf accepted"),
+                    timed,
+                    overflow,
+                    shell_request("exit 7"),
+                ],
+                ChildOutput::Forward,
+            )
             .await;
         assert!(results[0].result.is_err());
         assert!(results[1].result.as_ref().unwrap().success);

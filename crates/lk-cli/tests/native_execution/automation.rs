@@ -396,7 +396,7 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
 }
 
 #[test]
-fn scheduled_runs_keep_host_transcripts_out_of_their_job_output() {
+fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
     for scheduled in [true, false] {
         let fixture = Fixture::new(
             "codex",
@@ -421,6 +421,9 @@ fn scheduled_runs_keep_host_transcripts_out_of_their_job_output() {
         let diagnostics = String::from_utf8_lossy(&output.stderr);
         for marker in ["host-stderr-marker", "host-stdout-marker"] {
             assert_eq!(diagnostics.contains(marker), !scheduled, "{diagnostics}");
+        }
+        for stage_output in ["Prepared navigation snapshot", "=== Lint Report ==="] {
+            assert!(diagnostics.contains(stage_output), "{diagnostics}");
         }
     }
 }

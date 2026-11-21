@@ -307,7 +307,12 @@ async fn install_step(
     #[cfg(unix)]
     {
         let result = super::execution::Supervisor::new()?
-            .run(command, Some(timeout), false)
+            .run(
+                command,
+                Some(timeout),
+                false,
+                super::execution::ChildOutput::Forward,
+            )
             .await?;
         if !result.success {
             return Err(miette::miette!(

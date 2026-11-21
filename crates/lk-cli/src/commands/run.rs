@@ -750,6 +750,7 @@ mod native {
         configuration_failed: bool,
         root: PathBuf,
         supervisor: &'a mut execution::Supervisor,
+        host_output: execution::ChildOutput,
         automation: Option<&'a mut automation::Control>,
         audit_replans: &'a mut AuditReplans,
         finalization_replans: &'a mut FinalizationReplans,
@@ -935,7 +936,13 @@ mod native {
             self.configure_child(&mut command);
             let completed = match self
                 .supervisor
-                .run_request(command, timeout, None, input)
+                .run_request(
+                    command,
+                    timeout,
+                    None,
+                    input,
+                    execution::ChildOutput::Forward,
+                )
                 .await
             {
                 Ok(result) if result.cancelled => {
@@ -1038,7 +1045,12 @@ mod native {
             self.result.queue_application.attempts += 1;
             let outcome = self
                 .supervisor
-                .run_with_output(command, None, Some(8 * 1024 * 1024))
+                .run_with_output(
+                    command,
+                    None,
+                    Some(8 * 1024 * 1024),
+                    execution::ChildOutput::Forward,
+                )
                 .await;
             self.result.queue_application.duration_ms += started_at.elapsed().as_millis() as u64;
             let outcome = match outcome {
@@ -1297,6 +1309,7 @@ mod native {
                     command,
                     Some(Duration::from_secs(10).min(profile.timeout())),
                     true,
+                    self.host_output,
                 )
                 .await?;
             if version.cancelled {
@@ -1541,6 +1554,7 @@ mod native {
                     Some(timeout),
                     Some(limit),
                     Some(&invocation.prompt),
+                    self.host_output,
                 )
                 .await;
             let duration_ms = started_at.elapsed().as_millis() as u64;
@@ -2318,7 +2332,10 @@ mod native {
                 self.record_uninvoked_observations(turns);
                 return Some(false);
             }
-            let attempts = self.supervisor.run_requests(requests).await;
+            let attempts = self
+                .supervisor
+                .run_requests(requests, self.host_output)
+                .await;
             drop(directories);
             let cancelled = attempts
                 .iter()
@@ -2690,6 +2707,7 @@ mod native {
                     Some(timeout),
                     output.capture_limit,
                     Some(&agent.input),
+                    self.host_output,
                 )
                 .await;
             let duration = started.elapsed().as_millis() as u64;
@@ -4038,7 +4056,10 @@ mod native {
                 self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                 return false;
             }
-            let attempts = self.supervisor.run_requests(requests).await;
+            let attempts = self
+                .supervisor
+                .run_requests(requests, self.host_output)
+                .await;
             drop(directories);
             let cancelled = attempts
                 .iter()
@@ -5368,7 +5389,11 @@ mod native {
                     }
                 };
                 self.configure_child(&mut command);
-                match self.supervisor.run(command, None, false).await {
+                match self
+                    .supervisor
+                    .run(command, None, false, execution::ChildOutput::Forward)
+                    .await
+                {
                     Ok(outcome) => {
                         self.record(
                             name,
@@ -6491,6 +6516,7 @@ mod native {
 
     struct Campaign {
         supervisor: execution::Supervisor,
+        host_output: execution::ChildOutput,
         root: Option<workflow::VaultRootPin>,
         automation: Option<automation::Control>,
         audit_replans: AuditReplans,
@@ -6572,11 +6598,12 @@ mod native {
             None
         };
         let mut campaign = Campaign {
-            supervisor: execution::Supervisor::new()?.with_child_output(if scheduled {
+            supervisor: execution::Supervisor::new()?,
+            host_output: if scheduled {
                 execution::ChildOutput::Discard
             } else {
                 execution::ChildOutput::Forward
-            }),
+            },
             root: None,
             automation,
             audit_replans: AuditReplans::default(),
@@ -6649,6 +6676,7 @@ mod native {
     ) -> JobResult {
         let Campaign {
             supervisor,
+            host_output,
             root: campaign_root,
             automation,
             audit_replans,
@@ -6675,6 +6703,7 @@ mod native {
             configuration_failed: false,
             opts: options,
             supervisor,
+            host_output: *host_output,
             automation: automation.as_mut(),
             audit_replans,
             finalization_replans,
