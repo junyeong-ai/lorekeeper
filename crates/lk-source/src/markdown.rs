@@ -55,15 +55,22 @@ fn html_link(handlers: &dyn Handlers, element: &Element<'_>) -> Option<HandlerRe
     let destination = &*destination;
     let title = element.node.attr("title");
     let title = title.as_deref().unwrap_or("");
+    // Whitespace at the label's edges separates the link from the words around it, so it
+    // stays outside the link, as the emphasis handler keeps it outside its markers.
     let label = content.trim_ascii();
-    let mut rendered = lk_core::link::InlineLink {
-        raw_text: label,
-        raw_destination: destination,
-        destination,
-        title,
-    }
-    .render_with_destination(destination);
-    rendered.push_str(&content[content.trim_ascii_end().len()..]);
+    let start = content.len() - content.trim_ascii_start().len();
+    let (leading, trailing) = (&content[..start], &content[start + label.len()..]);
+    let mut rendered = leading.to_owned();
+    rendered.push_str(
+        &lk_core::link::InlineLink {
+            raw_text: label,
+            raw_destination: destination,
+            destination,
+            title,
+        }
+        .render_with_destination(destination),
+    );
+    rendered.push_str(trailing);
     Some(rendered.into())
 }
 
@@ -2377,6 +2384,46 @@ mod tests {
         assert!(md.contains("one") && md.contains("two") && md.contains("-"));
         let link = html_to_markdown(r#"<a href="https://x.io">x</a>"#);
         assert!(link.contains("[x](https://x.io)"));
+    }
+
+    #[test]
+    fn html_link_edge_whitespace_keeps_the_words_it_separates_apart() {
+        use pulldown_cmark::{Event, Parser, Tag};
+        for (html, words) in [
+            (
+                r#"<p>Before<a href="https://x.io/a"> after</a> next</p>"#,
+                "Before after next",
+            ),
+            (
+                r#"<p>Read <a href="https://x.io/b">this </a>now</p>"#,
+                "Read this now",
+            ),
+            (
+                r#"<p>A<a href="https://x.io/c"> both </a>B</p>"#,
+                "A both B",
+            ),
+            (
+                r#"<p>Use<a href="https://x.io/d"> <strong>bold</strong></a> here</p>"#,
+                "Use bold here",
+            ),
+            (
+                r#"<p>Gap<a href="https://x.io/e"> </a>kept</p>"#,
+                "Gap kept",
+            ),
+        ] {
+            let markdown = html_to_markdown(html);
+            let (mut visible, mut links) = (String::new(), 0);
+            for event in Parser::new(&markdown) {
+                match event {
+                    Event::Text(text) => visible.push_str(&text),
+                    Event::SoftBreak | Event::HardBreak => visible.push(' '),
+                    Event::Start(Tag::Link { .. }) => links += 1,
+                    _ => {}
+                }
+            }
+            let visible = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!((visible.as_str(), links), (words, 1), "{markdown}");
+        }
     }
 
     #[test]
