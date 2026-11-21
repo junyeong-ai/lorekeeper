@@ -143,6 +143,9 @@ Use parser/token-state behavior, not regex replacement of arbitrary markup.
   block separators must not be normalized by rewriting the complete document.
 - HTML attribute fallbacks are literal text; image alt/title remain image values.
   Serialize them through shared Markdown events, preserving already-rendered children.
+- ADF and Slack generators emit only events CommonMark can reproduce: whitespace at
+  emphasis edges moves outside the span and spaces/tabs ending a line drop; neither
+  provider displays them. A serializer refusal fails that item as partial reach.
 - Do not claim fully lossless HTML normalization: the CDATA prepass has a documented
   raw-text interaction. Change that seam deliberately with a reproducing fixture,
   not an unrelated broad sanitizer rewrite.

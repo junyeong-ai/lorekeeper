@@ -912,11 +912,11 @@ pub fn readable_article(
 }
 
 /// Convert an Atlassian Document Format node tree (Jira rich text) to Markdown.
-pub fn adf_to_markdown(node: &Value) -> String {
+pub fn adf_to_markdown(node: &Value) -> Result<String, crate::SourceError> {
     let mut events = Vec::new();
     render_adf(node, &mut events);
     let output = lk_core::markdown::serialize(
-        &events,
+        &representable_inlines(events),
         lk_core::markdown::OPTIONS,
         pulldown_cmark_to_cmark::Options {
             code_block_token_count: 3,
@@ -925,8 +925,114 @@ pub fn adf_to_markdown(node: &Value) -> String {
             ..Default::default()
         },
     )
-    .expect("serializing supported ADF events into a String cannot fail");
-    output.trim_matches(['\r', '\n']).to_owned()
+    .map_err(|error| crate::SourceError::Parse(format!("ADF Markdown serialization: {error}")))?;
+    Ok(output.trim_matches(['\r', '\n']).to_owned())
+}
+
+/// ADF marks can cover whitespace at a span's edges and text can end a line with spaces.
+/// CommonMark can spell neither and Jira displays neither, so edge whitespace moves
+/// outside emphasis, strong and strikethrough spans, spans left empty disappear, and
+/// spaces and tabs ending a line drop. Code block text is literal and stays unchanged.
+fn representable_inlines(events: Vec<pulldown_cmark::Event<'_>>) -> Vec<pulldown_cmark::Event<'_>> {
+    use pulldown_cmark::{CowStr, Event, Tag, TagEnd};
+
+    fn append(text: &mut CowStr<'_>, suffix: &str) {
+        let mut joined = text.to_string();
+        joined.push_str(suffix);
+        *text = joined.into();
+    }
+    fn push_text<'a>(output: &mut Vec<Event<'a>>, text: CowStr<'a>) {
+        match output.last_mut() {
+            _ if text.is_empty() => {}
+            Some(Event::Text(previous)) => append(previous, &text),
+            _ => output.push(Event::Text(text)),
+        }
+    }
+    fn take_whitespace(output: &mut Vec<Event<'_>>, at: usize, leading: bool) -> String {
+        let Some(Event::Text(text)) = output.get_mut(at) else {
+            return String::new();
+        };
+        let kept = if leading {
+            text.trim_start()
+        } else {
+            text.trim_end()
+        };
+        let taken = if leading {
+            &text[..text.len() - kept.len()]
+        } else {
+            &text[kept.len()..]
+        }
+        .to_owned();
+        if kept.is_empty() {
+            output.remove(at);
+        } else {
+            *text = kept.to_owned().into();
+        }
+        taken
+    }
+
+    let mut output = Vec::with_capacity(events.len());
+    let mut spans = Vec::new();
+    let mut code_block = false;
+    for event in events {
+        match event {
+            Event::Text(text) if !code_block => push_text(&mut output, text),
+            Event::Start(Tag::CodeBlock(_)) => {
+                code_block = true;
+                output.push(event);
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                code_block = false;
+                output.push(event);
+            }
+            Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough) => {
+                spans.push(output.len());
+                output.push(event);
+            }
+            Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough) => {
+                let Some(start) = spans.pop() else {
+                    output.push(event);
+                    continue;
+                };
+                let last = output.len() - 1;
+                let trailing = if last > start {
+                    take_whitespace(&mut output, last, false)
+                } else {
+                    String::new()
+                };
+                let leading = take_whitespace(&mut output, start + 1, true);
+                if output.len() == start + 1 {
+                    output.pop();
+                } else {
+                    output.push(event);
+                }
+                if !leading.is_empty() {
+                    match start.checked_sub(1).and_then(|at| output.get_mut(at)) {
+                        Some(Event::Text(previous)) => append(previous, &leading),
+                        _ => output.insert(start, Event::Text(leading.into())),
+                    }
+                }
+                push_text(&mut output, trailing.into());
+            }
+            Event::HardBreak
+            | Event::SoftBreak
+            | Event::End(
+                TagEnd::Paragraph | TagEnd::Heading(_) | TagEnd::Item | TagEnd::TableCell,
+            ) => {
+                if let Some(Event::Text(text)) = output.last_mut() {
+                    let kept = text.trim_end_matches([' ', '\t']).len();
+                    if kept == 0 {
+                        output.pop();
+                    } else {
+                        *text = text[..kept].to_owned().into();
+                    }
+                }
+                output.push(event);
+            }
+            other => output.push(other),
+        }
+    }
+    output
 }
 
 fn render_adf<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'a>>) {
@@ -1166,7 +1272,10 @@ fn render_adf_text<'a>(node: &'a Value, events: &mut Vec<pulldown_cmark::Event<'
 
 /// Convert Slack mrkdwn through its own lexical grammar. Ordinary text and resolved
 /// labels remain literal; only source-declared Slack constructs create Markdown structure.
-pub fn slack_to_markdown(text: &str, users: &HashMap<String, String>) -> String {
+pub fn slack_to_markdown(
+    text: &str,
+    users: &HashMap<String, String>,
+) -> Result<String, crate::SourceError> {
     crate::slack::mrkdwn::render(text, users)
 }
 
@@ -1676,7 +1785,7 @@ mod tests {
             }]
         });
         assert_eq!(
-            adf_to_markdown(&adf),
+            adf_to_markdown(&adf).unwrap(),
             "see [**the docs**](https://x.io) now"
         );
     }
@@ -1696,7 +1805,10 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(adf_to_markdown(&adf), "## Plan\n\n- first\n- second");
+        assert_eq!(
+            adf_to_markdown(&adf).unwrap(),
+            "## Plan\n\n- first\n- second"
+        );
     }
 
     #[test]
@@ -1711,7 +1823,7 @@ mod tests {
                     {"type": "paragraph", "content": [{"type": "text", "text": "b"}]}]}
             ]}]
         });
-        assert_eq!(adf_to_markdown(&adf), "3. a\n4. b");
+        assert_eq!(adf_to_markdown(&adf).unwrap(), "3. a\n4. b");
 
         // No `order` attr → default first number 1.
         let adf = json!({
@@ -1721,7 +1833,7 @@ mod tests {
                     {"type": "paragraph", "content": [{"type": "text", "text": "x"}]}]}
             ]}]
         });
-        assert_eq!(adf_to_markdown(&adf), "1. x");
+        assert_eq!(adf_to_markdown(&adf).unwrap(), "1. x");
     }
 
     #[test]
@@ -1733,7 +1845,65 @@ mod tests {
                 "content": [{"type": "text", "text": "let x = 1;"}]
             }]
         });
-        assert_eq!(adf_to_markdown(&adf), "```rust\nlet x = 1;\n```");
+        assert_eq!(adf_to_markdown(&adf).unwrap(), "```rust\nlet x = 1;\n```");
+    }
+
+    #[test]
+    fn adf_whitespace_at_style_edges_and_line_ends_is_not_content() {
+        fn text(text: &str, marks: &[&str]) -> Value {
+            let marks = marks.iter().map(|mark| json!({"type": mark}));
+            json!({"type": "text", "text": text, "marks": marks.collect::<Vec<_>>()})
+        }
+        let paragraph = |content: Vec<Value>| json!({"type": "doc", "content": [{"type": "paragraph", "content": content}]});
+        let hard_break = json!({"type": "hardBreak"});
+        for (adf, expected) in [
+            (
+                paragraph(vec![
+                    text("a ", &[]),
+                    text("b", &["strong"]),
+                    text(" ", &[]),
+                ]),
+                "a **b**",
+            ),
+            (paragraph(vec![text("bold ", &["strong"])]), "**bold**"),
+            (
+                paragraph(vec![text("bold ", &["strong"]), text("x", &[])]),
+                "**bold** x",
+            ),
+            (
+                paragraph(vec![text("x", &[]), text(" bold", &["em"])]),
+                "x *bold*",
+            ),
+            (
+                paragraph(vec![text("x ", &["strong", "em"]), text("y", &[])]),
+                "***x*** y",
+            ),
+            (
+                paragraph(vec![text("x", &[]), text("   ", &["strike"])]),
+                "x",
+            ),
+            (
+                paragraph(vec![
+                    text("b", &["strong"]),
+                    text(" ", &[]),
+                    hard_break,
+                    text("c", &[]),
+                ]),
+                "**b**  \nc",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "heading", "attrs": {"level": 2},
+                    "content": [text("b", &["strong"]), text(" ", &[])]}]}),
+                "## **b**",
+            ),
+            (
+                json!({"type": "doc", "content": [{"type": "codeBlock",
+                    "content": [{"type": "text", "text": "a  \n"}]}]}),
+                "```\na  \n```",
+            ),
+        ] {
+            assert_eq!(adf_to_markdown(&adf).unwrap(), expected, "{adf}");
+        }
     }
 
     #[test]
@@ -1749,7 +1919,7 @@ mod tests {
                 "content": [{"type": "text", "text": "Following prose."}]
             }]
         });
-        let output = adf_to_markdown(&adf);
+        let output = adf_to_markdown(&adf).unwrap();
         let mut in_code = false;
         let mut literal = String::new();
         for event in pulldown_cmark::Parser::new(&output) {
@@ -1782,7 +1952,7 @@ mod tests {
                 json!({"type":"unknown", "attrs":{"title":text}}),
             ] {
                 let adf = json!({"type":"paragraph", "content":[node]});
-                let output = adf_to_markdown(&adf);
+                let output = adf_to_markdown(&adf).unwrap();
                 let input = lk_core::markdown::MarkdownInput::from_text(&output);
                 let mut visible = String::new();
                 for event in input.events(lk_core::markdown::OPTIONS) {
@@ -1842,7 +2012,7 @@ mod tests {
                 ]},
                 {"type":"paragraph","content":[{"type":"text","text":"Following prose."}]}
             ]});
-            let output = adf_to_markdown(&adf);
+            let output = adf_to_markdown(&adf).unwrap();
             let input = lk_core::markdown::MarkdownInput::from_text(&output);
             let mut literal = String::new();
             let mut in_code = false;
@@ -1872,7 +2042,7 @@ mod tests {
             {"type":"text","text":" "},
             {"type":"text","text":label,"marks":[{"type":"code"}]}
         ]});
-        let output = adf_to_markdown(&adf);
+        let output = adf_to_markdown(&adf).unwrap();
         let input = lk_core::markdown::MarkdownInput::from_text(&output);
         let links = input
             .events(lk_core::markdown::OPTIONS)
@@ -1905,7 +2075,10 @@ mod tests {
                 ]
             }]
         });
-        assert_eq!(adf_to_markdown(&adf), "see https://example.com/page");
+        assert_eq!(
+            adf_to_markdown(&adf).unwrap(),
+            "see https://example.com/page"
+        );
     }
 
     #[test]
@@ -1920,7 +2093,7 @@ mod tests {
                 ]
             }]
         });
-        assert_eq!(adf_to_markdown(&adf), "ok");
+        assert_eq!(adf_to_markdown(&adf).unwrap(), "ok");
     }
 
     #[test]
@@ -1946,7 +2119,10 @@ mod tests {
                 ]}
             ]
         });
-        assert_eq!(adf_to_markdown(&adf), "|Name|Role|\n|----|----|\n|Ada|Eng|");
+        assert_eq!(
+            adf_to_markdown(&adf).unwrap(),
+            "|Name|Role|\n|----|----|\n|Ada|Eng|"
+        );
     }
 
     fn no_users() -> HashMap<String, String> {
@@ -1956,34 +2132,46 @@ mod tests {
     #[test]
     fn slack_tokens_rewritten() {
         let u = no_users();
-        assert_eq!(slack_to_markdown("hi <@U123>", &u), "hi @U123");
-        assert_eq!(slack_to_markdown("<@U1|june> shipped", &u), "@june shipped");
-        assert_eq!(slack_to_markdown("see <#C1|general>", &u), "see #general");
+        assert_eq!(slack_to_markdown("hi <@U123>", &u).unwrap(), "hi @U123");
         assert_eq!(
-            slack_to_markdown("docs <https://x.io|here>", &u),
+            slack_to_markdown("<@U1|june> shipped", &u).unwrap(),
+            "@june shipped"
+        );
+        assert_eq!(
+            slack_to_markdown("see <#C1|general>", &u).unwrap(),
+            "see #general"
+        );
+        assert_eq!(
+            slack_to_markdown("docs <https://x.io|here>", &u).unwrap(),
             "docs [here](https://x.io)"
         );
         assert_eq!(
-            slack_to_markdown("raw <https://x.io>", &u),
+            slack_to_markdown("raw <https://x.io>", &u).unwrap(),
             "raw <https://x.io>"
         );
-        assert_eq!(slack_to_markdown("<!here> ping", &u), "@here ping");
+        assert_eq!(slack_to_markdown("<!here> ping", &u).unwrap(), "@here ping");
     }
 
     #[test]
     fn slack_resolves_user_id_to_display_name() {
         let mut users = HashMap::new();
         users.insert("U123".to_string(), "Alice".to_string());
-        assert_eq!(slack_to_markdown("hi <@U123>", &users), "hi @Alice");
+        assert_eq!(
+            slack_to_markdown("hi <@U123>", &users).unwrap(),
+            "hi @Alice"
+        );
         // Pipe-label still takes priority over the resolved name.
-        assert_eq!(slack_to_markdown("<@U123|bob> said", &users), "@bob said");
+        assert_eq!(
+            slack_to_markdown("<@U123|bob> said", &users).unwrap(),
+            "@bob said"
+        );
     }
 
     #[test]
     fn slack_date_token_with_fallback() {
         let u = no_users();
         assert_eq!(
-            slack_to_markdown("due <!date^1234567890^{date}|May 24, 2026>", &u),
+            slack_to_markdown("due <!date^1234567890^{date}|May 24, 2026>", &u).unwrap(),
             "due May 24, 2026"
         );
     }
@@ -1996,7 +2184,7 @@ mod tests {
                 {"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":"[literal](target.md)"}]}]},
                 {"type":"tableCell","content":[{"type":"paragraph","content":[{"type":"text","text":code,"marks":[{"type":"code"}]}]}]}
             ]}]});
-            let output = adf_to_markdown(&adf);
+            let output = adf_to_markdown(&adf).unwrap();
             let input = lk_core::markdown::MarkdownInput::from_text(&output);
             assert!(
                 input
@@ -2014,7 +2202,7 @@ mod tests {
         let adf = json!({"type":"table","content":[{"type":"tableRow","content":[
             {"type":"tableCell","attrs":{"colspan":2},"content":[{"type":"codeBlock","content":[{"type":"text","text":"```\n[literal](target.md)\n"}]}]}
         ]}]});
-        let output = adf_to_markdown(&adf);
+        let output = adf_to_markdown(&adf).unwrap();
         assert!(output.contains("colspan=\"2\""), "{output}");
         assert!(output.contains("<pre>"), "{output}");
         assert!(lk_core::link::extract_dests(&output).is_empty());
@@ -2024,7 +2212,7 @@ mod tests {
     fn slack_date_token_without_fallback() {
         let u = no_users();
         assert_eq!(
-            slack_to_markdown("at <!date^1234567890^{date}>", &u),
+            slack_to_markdown("at <!date^1234567890^{date}>", &u).unwrap(),
             "at 1234567890"
         );
     }
@@ -2033,7 +2221,7 @@ mod tests {
     fn slack_bold_converted() {
         let u = no_users();
         assert_eq!(
-            slack_to_markdown("this is *bold* text", &u),
+            slack_to_markdown("this is *bold* text", &u).unwrap(),
             "this is **bold** text"
         );
     }
@@ -2042,7 +2230,7 @@ mod tests {
     fn slack_strike_converted() {
         let u = no_users();
         assert_eq!(
-            slack_to_markdown("this is ~struck~ out", &u),
+            slack_to_markdown("this is ~struck~ out", &u).unwrap(),
             "this is ~~struck~~ out"
         );
     }
@@ -2050,7 +2238,7 @@ mod tests {
     #[test]
     fn slack_bold_not_converted_mid_word() {
         let u = no_users();
-        let output = slack_to_markdown("file*name*here", &u);
+        let output = slack_to_markdown("file*name*here", &u).unwrap();
         let events = pulldown_cmark::Parser::new(&output).collect::<Vec<_>>();
         assert!(events.iter().all(|event| !matches!(
             event,
@@ -2073,7 +2261,7 @@ mod tests {
     #[test]
     fn slack_bold_in_code_not_converted() {
         let u = no_users();
-        assert_eq!(slack_to_markdown("`*bold*`", &u), "`*bold*`");
+        assert_eq!(slack_to_markdown("`*bold*`", &u).unwrap(), "`*bold*`");
     }
 
     #[test]
@@ -2081,18 +2269,18 @@ mod tests {
         let u = no_users();
         // CJK characters act as word boundaries — Slack renders *bold* adjacent to Korean text.
         assert_eq!(
-            slack_to_markdown("한글*bold*텍스트", &u),
+            slack_to_markdown("한글*bold*텍스트", &u).unwrap(),
             "한글**bold**텍스트"
         );
         assert_eq!(
-            slack_to_markdown("결과~삭제~했습니다", &u),
+            slack_to_markdown("결과~삭제~했습니다", &u).unwrap(),
             "결과~~삭제~~했습니다"
         );
     }
 
     #[test]
     fn slack_decodes_entities() {
-        let output = slack_to_markdown("a &lt;b&gt; &amp; c", &no_users());
+        let output = slack_to_markdown("a &lt;b&gt; &amp; c", &no_users()).unwrap();
         let events = pulldown_cmark::Parser::new(&output).collect::<Vec<_>>();
         assert!(events.iter().all(|event| !matches!(
             event,
@@ -2115,11 +2303,14 @@ mod tests {
         let u = no_users();
         // Recognized Unicode emoji shortcodes render as their glyph — faithful to what the
         // author saw, never dropped (a `:100:`/`:rocket:` can carry real meaning).
-        assert_eq!(slack_to_markdown(":+1: great", &u), "👍 great");
-        assert_eq!(slack_to_markdown(":pray::fire:", &u), "🙏🔥");
+        assert_eq!(slack_to_markdown(":+1: great", &u).unwrap(), "👍 great");
+        assert_eq!(slack_to_markdown(":pray::fire:", &u).unwrap(), "🙏🔥");
         // A workspace-custom emoji is NOT in the standard set, so it survives as literal
         // text rather than risk mangling a real word that looks like a shortcode.
-        assert_eq!(slack_to_markdown(":custom_parrot:", &u), ":custom_parrot:");
+        assert_eq!(
+            slack_to_markdown(":custom_parrot:", &u).unwrap(),
+            ":custom_parrot:"
+        );
     }
 
     #[test]
@@ -2128,23 +2319,26 @@ mod tests {
         // A colon embedded mid-word is not an emoji shortcode — `key:value:pair`
         // technical text must keep its middle token, not be touched.
         assert_eq!(
-            slack_to_markdown("config:value:here", &u),
+            slack_to_markdown("config:value:here", &u).unwrap(),
             "config:value:here"
         );
-        assert_eq!(slack_to_markdown("app:icon:large", &u), "app:icon:large");
+        assert_eq!(
+            slack_to_markdown("app:icon:large", &u).unwrap(),
+            "app:icon:large"
+        );
         // A delimited word that merely LOOKS like a shortcode but isn't a real emoji
         // (a Ruby symbol, colon-emphasis) must be preserved, not converted.
         assert_eq!(
-            slack_to_markdown("the :default: value", &u),
+            slack_to_markdown("the :default: value", &u).unwrap(),
             "the :default: value"
         );
         assert_eq!(
-            slack_to_markdown("mark :important:", &u),
+            slack_to_markdown("mark :important:", &u).unwrap(),
             "mark :important:"
         );
         // Delimited shortcodes render to glyphs, even adjacent to punctuation.
-        assert_eq!(slack_to_markdown("nice (:tada:)", &u), "nice (🎉)");
-        assert_eq!(slack_to_markdown("done :+1:", &u), "done 👍");
+        assert_eq!(slack_to_markdown("nice (:tada:)", &u).unwrap(), "nice (🎉)");
+        assert_eq!(slack_to_markdown("done :+1:", &u).unwrap(), "done 👍");
     }
 
     #[test]
@@ -2154,22 +2348,22 @@ mod tests {
         // span must survive verbatim even when it holds a real emoji shortcode, while a
         // bare prose shortcode on the same line still renders to its glyph.
         assert_eq!(
-            slack_to_markdown("use `:tada:` here :tada:", &u),
+            slack_to_markdown("use `:tada:` here :tada:", &u).unwrap(),
             "use `:tada:` here 🎉"
         );
         assert_eq!(
-            slack_to_markdown("the `:x:` marker", &u),
+            slack_to_markdown("the `:x:` marker", &u).unwrap(),
             "the `:x:` marker"
         );
         // A fenced block whose body itself contains backticks: the shortcode inside must
         // survive (the opening ``` matches the closing ```; the inner single backticks
         // don't close it). A naive backtick-parity split mis-counts here and converts it.
         assert_eq!(
-            slack_to_markdown("```\nlet s = `:tada:`;\n```", &u),
+            slack_to_markdown("```\nlet s = `:tada:`;\n```", &u).unwrap(),
             "```\nlet s = `:tada:`;\n```"
         );
         // A double-backtick inline span is a code span too (run length 2).
-        let output = slack_to_markdown("``:tada:``", &u);
+        let output = slack_to_markdown("``:tada:``", &u).unwrap();
         assert!(
             pulldown_cmark::Parser::new(&output).any(|event| matches!(event,
                 pulldown_cmark::Event::Code(text) if text.as_ref() == ":tada:"
@@ -2487,7 +2681,7 @@ mod tests {
     #[test]
     fn empty_inputs_are_empty() {
         assert_eq!(html_to_markdown("   "), "");
-        assert_eq!(slack_to_markdown("", &no_users()), "");
+        assert_eq!(slack_to_markdown("", &no_users()).unwrap(), "");
     }
 
     fn remote_article(

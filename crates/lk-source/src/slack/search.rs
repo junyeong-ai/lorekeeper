@@ -242,7 +242,18 @@ impl Source for SlackSearchSource {
             );
 
             for m in matches {
-                let rendered = slack_to_markdown(&m.text, &users);
+                let rendered = match slack_to_markdown(&m.text, &users) {
+                    Ok(rendered) => rendered,
+                    Err(error) => {
+                        partial = true;
+                        tracing::warn!(
+                            ts = m.ts.as_str(),
+                            %error,
+                            "slack-search: skipping message that Markdown cannot represent"
+                        );
+                        continue;
+                    }
+                };
                 let (title, body) = split_first_line(&rendered);
 
                 let Some(ts) =

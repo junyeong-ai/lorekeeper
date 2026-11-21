@@ -413,8 +413,9 @@ impl Source for JiraSource {
     }
 }
 
-/// Map one Jira issue to a `RawItem`, or `None` if it has no parseable `updated`
-/// timestamp (it can't be filed onto a day). Pure — no I/O — so the ownership match,
+/// Map one Jira issue to a `RawItem`, or `None` when it has no parseable `updated`
+/// timestamp (it can't be filed onto a day) or a description Markdown cannot carry
+/// faithfully. Pure — no I/O — so the ownership match,
 /// ADF→Markdown body, status/period header, and metadata projection are unit-testable
 /// against fixtures without a live Jira. `my_account_id` is the authenticated account's
 /// id (the exact ownership key); `my_email` stands in as the author when the issue is
@@ -476,12 +477,19 @@ fn map_issue(
     });
 
     let status = issue.fields.status.and_then(|s| s.name);
-    let description = issue
+    let description = match issue
         .fields
         .description
         .as_ref()
         .map(crate::markdown::adf_to_markdown)
-        .unwrap_or_default();
+        .transpose()
+    {
+        Ok(description) => description.unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(issue_key = %issue.key, %error, "jira: description is not representable as Markdown; skipping");
+            return None;
+        }
+    };
     let description = match crate::remote_text::markdown(&description, None) {
         Ok(description) => description,
         Err(error) => {

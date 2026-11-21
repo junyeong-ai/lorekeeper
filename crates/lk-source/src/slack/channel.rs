@@ -307,7 +307,20 @@ impl Source for SlackChannelSource {
                     continue;
                 }
 
-                let rendered = render_thread(&thread, ctx.locale.strings().thread_replies, &users);
+                let rendered =
+                    match render_thread(&thread, ctx.locale.strings().thread_replies, &users) {
+                        Ok(rendered) => rendered,
+                        Err(error) => {
+                            partial = true;
+                            tracing::warn!(
+                                channel = channel_name,
+                                ts = root.ts.as_str(),
+                                %error,
+                                "slack-channel: skipping message that Markdown cannot represent"
+                            );
+                            continue;
+                        }
+                    };
                 // Title from the converted body so it shares the Markdown normalization
                 // (mentions/entities resolved) rather than showing raw Slack tokens.
                 let (title, body) = split_first_line(&rendered);
@@ -396,23 +409,23 @@ fn render_thread(
     thread: &[SlackMessage],
     replies_label: &str,
     users: &HashMap<String, String>,
-) -> String {
+) -> Result<String, SourceError> {
     let render = |m: &SlackMessage| slack_to_markdown(m.text.as_deref().unwrap_or(""), users);
     let Some((root, replies)) = thread.split_first() else {
-        return String::new();
+        return Ok(String::new());
     };
-    let root_md = render(root);
+    let root_md = render(root)?;
     if replies.is_empty() {
-        return root_md;
+        return Ok(root_md);
     }
     let mut out = format!("{root_md}\n\n--- {replies_label} {} ---", replies.len());
     for r in replies {
         let raw_uid = r.user.as_deref().unwrap_or("unknown");
         let display = users.get(raw_uid).map(String::as_str).unwrap_or(raw_uid);
         let display = lk_core::markdown::inline_text(display);
-        out.push_str(&format!("\n@{display}: {}", render(r)));
+        out.push_str(&format!("\n@{display}: {}", render(r)?));
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -534,7 +547,7 @@ mod tests {
             msg("2", "U2", "first answer"),
             msg("3", "U1", "thanks <@U2>"),
         ];
-        let body = render_thread(&thread, "쓰레드 답글", &users);
+        let body = render_thread(&thread, "쓰레드 답글", &users).unwrap();
         assert!(body.starts_with("root question"));
         assert!(body.contains("--- 쓰레드 답글 2 ---"));
         assert!(body.contains("@Bob: first answer"));
@@ -545,7 +558,7 @@ mod tests {
     fn render_single_message_is_just_body() {
         let thread = vec![msg("1", "U1", "solo <@U2> ping")];
         assert_eq!(
-            render_thread(&thread, "쓰레드 답글", &no_users()),
+            render_thread(&thread, "쓰레드 답글", &no_users()).unwrap(),
             "solo @U2 ping"
         );
     }
@@ -557,7 +570,7 @@ mod tests {
             "[Claim](../../wiki/concepts/topic.md) <b>".into(),
         )]);
         let thread = vec![msg("1", "U1", "Question"), msg("2", "U2", "Answer")];
-        let output = render_thread(&thread, "Replies", &users);
+        let output = render_thread(&thread, "Replies", &users).unwrap();
         assert!(lk_core::link::extract_page_links(&output).is_empty());
         assert!(
             pulldown_cmark::Parser::new_ext(&output, lk_core::markdown::OPTIONS).all(

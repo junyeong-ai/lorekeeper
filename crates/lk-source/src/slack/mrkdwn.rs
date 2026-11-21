@@ -5,7 +5,10 @@ use std::collections::HashMap;
 
 use pulldown_cmark::{CodeBlockKind, Event, LinkType, Tag, TagEnd};
 
-pub(crate) fn render(text: &str, users: &HashMap<String, String>) -> String {
+pub(crate) fn render(
+    text: &str,
+    users: &HashMap<String, String>,
+) -> Result<String, crate::SourceError> {
     let mut events = Vec::new();
     let mut start = 0;
     let mut at = 0;
@@ -62,8 +65,8 @@ pub(crate) fn render(text: &str, users: &HashMap<String, String>) -> String {
             ..Default::default()
         },
     )
-    .expect("serializing Slack events into a String cannot fail");
-    output.trim_matches(['\r', '\n']).to_owned()
+    .map_err(|error| crate::SourceError::Parse(format!("Slack Markdown serialization: {error}")))?;
+    Ok(output.trim_matches(['\r', '\n']).to_owned())
 }
 
 fn backticks(text: &str, at: usize) -> usize {
@@ -102,7 +105,8 @@ fn prose(text: &str, users: &HashMap<String, String>, events: &mut Vec<Event<'st
     let mut paragraph = false;
     let mut list = false;
     for raw in lk_core::markdown::lines_with_endings(text) {
-        let mut line = raw.trim_end_matches(['\r', '\n']);
+        // Slack displays no whitespace ending a line, and CommonMark cannot spell it.
+        let mut line = raw.trim_end_matches(['\r', '\n', ' ', '\t']);
         let mut depth = 0;
         while let Some(rest) = line.strip_prefix('>') {
             depth += 1;
@@ -368,7 +372,7 @@ mod tests {
     use super::*;
 
     fn parsed(text: &str, users: &HashMap<String, String>) -> Vec<Event<'static>> {
-        let rendered = render(text, users);
+        let rendered = render(text, users).expect("representable Slack text");
         lk_core::markdown::MarkdownInput::from_text(&rendered)
             .events(lk_core::markdown::OPTIONS)
             .map(Event::into_static)
@@ -556,6 +560,25 @@ mod tests {
             }
         }
         assert_eq!(visible, "1. first\n5. fifth");
+    }
+
+    #[test]
+    fn whitespace_ending_a_line_is_not_content() {
+        let users = HashMap::new();
+        for (source, visible) in [
+            ("*b* ", "*b*"),
+            ("a *b* \nc", "a *b*\nc"),
+            ("- *b* \n- _i_\t", "- *b*\n- _i_"),
+            ("> ~s~ ", "> ~s~"),
+            ("*a*\n   \n*b*", "*a*\n\n*b*"),
+            ("x\n- ", "x\n-"),
+        ] {
+            assert_eq!(
+                render(source, &users).expect("representable Slack text"),
+                render(visible, &users).expect("representable Slack text"),
+                "{source:?}"
+            );
+        }
     }
 
     #[test]

@@ -563,7 +563,8 @@ mod tests {
         let rendered = super::mrkdwn::render(
             "[Claim](local.md) *bold*\n\nDetails",
             &std::collections::HashMap::new(),
-        );
+        )
+        .unwrap();
         let (title, body) = split_first_line(&rendered);
         assert_eq!(title, "[Claim](local.md) bold");
         assert_eq!(body, "Details");
@@ -571,7 +572,8 @@ mod tests {
         let rendered = super::mrkdwn::render(
             "<https://example.com|Source>\n\nDetails",
             &std::collections::HashMap::new(),
-        );
+        )
+        .unwrap();
         let (_, body) = split_first_line(&rendered);
         assert_eq!(body, rendered);
     }
