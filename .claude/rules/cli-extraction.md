@@ -63,13 +63,9 @@ paths:
   `extraction_scope.policy` and `selected`; recipes, the roster and unread candidates
   stay outside it. Candidate churn that leaves the selected set unchanged neither
   refuses recorded inspections nor replans the Work, and reading that evidence captures
-  no discovery. Context pages, such as selected owners, are read and bound as
-  `lk_core::concept::semantic_text`: parsed frontmatter without `BOOKKEEPING_FIELDS`, so a
-  citation or task-state update to one leaves the Work current whatever its YAML spelling;
-  an authored change does not, and an unparseable page keeps its exact bytes. A Work
-  planned while context pages were read as exact bytes resumes, with its observations and
-  holds, while every page it read keeps those bytes (`Prepared::exact_context`). Reuse still binds the owner's exact file at
-  assembly and application. Rust binds the current completely decided roster where a
+  no discovery. Selected owners are context pages, read through the preparation's context
+  reading (cli-semantic-work.md). Reuse still binds the owner's exact file at assembly and
+  application. Rust binds the current completely decided roster where a
   result is assembled, before a finalizer call and again after it, and writes the result's
   `discovery` and `selection` itself. A roster that cannot be formed (screening capacity,
   a blocked or incomplete source), is not completely decided, or admits different

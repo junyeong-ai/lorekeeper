@@ -25,6 +25,20 @@ paths:
   invalid evidence and I/O remain strict; shared preparation preserves independent work.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
   validate their exact manifest before using recorded observations.
+- Context pages (selected owners, discovery matches, audit related pages) follow one
+  `ContextReading` per preparation (`work/resources.rs`). New Work reads them as
+  `lk_core::concept::semantic_text`: parsed frontmatter without `BOOKKEEPING_FIELDS`, so a
+  citation or task-state update leaves the Work current whatever its YAML spelling; an
+  authored change does not, and an unparseable page keeps its exact bytes. Work planned
+  before 0.144.0 read exact bytes. `expected()` decides once which Work a preparation
+  continues and in which reading: a stored semantic Work, then a stored exact-bytes Work
+  while every page it read keeps those bytes, otherwise a new semantic plan. A reading over
+  the input bound has no stored Work and leaves the choice to the other. Named Work, drafted
+  queue results and audit publication are checked against that one choice, made before page
+  snapshots leave the preparation, so Work that can run can publish; convert a fresh capture
+  with `read_as` before comparing it (roster admission). A stored Work continues through the
+  Work protocol whatever its part count. 0.144.0's line projection is not reconstructed: its
+  Work replans, and a hold bound only to an input revision follows the semantic reading.
 - A newly persisted Work reuses, through the attributed reuse path and its page guards,
   the observation of each unrefined inspection whose content revision (partition policy,
   semantic purpose and exact assigned evidence) another stored Work recorded fresh.

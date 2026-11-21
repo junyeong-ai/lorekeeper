@@ -24,9 +24,34 @@ pub(super) enum Subject {
     },
 }
 
+/// How a preparation presents the context pages it read. Every context resource of one
+/// preparation follows its reading, and either reading is rebuilt from the captured pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ContextReading {
+    /// Parsed frontmatter without bookkeeping (`lk_core::concept::semantic_text`), so a
+    /// citation or task-state update leaves the reading unchanged. A page whose frontmatter
+    /// does not parse reads as its exact bytes. Every new Work reads this way.
+    Semantic,
+    /// The captured page's exact bytes, as Work planned before 0.144.0 read context pages.
+    Exact,
+}
+
+impl ContextReading {
+    fn text(self, raw: &str) -> String {
+        match self {
+            Self::Semantic => lk_vault::parse_page(raw).map_or_else(
+                |_| raw.to_owned(),
+                |page| lk_core::concept::semantic_text(&page),
+            ),
+            Self::Exact => raw.to_owned(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct Prepared {
     read: lk_vault::ReadControl,
+    reading: ContextReading,
     semantic_config_revision: Option<String>,
     pub subject: Subject,
     pub context: Value,
@@ -114,25 +139,29 @@ impl Prepared {
             .map(|(_, raw)| raw.as_str())
     }
 
-    /// This preparation as read before context pages were read through `semantic_text`:
-    /// every context resource carries its captured page's exact bytes. `None` when no
-    /// context resource reads differently.
-    pub(super) fn exact_context(&self) -> Option<Self> {
-        let mut exact = self.clone();
-        let mut differs = false;
-        for resource in &mut exact.resources {
+    pub(super) fn reading(&self) -> ContextReading {
+        self.reading
+    }
+
+    /// This preparation with its context resources presented in `reading`, rebuilt from the
+    /// pages it captured.
+    pub(super) fn read_as(&self, reading: ContextReading) -> miette::Result<Self> {
+        let mut read = self.clone();
+        if reading == self.reading {
+            return Ok(read);
+        }
+        read.reading = reading;
+        for resource in &mut read.resources {
             if resource.authority != SemanticAuthority::Context {
                 continue;
             }
-            if let Some(raw) = self.captured_page(&resource.address)
-                && resource.text != raw
-            {
-                resource.text = raw.to_owned();
-                resource.revision = file_revision(raw);
-                differs = true;
-            }
+            let raw = self.captured_page(&resource.address).ok_or_else(|| {
+                miette::miette!("context page was not captured: {}", resource.address)
+            })?;
+            resource.text = reading.text(raw);
+            resource.revision = file_revision(&resource.text);
         }
-        differs.then_some(exact)
+        Ok(read)
     }
 
     pub fn validate_audit_result(
@@ -230,6 +259,7 @@ impl Prepared {
 struct Capture<'a> {
     rss: Option<lk_vault::RssEvidenceCapture>,
     read: lk_vault::ReadControl,
+    reading: ContextReading,
     root: &'a Path,
     pages: BTreeMap<PathBuf, String>,
     resources: BTreeMap<String, SemanticResource>,
@@ -241,6 +271,7 @@ impl<'a> Capture<'a> {
             root,
             rss: None,
             read: read.clone(),
+            reading: ContextReading::Semantic,
             pages: BTreeMap::new(),
             resources: BTreeMap::new(),
         }
@@ -252,6 +283,7 @@ impl<'a> Capture<'a> {
             root,
             rss: None,
             read: prepared.read.clone(),
+            reading: prepared.reading,
             pages: prepared.pages.clone(),
             resources: prepared
                 .resources
@@ -304,14 +336,8 @@ impl<'a> Capture<'a> {
             ));
         }
         let address = lk_core::vault_path::address(&relative);
-        // A context page is read without its bookkeeping, so a citation or task-state update
-        // to it leaves the work that read it current. A page whose frontmatter does not parse
-        // keeps its exact bytes, as every read of it did before.
         let text = match authority {
-            SemanticAuthority::Context => lk_vault::parse_page(&raw).map_or_else(
-                |_| raw.clone(),
-                |page| lk_core::concept::semantic_text(&page),
-            ),
+            SemanticAuthority::Context => self.reading.text(&raw),
             _ => raw.clone(),
         };
         self.pages.insert(relative, raw);
@@ -397,6 +423,7 @@ impl<'a> Capture<'a> {
     fn finish(self, subject: Subject, context: Value, config: &Config) -> Prepared {
         Prepared {
             read: self.read,
+            reading: self.reading,
             semantic_config_revision: config.semantic_work_revision().map(str::to_owned),
             subject,
             context,
@@ -1642,6 +1669,7 @@ mod tests {
         let review = "wiki/explorations/review.md";
         let prepared = Prepared {
             read: lk_vault::ReadControl::default(),
+            reading: ContextReading::Semantic,
             semantic_config_revision: None,
             subject: Subject::Audit {
                 path: path.into(),

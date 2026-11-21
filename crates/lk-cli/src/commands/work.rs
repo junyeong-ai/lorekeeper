@@ -260,48 +260,75 @@ pub(crate) fn limits(config: &lk_core::config::Config) -> miette::Result<WorkLim
     })
 }
 
-/// The Work this preparation continues. A Work planned while context pages were read as
-/// exact bytes resumes, with its observations and holds, while every page it read keeps
-/// those bytes, and `prepared` then takes that reading. Otherwise the current reading
-/// continues its planned Work or plans one.
+/// The Work this preparation continues, and `prepared` takes the reading it was planned
+/// under: a stored Work under the semantic reading; otherwise a Work planned before 0.144.0
+/// on exact context bytes, with its observations and holds, while every page it read keeps
+/// those bytes; otherwise the semantic reading plans one. A named Work and a drafted result
+/// are checked against this one choice, so a Work that can run can also publish.
 fn expected(
     root: &Path,
     prepared: &mut Prepared,
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<Work> {
-    if let Some(exact) = prepared.exact_context()
-        && let Some(work) = planned(root, &exact, config, config_revision)?
-    {
-        *prepared = exact;
-        return Ok(work);
+    let semantic = prepared.read_as(resources::ContextReading::Semantic)?;
+    let planned_semantic = match planned(root, &semantic, config, config_revision) {
+        Ok(Planned::Stored(work)) => {
+            *prepared = semantic;
+            return Ok(work);
+        }
+        Ok(Planned::New(work)) => Ok(work),
+        Err(error) if state::is_input_capacity(&error) => Err(error),
+        Err(error) => return Err(error),
+    };
+    let exact = prepared.read_as(resources::ContextReading::Exact)?;
+    if exact.resources != semantic.resources {
+        // A reading that does not fit the current input bound cannot have a stored Work under
+        // it, so its capacity error leaves the other reading to decide.
+        match planned(root, &exact, config, config_revision) {
+            Ok(Planned::Stored(work)) => {
+                *prepared = exact;
+                return Ok(work);
+            }
+            Ok(Planned::New(_)) => {}
+            Err(error) if state::is_input_capacity(&error) => {}
+            Err(error) => return Err(error),
+        }
     }
-    if let Some(work) = planned(root, prepared, config, config_revision)? {
-        return Ok(work);
-    }
-    expected_with_inspection(
-        root,
-        prepared,
-        config,
-        config_revision,
-        Some(lk_core::semantic::INSPECTION_CHARACTERS),
-    )
+    *prepared = semantic;
+    planned_semantic
 }
 
-/// The stored Work this preparation plans under either partition policy, if any.
+/// The Work one reading of a preparation plans.
+enum Planned {
+    /// Stored under either partition policy.
+    Stored(Work),
+    /// Not stored; the current partition policy plans it.
+    New(Work),
+}
+
 fn planned(
     root: &Path,
     prepared: &Prepared,
     config: &lk_core::config::Config,
     config_revision: &str,
-) -> miette::Result<Option<Work>> {
-    for characters in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
-        let work = expected_with_inspection(root, prepared, config, config_revision, characters)?;
-        if work.is_planned(root)? {
-            return Ok(Some(work));
-        }
+) -> miette::Result<Planned> {
+    let byte_only = expected_with_inspection(root, prepared, config, config_revision, None)?;
+    if byte_only.is_planned(root)? {
+        return Ok(Planned::Stored(byte_only));
     }
-    Ok(None)
+    let current = expected_with_inspection(
+        root,
+        prepared,
+        config,
+        config_revision,
+        Some(lk_core::semantic::INSPECTION_CHARACTERS),
+    )?;
+    Ok(if current.is_planned(root)? {
+        Planned::Stored(current)
+    } else {
+        Planned::New(current)
+    })
 }
 
 fn expected_with_inspection(
@@ -379,15 +406,14 @@ fn persist_prepared(
     Ok(work)
 }
 
+/// Guard `result` through `expected`, the Work `prepared` continues (`expected()`).
 fn guard_prepared(
     root: &Path,
-    config: &lk_core::config::Config,
-    config_revision: &str,
-    mut prepared: Prepared,
+    expected: Work,
+    prepared: Prepared,
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
 ) -> miette::Result<bool> {
-    let expected = expected(root, &mut prepared, config, config_revision)?;
     let manifest = root
         .join(".lorekeeper/work")
         .join(&expected.plan.id)
@@ -645,6 +671,8 @@ fn prepare_queue_publication_controlled(
             }
         }
     }
+    // The reading is decided while the page snapshots it is rebuilt from are still here.
+    let expected_work = expected(&root, &mut prepared, config, config_revision)?;
     if scoped_synthesis || scoped_extraction {
         let revision = prepared.revision(config_revision)?;
         let supplied = result.get("context_revision").and_then(Value::as_str);
@@ -679,7 +707,7 @@ fn prepare_queue_publication_controlled(
     }
     let pages = std::mem::take(&mut prepared.pages);
     let mut work = selection_guards;
-    let bounded = guard_prepared(&root, config, config_revision, prepared, result, &mut work)?;
+    let bounded = guard_prepared(&root, expected_work, prepared, result, &mut work)?;
     Ok(QueuePublicationGuard {
         work,
         pages,
@@ -1676,7 +1704,8 @@ fn with_current_roster<'a>(
     }
     let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
         .into_diagnostic()?;
-    let admitted = admitted_task(root, config, &screening, &mut reviews, read)?;
+    let admitted =
+        admitted_task(root, config, &screening, &mut reviews, read)?.read_as(prepared.reading())?;
     if admitted.revision(config_revision)? != prepared.revision(config_revision)? {
         return Ok(RosterAdmission::Changed(
             "candidate screening now admits different evidence than this work read".into(),
@@ -1851,11 +1880,12 @@ pub(super) fn guard_audit_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<bool> {
     let root = root.canonicalize().into_diagnostic()?;
+    let mut prepared = resources::audit_controlled(&root, config, &assessment.path, read)?;
+    let work = expected(&root, &mut prepared, config, config_revision)?;
     guard_prepared(
         &root,
-        config,
-        config_revision,
-        resources::audit_controlled(&root, config, &assessment.path, read)?,
+        work,
+        prepared,
         json!({"assessments":[assessment]}),
         mutation,
     )
@@ -5226,6 +5256,14 @@ mod tests {
             panic!("the decided roster admits exactly this evidence");
         };
         assert_eq!(bound.roster.as_ref().unwrap().selection, binding);
+        let exact = evidence.read_as(resources::ContextReading::Exact).unwrap();
+        assert_ne!(exact.resources, evidence.resources);
+        let RosterAdmission::Bound(bound) =
+            with_current_roster(&root, &config, &config_revision, &exact, &read).unwrap()
+        else {
+            panic!("evidence read as exact bytes is admitted by the same roster");
+        };
+        assert_eq!(bound.reading(), resources::ContextReading::Exact);
         let later = "wiki/concepts/later.md";
         write(
             &root,
@@ -5439,14 +5477,25 @@ mod tests {
         )
         .unwrap();
         assert!(work.plan.parts.len() > 1);
+        record_every_inspection(root, &session, &work, &prepared.resources);
+        let result = reviewed_assessment(&prepared);
+        (work, prepared, result)
+    }
+
+    fn record_every_inspection(
+        root: &Path,
+        session: &MutationSession,
+        work: &Work,
+        resources: &[lk_core::semantic::SemanticResource],
+    ) {
         loop {
-            let (status, request) = work.prepare_inspection(root, &prepared.resources).unwrap();
+            let (status, request) = work.prepare_inspection(root, resources).unwrap();
             if status.complete {
                 break;
             }
             let request = request.unwrap();
             work.record(
-                &session,
+                session,
                 WorkOutput {
                     work_id: work.plan.id.clone(),
                     node_id: request["node_id"].as_str().unwrap().into(),
@@ -5457,10 +5506,13 @@ mod tests {
                     unresolved: vec![],
                     resolutions: vec![],
                 },
-                &prepared.resources,
+                resources,
             )
             .unwrap();
         }
+    }
+
+    fn reviewed_assessment(prepared: &Prepared) -> Value {
         let Subject::Audit {
             path,
             file_revision,
@@ -5469,11 +5521,10 @@ mod tests {
         else {
             unreachable!()
         };
-        let result = json!({"assessments":[{
+        json!({"assessments":[{
             "path":path,"file_revision":file_revision,"input_revision":input_revision,
             "disposition":"reviewed","reason":"Fixture completed the exact selected reads.","reviews":[],
-        }]});
-        (work, prepared, result)
+        }]})
     }
 
     #[test]
@@ -5553,37 +5604,56 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn work_planned_on_exact_context_bytes_resumes_with_its_observations_and_holds() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().canonicalize().unwrap();
+    /// A configuration bounding Work input and result bytes.
+    fn bounded_config(
+        root: &Path,
+        max_input_bytes: usize,
+        max_result_bytes: usize,
+    ) -> (lk_core::config::Config, String) {
         let config_path = root.join("config.yaml");
         std::fs::write(
             &config_path,
             format!(
-                "vault:\n  root: {}\n  locale: en\nidentity: {{name: Tester, email: tester@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  work: {{max_input_bytes: 8192, max_result_bytes: 2048}}\n",
-                serde_json::to_string(&root).unwrap()
+                "vault:\n  root: {}\n  locale: en\nidentity: {{name: Tester, email: tester@example.com}}\nsources:\n  notes:\n    type: manual\n    params: {{inbox_dir: inbox}}\nexecution:\n  work: {{max_input_bytes: {max_input_bytes}, max_result_bytes: {max_result_bytes}}}\n",
+                serde_json::to_string(root).unwrap()
             ),
         )
         .unwrap();
-        let (config, revision) = lk_core::config::Config::load_with_revision(&config_path).unwrap();
-        let related = "wiki/concepts/related.md";
-        let related_raw = "---\ntype: concept\ntitle: Related\nsource_count: 1\n---\n## Synthesis\nA related claim.\n";
-        write(&root, related, related_raw);
-        let path = "wiki/documents/subject.md";
+        lk_core::config::Config::load_with_revision(&config_path).unwrap()
+    }
+
+    const CONTEXT_RELATED: &str = "wiki/concepts/related.md";
+    const CONTEXT_RELATED_RAW: &str = "---\ntype: concept\ntitle: Related\nsource_count: 1\n---\n## Synthesis\nA related claim.\n";
+    const CONTEXT_SUBJECT: &str = "wiki/documents/subject.md";
+
+    /// An audit subject too long for one part that relates a page with bookkeeping, so its
+    /// exact bytes and semantic reading differ.
+    fn context_audit_fixture(root: &Path) -> (lk_core::config::Config, String) {
+        write(root, CONTEXT_RELATED, CONTEXT_RELATED_RAW);
         write(
-            &root,
-            path,
+            root,
+            CONTEXT_SUBJECT,
             &format!(
                 "---\ntype: document\ntitle: Subject\n---\n## Content\n[Related](../concepts/related.md)\n\n{}",
                 "A source-scoped observation.\n\n".repeat(500)
             ),
         );
+        bounded_config(root, 8192, 2048)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn work_planned_on_exact_context_bytes_resumes_with_its_observations_and_holds() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = context_audit_fixture(&root);
+        let (related, related_raw, path) = (CONTEXT_RELATED, CONTEXT_RELATED_RAW, CONTEXT_SUBJECT);
         let current = resources::audit(&root, &config, path).unwrap();
-        let exact = current
-            .exact_context()
-            .expect("the related page reads differently as exact bytes");
+        let exact = current.read_as(resources::ContextReading::Exact).unwrap();
+        assert_ne!(
+            exact.resources, current.resources,
+            "the related page reads differently as exact bytes"
+        );
         let session = MutationSession::acquire(&root).unwrap();
         let work = Work::create(
             &session,
@@ -5640,6 +5710,14 @@ mod tests {
                 .join("inspection-timeouts.json")
                 .exists()
         );
+        assert_eq!(
+            load(&root, &config, &revision, &work.plan.id)
+                .unwrap()
+                .1
+                .reading(),
+            resources::ContextReading::Exact,
+            "the named Work loads in the reading it was planned under"
+        );
 
         write(
             &root,
@@ -5656,6 +5734,274 @@ mod tests {
             cited.revision(&revision).unwrap(),
             current.revision(&revision).unwrap(),
             "the current reading ignores the citation update"
+        );
+        let session = MutationSession::acquire(&root).unwrap();
+        let semantic = persist_prepared(&session, &config, &revision, &mut cited).unwrap();
+        drop(session);
+        assert_ne!(semantic, work);
+
+        write(&root, related, related_raw);
+        let mut reverted = resources::audit(&root, &config, path).unwrap();
+        assert_eq!(
+            expected(&root, &mut reverted, &config, &revision).unwrap(),
+            semantic,
+            "restored bytes leave the newer semantic Work selected"
+        );
+        assert_eq!(reverted.reading(), resources::ContextReading::Semantic);
+        assert_eq!(
+            load(&root, &config, &revision, &semantic.plan.id)
+                .unwrap()
+                .1
+                .reading(),
+            resources::ContextReading::Semantic
+        );
+        assert!(
+            is_semantic_context_changed(
+                &load(&root, &config, &revision, &work.plan.id)
+                    .err()
+                    .unwrap()
+            ),
+            "the superseded exact-bytes Work is no longer the one this subject continues"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn completed_exact_context_audit_work_publishes_through_its_reading() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = context_audit_fixture(&root);
+        let exact = resources::audit(&root, &config, CONTEXT_SUBJECT)
+            .unwrap()
+            .read_as(resources::ContextReading::Exact)
+            .unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let work = Work::create(
+            &session,
+            &exact.resources,
+            &exact.revision(&revision).unwrap(),
+            exact.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        record_every_inspection(&root, &session, &work, &exact.resources);
+        let result = reviewed_assessment(&exact);
+        finish(&session, &work, &exact, result.clone()).unwrap();
+        drop(session);
+        let assessment = serde_json::from_value(result["assessments"][0].clone()).unwrap();
+        assert!(
+            guard_audit_controlled(
+                &root,
+                &config,
+                &revision,
+                &assessment,
+                &mut MutationPlan::default(),
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap(),
+            "the assessment publishes as the completed exact-bytes Work"
+        );
+    }
+
+    #[test]
+    fn a_reading_beyond_the_input_bound_leaves_the_other_reading_to_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        // The escape reads as ASCII bytes exactly and as one four-byte scalar semantically, so
+        // a bound can admit every exact scalar but not that one.
+        let related = "wiki/concepts/a-related-concept-whose-address-outgrows-its-subject.md";
+        write(
+            &root,
+            related,
+            "---\ntype: concept\ntitle: \"\\U0001F600\"\n---\nR.\n",
+        );
+        let subject = "wiki/documents/s.md";
+        write(
+            &root,
+            subject,
+            &format!(
+                "---\ntype: document\ntitle: {}\n---\n[R](../concepts/a-related-concept-whose-address-outgrows-its-subject.md)\n",
+                // A long title raises the smallest admissible bound into a valid configuration.
+                "T".repeat(3000)
+            ),
+        );
+        let (config, _) = bounded_config(&root, 8192, 1024);
+        let current = resources::audit(&root, &config, subject).unwrap();
+        let exact = current.read_as(resources::ContextReading::Exact).unwrap();
+        let plans = |prepared: &Prepared, max_input_bytes| {
+            Work::build_with_inspection(
+                &prepared.resources,
+                &prepared.revision("configuration").unwrap(),
+                prepared.context.clone(),
+                WorkLimits {
+                    max_input_bytes,
+                    max_result_bytes: 1024,
+                },
+                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+            )
+            .is_ok()
+        };
+        let (mut low, mut high) = (1, 1 << 20);
+        while low < high {
+            let middle = (low + high) / 2;
+            if plans(&exact, middle) {
+                high = middle;
+            } else {
+                low = middle + 1;
+            }
+        }
+        assert!(
+            low >= 4096,
+            "configuration admits no bound below 4096 bytes"
+        );
+        assert!(
+            !plans(&current, low),
+            "the semantic reading needs more than {low} bytes"
+        );
+        let (config, revision) = bounded_config(&root, low, 1024);
+        let mut current = resources::audit(&root, &config, subject).unwrap();
+        let exact = current.read_as(resources::ContextReading::Exact).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let work = Work::create(
+            &session,
+            &exact.resources,
+            &exact.revision(&revision).unwrap(),
+            exact.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        drop(session);
+        assert_eq!(
+            expected(&root, &mut current, &config, &revision).unwrap(),
+            work
+        );
+        assert_eq!(current.reading(), resources::ContextReading::Exact);
+    }
+
+    #[test]
+    fn queue_results_are_checked_against_the_work_their_task_continues() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.yaml");
+        std::fs::write(&config_path, "vault:\n  root: vault\n  locale: en\nidentity:\n  name: Tester\n  email: tester@example.com\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n").unwrap();
+        let (mut config, config_revision) =
+            lk_core::config::Config::load_with_revision(&config_path).unwrap();
+        // Full-context extraction reads every match without screening, so context reports
+        // ready scope for the supplied recipes.
+        config.execution.work.extraction_context =
+            lk_core::execution::ExtractionContext::FullContext;
+        std::fs::create_dir_all(directory.path().join("vault")).unwrap();
+        let root = directory.path().join("vault").canonicalize().unwrap();
+        let target = "wiki/documents/source.md";
+        let owner = "wiki/concepts/canonical.md";
+        let task = lk_queue::QueueLlmClient::new(root.join(".lorekeeper/queue")).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            lk_queue::ExtractConceptsRequest {
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                rss_original: None,
+                text: "Selected Candidate has source-scoped evidence.".into(),
+                source_id: "notes".into(),
+                source_type: lk_core::config::SourceType::Manual,
+                date: jiff::civil::date(2026, 10, 20),
+                focus: None,
+                locale: lk_core::i18n::Locale::En,
+                categories: vec![],
+                target: lk_queue::TaskTarget {
+                    vault_path: target.into(),
+                    kind: lk_queue::TargetKind::DocumentConcepts,
+                    anchor: "## Related Concepts".into(),
+                },
+            },
+        );
+        let source = format!(
+            "---\ntype: document\nllm_inputs:\n  concepts: {}\n---\n## Content\nSelected Candidate has attributed source material.\n\n## Related Concepts\n",
+            task.cache_hash
+        );
+        write(&root, target, &source);
+        let owner_raw = "---\ntype: concept\ntitle: Selected Candidate\nsource_count: 1\n---\n## Synthesis\nExisting scoped interpretation.\n";
+        write(&root, owner, owner_raw);
+        write(
+            &root,
+            ".lorekeeper/queue/fixture.jsonl",
+            &serde_json::to_string(&task).unwrap(),
+        );
+        let discovery = vec![lk_core::discovery::DiscoveryQuery {
+            query: "Selected Candidate".into(),
+            phrase: true,
+            spacing: false,
+        }];
+        let drafted = |prepared: &Prepared| {
+            serde_json::to_value(lk_queue::TaskResult {
+                selection: None,
+                concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+                task_id: task.task_id.clone(),
+                cache_hash: task.cache_hash.clone(),
+                target_revision: file_revision(&source),
+                context_revision: prepared.revision(&config_revision).unwrap(),
+                discovery: discovery.clone(),
+                target: task.target.clone(),
+                date: jiff::civil::date(2026, 10, 20),
+                concepts: vec![],
+            })
+            .unwrap()
+        };
+        let apply = |result| {
+            prepare_queue_publication(&root, &config, &config_revision, &task.task_id, result)
+        };
+        let semantic =
+            resources::task_with_discovery(&root, &config, &task.task_id, &discovery).unwrap();
+        assert!(
+            semantic
+                .resources
+                .iter()
+                .any(|resource| resource.address == owner
+                    && resource.authority == lk_core::semantic::SemanticAuthority::Context)
+        );
+        let exact = semantic.read_as(resources::ContextReading::Exact).unwrap();
+        assert_ne!(
+            exact.revision(&config_revision).unwrap(),
+            semantic.revision(&config_revision).unwrap()
+        );
+        let session = MutationSession::acquire(&root).unwrap();
+        Work::create(
+            &session,
+            &exact.resources,
+            &exact.revision(&config_revision).unwrap(),
+            exact.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        drop(session);
+        let rejection = |result| {
+            apply(result)
+                .err()
+                .unwrap()
+                .downcast_ref::<super::super::queue::application::PublicationRejection>()
+                .map(|rejection| rejection.kind)
+        };
+        assert_eq!(
+            rejection(drafted(&exact)),
+            Some(RejectionKind::EvidenceScopeChanged),
+            "a result drafted from the stored exact-bytes Work reaches that Work's completion check"
+        );
+        assert_eq!(
+            rejection(drafted(&semantic)),
+            Some(RejectionKind::SemanticContextChanged),
+            "the task continues its exact-bytes Work"
+        );
+
+        write(
+            &root,
+            owner,
+            &owner_raw.replace("source_count: 1", "source_count: 2"),
+        );
+        assert!(
+            apply(drafted(&semantic)).is_ok(),
+            "once a page it read changes, the semantic reading continues as whole input"
+        );
+        assert_eq!(
+            rejection(drafted(&exact)),
+            Some(RejectionKind::SemanticContextChanged)
         );
     }
 
