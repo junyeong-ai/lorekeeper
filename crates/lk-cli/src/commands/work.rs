@@ -5789,17 +5789,35 @@ mod tests {
         finish(&session, &work, &exact, result.clone()).unwrap();
         drop(session);
         let assessment = serde_json::from_value(result["assessments"][0].clone()).unwrap();
+        let mut plan = MutationPlan::default();
         assert!(
             guard_audit_controlled(
                 &root,
                 &config,
                 &revision,
                 &assessment,
-                &mut MutationPlan::default(),
+                &mut plan,
                 &lk_vault::ReadControl::default(),
             )
             .unwrap(),
             "the assessment publishes as the completed exact-bytes Work"
+        );
+        let steps = serde_json::to_value(&plan).unwrap()["steps"].clone();
+        let steps = steps.as_array().unwrap();
+        let receipt = Path::new(".lorekeeper/work")
+            .join(&work.plan.id)
+            .join("publication.json");
+        assert!(
+            steps.iter().any(|step| step["kind"] == "create"
+                && Path::new(step["path"].as_str().unwrap()) == receipt),
+            "publication journals that Work's receipt"
+        );
+        assert!(
+            steps.iter().any(|step| step["kind"] == "edit"
+                && step["path"] == CONTEXT_RELATED
+                && step["before"] == CONTEXT_RELATED_RAW
+                && step["after"] == CONTEXT_RELATED_RAW),
+            "publication guards the related page's exact bytes"
         );
     }
 
