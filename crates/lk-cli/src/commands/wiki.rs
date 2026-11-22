@@ -652,15 +652,22 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             adopt_screening,
             dry_run,
         } => {
-            let (config, config_revision) = super::load_config_with_revision(&find_config(opts)?)?;
+            let config_path = find_config(opts)?;
+            let (config, config_revision) = super::load_config_with_revision(&config_path)?;
+            let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
             if adopt_screening {
                 let bytes = std::fs::read(&file).map_err(|error| miette::miette!("{error}"))?;
                 let value = super::json::decode_object(&bytes)
                     .map_err(|error| miette::miette!("{error}"))?;
                 let request =
                     serde_json::from_value(value).map_err(|error| miette::miette!("{error}"))?;
-                let result =
-                    super::audit::adopt_discovery(&config, &config_revision, request, dry_run)?;
+                let result = super::audit::adopt_discovery(
+                    &config,
+                    &config_revision,
+                    &pin,
+                    request,
+                    dry_run,
+                )?;
                 let mut output =
                     serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))?;
                 output["dry_run"] = serde_json::json!(dry_run);
@@ -672,7 +679,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             )
             .map_err(|error| miette::miette!("{error}"))?;
             let root = config.vault.root_path();
-            let session = crate::commands::publication::acquire_mutation_now(&root)
+            let session = crate::commands::publication::acquire_mutation_now(&root, &pin)
                 .map_err(|error| miette::miette!("{error}"))?;
             let root = session.root().to_path_buf();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
@@ -717,13 +724,15 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::AuditSelect { file } => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, pin) = super::load_pinned_config(opts)?;
             let output = serde_json::from_slice(
                 &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
             )
             .map_err(|error| miette::miette!("{error}"))?;
-            let session =
-                crate::commands::publication::acquire_mutation_now(&config.vault.root_path())?;
+            let session = crate::commands::publication::acquire_mutation_now(
+                &config.vault.root_path(),
+                &pin,
+            )?;
             let pages = lk_graph::scan::scan_vault(session.root(), config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
             let work = config
@@ -766,7 +775,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::Curate { file, dry_run } => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, pin) = super::load_pinned_config(opts)?;
             let request: lk_vault::CurationPlan = serde_json::from_slice(
                 &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
             )
@@ -779,9 +788,11 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                     request,
                 )
             } else {
-                let session =
-                    crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
-                        .map_err(|error| miette::miette!("{error}"))?;
+                let session = crate::commands::publication::acquire_mutation_now(
+                    &config.vault.root_path(),
+                    &pin,
+                )
+                .map_err(|error| miette::miette!("{error}"))?;
                 lk_vault::curate(
                     &session,
                     &config.vault.dirs,
@@ -853,9 +864,9 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::Prepare => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, pin) = super::load_pinned_config(opts)?;
             let session =
-                crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
+                crate::commands::publication::acquire_mutation_now(&config.vault.root_path(), &pin)
                     .map_err(|error| miette::miette!("{error}"))?;
             let snapshot = prepare_discovery_snapshot(
                 &session,
@@ -940,11 +951,11 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             Ok(())
         }
         WikiCommand::Evidence { paths, archive } => {
-            let config = load_config(&find_config(opts)?)?;
+            let (config, pin) = super::load_pinned_config(opts)?;
             let root = config.vault.root_path();
             let mutation = if archive {
                 Some(
-                    crate::commands::publication::acquire_mutation_now(&root)
+                    crate::commands::publication::acquire_mutation_now(&root, &pin)
                         .map_err(|e| miette::miette!("vault mutation: {e}"))?,
                 )
             } else {

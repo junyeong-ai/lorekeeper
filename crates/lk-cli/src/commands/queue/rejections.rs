@@ -692,6 +692,7 @@ fn load_proposals_controlled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ConfigurationPin;
 
     fn receipt() -> Receipt {
         Receipt {
@@ -1098,8 +1099,13 @@ mod tests {
             })
             .unwrap(),
         );
-        let summary =
-            super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), false).unwrap();
+        let summary = super::super::prune_queue(
+            &root,
+            &ConfigurationPin::Absent,
+            &root.join(".lorekeeper/queue"),
+            false,
+        )
+        .unwrap();
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(
             std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
@@ -1266,8 +1272,13 @@ mod tests {
             write(&root, history_path, &raw);
             for dry_run in [true, false] {
                 assert!(
-                    super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), dry_run)
-                        .is_err()
+                    super::super::prune_queue(
+                        &root,
+                        &ConfigurationPin::Absent,
+                        &root.join(".lorekeeper/queue"),
+                        dry_run
+                    )
+                    .is_err()
                 );
                 assert_eq!(std::fs::read_to_string(root.join(pending)).unwrap(), "\n");
                 assert_eq!(
@@ -1282,16 +1293,26 @@ mod tests {
         }
         write(&root, history_path, &history);
         assert_eq!(
-            super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), true)
-                .unwrap()
-                .files_deleted,
+            super::super::prune_queue(
+                &root,
+                &ConfigurationPin::Absent,
+                &root.join(".lorekeeper/queue"),
+                true
+            )
+            .unwrap()
+            .files_deleted,
             1
         );
         assert!(root.join(pending).exists());
         assert_eq!(
-            super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), false)
-                .unwrap()
-                .files_deleted,
+            super::super::prune_queue(
+                &root,
+                &ConfigurationPin::Absent,
+                &root.join(".lorekeeper/queue"),
+                false
+            )
+            .unwrap()
+            .files_deleted,
             1
         );
         assert!(!root.join(pending).exists());
@@ -1309,7 +1330,15 @@ mod tests {
             super::super::classify_task(&root, &task, &mut BTreeMap::new()).unwrap(),
             super::super::TaskStatus::Unreadable
         );
-        assert!(super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), true).is_err());
+        assert!(
+            super::super::prune_queue(
+                &root,
+                &ConfigurationPin::Absent,
+                &root.join(".lorekeeper/queue"),
+                true
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(root.join(pending)).unwrap(),
             history
@@ -1334,7 +1363,13 @@ mod tests {
         write(&root, pending, "\n");
         for dry_run in [true, false] {
             assert!(
-                super::super::prune_queue(&root, &root.join(".lorekeeper/queue"), dry_run).is_err()
+                super::super::prune_queue(
+                    &root,
+                    &ConfigurationPin::Absent,
+                    &root.join(".lorekeeper/queue"),
+                    dry_run
+                )
+                .is_err()
             );
             assert_eq!(std::fs::read_to_string(root.join(pending)).unwrap(), "\n");
             assert_eq!(

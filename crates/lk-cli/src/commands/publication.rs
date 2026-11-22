@@ -4,10 +4,17 @@ use std::sync::Arc;
 
 use miette::IntoDiagnostic;
 
-pub(super) fn acquire_mutation_now(root: &Path) -> miette::Result<lk_vault::MutationSession> {
+/// Acquire without waiting. `pin` is the configuration the caller derived its writes from,
+/// or `Absent` when it loaded none.
+pub(super) fn acquire_mutation_now(
+    root: &Path,
+    pin: &super::ConfigurationPin,
+) -> miette::Result<lk_vault::MutationSession> {
+    pin.validate()?;
     super::workflow::validate_root(root)?;
     let claim = lk_vault::MutationClaim::acquire(root).into_diagnostic()?;
-    finish_claim(claim, || Ok(()))
+    let pin = pin.clone();
+    finish_claim(claim, move || pin.validate())
 }
 
 /// The selection checked around acquisition and recovery also guards every publication

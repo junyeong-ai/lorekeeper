@@ -103,7 +103,7 @@ pub(super) fn run(
     task_ids: Vec<String>,
     include_content: bool,
 ) -> miette::Result<()> {
-    let root = resolve_vault_root(opts, root)?;
+    let (root, _) = resolve_vault_root(opts, root)?;
     let packet = build(&root, &task_ids, include_content)?;
     // Emit nothing until all source, target and pending-task guards have passed.
     println!(

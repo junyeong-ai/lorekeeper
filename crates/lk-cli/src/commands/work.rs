@@ -1743,11 +1743,12 @@ fn require_current_roster<'a>(
 /// Store the completely decided roster a drafter is about to bind, unless it already is.
 fn seal_roster(
     root: &Path,
+    pin: &super::ConfigurationPin,
     selection: &selection::Selection,
 ) -> miette::Result<lk_queue::ExtractionSelection> {
     let seal = selection.seal()?;
     if !seal.is_published(root)? {
-        let session = super::publication::acquire_mutation_now(root)?;
+        let session = super::publication::acquire_mutation_now(root, pin)?;
         let mut plan = lk_vault::MutationPlan::default();
         seal.plan(session.root(), &mut plan)?;
         session.apply(plan).into_diagnostic()?;
@@ -4314,8 +4315,10 @@ fn progress_value(
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 fn update_inspection_attempt(
     root: &Path,
+    pin: &super::ConfigurationPin,
     config: &lk_core::config::Config,
     config_revision: &str,
     work_id: &str,
@@ -4339,14 +4342,16 @@ fn update_inspection_attempt(
     if dry_run {
         prepare(root)?.validate_addresses(root).into_diagnostic()?;
     } else {
-        let session = super::publication::acquire_mutation_now(root)?;
+        let session = super::publication::acquire_mutation_now(root, pin)?;
         session.apply(prepare(session.root())?).into_diagnostic()?;
     }
     Ok(())
 }
 
 pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<()> {
-    let (config, config_revision) = load_config_with_revision(&find_config(opts)?)?;
+    let config_path = find_config(opts)?;
+    let (config, config_revision) = load_config_with_revision(&config_path)?;
+    let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
     let root = config.vault.root_path().canonicalize().into_diagnostic()?;
     let output = match command {
         #[cfg(unix)]
@@ -4369,7 +4374,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     .validate_addresses(&root)
                     .into_diagnostic()?;
             } else {
-                let session = super::publication::acquire_mutation_now(&root)?;
+                let session = super::publication::acquire_mutation_now(&root, &pin)?;
                 session.apply(prepare(session.root())?).into_diagnostic()?;
             }
             json!({"task_id":task_id,"input_revision":input_revision,"dry_run":dry_run})
@@ -4437,7 +4442,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     .validate_addresses(&root)
                     .into_diagnostic()?;
             } else {
-                let session = super::publication::acquire_mutation_now(&root)?;
+                let session = super::publication::acquire_mutation_now(&root, &pin)?;
                 session.apply(prepare(session.root())?).into_diagnostic()?;
             }
             json!({"task_id":task_id,"path":path,"input_revision":input_revision,"dry_run":dry_run})
@@ -4459,7 +4464,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     .validate_addresses(&root)
                     .into_diagnostic()?;
             } else {
-                let session = super::publication::acquire_mutation_now(&root)?;
+                let session = super::publication::acquire_mutation_now(&root, &pin)?;
                 session.apply(prepare(session.root())?).into_diagnostic()?;
             }
             json!({"task_id":task_id,"dry_run":dry_run})
@@ -4495,7 +4500,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                     return Err(miette::miette!("{}", source_blocked_reason(&work_id)));
                 }
                 ScreeningPreparation::Source { work, mut prepared } => {
-                    let session = super::publication::acquire_mutation_now(&root)?;
+                    let session = super::publication::acquire_mutation_now(&root, &pin)?;
                     persist_prepared(&session, &config, &config_revision, &mut prepared)?;
                     json!({
                         "status":"needs-source-observations",
@@ -4529,7 +4534,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                         "deferred"
                     };
                     let selection = (status == "ready")
-                        .then(|| seal_roster(&root, &screening.selection))
+                        .then(|| seal_roster(&root, &pin, &screening.selection))
                         .transpose()?;
                     json!({"status":status,"admission":admission,"progress":progress,
                         "request":request,"hold":hold,"selection":selection})
@@ -4543,7 +4548,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             if output.task_id != task_id {
                 return Err(miette::miette!("screening output answers another task"));
             }
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let screening = current_screening(session.root(), &config, &config_revision, &task_id)?
                 .into_candidates()?;
             let request = screening.selection.request_for(&output)?;
@@ -4554,7 +4559,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             json!({"recorded_decisions":recorded,"next_command":["lore","work","select","--task-id",task_id]})
         }
         WorkCommand::SourcePlan { task_id } => {
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let mut prepared = resources::source_task(&root, &config, &task_id)?;
             let work = persist_prepared(&session, &config, &config_revision, &mut prepared)?;
             progress(&work, &root, &prepared, 20, 0)?
@@ -4562,7 +4567,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         WorkCommand::Discover { task_id, file } => {
             let request = serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             discovery::record(&session, &task_id, request)?;
             json!({"recorded":true,"task_id":task_id})
         }
@@ -4585,7 +4590,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             path,
             discovery_file,
         } => {
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let discovery = discovery_file.as_deref().map(load_discovery).transpose()?;
             let mut prepared = match (task_id, path) {
                 (Some(id), None) => {
@@ -4637,7 +4642,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
                 mutation.validate_addresses(&root).into_diagnostic()?;
                 preview
             } else {
-                let session = super::publication::acquire_mutation_now(&root)?;
+                let session = super::publication::acquire_mutation_now(&root, &pin)?;
                 let (mutation, preview) = prepare(session.root())?;
                 session.apply(mutation).into_diagnostic()?;
                 preview
@@ -4660,6 +4665,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             update_inspection_attempt(
                 &root,
+                &pin,
                 &config,
                 &config_revision,
                 &work_id,
@@ -4678,6 +4684,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             update_inspection_attempt(
                 &root,
+                &pin,
                 &config,
                 &config_revision,
                 &work_id,
@@ -4709,7 +4716,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let output: WorkOutput =
                 serde_json::from_slice(&std::fs::read(file).into_diagnostic()?)
                     .into_diagnostic()?;
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let (work, prepared) = load(&root, &config, &config_revision, &output.work_id)?;
             let mut mutation = work.plan_observation(&session, output, &prepared.resources)?;
             prepared.guard_pages(&mut mutation);
@@ -4723,7 +4730,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             from_work,
             from_node,
         } => {
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             let prior = Work::load(&root, &from_work)?;
             let mut mutation =
@@ -4740,7 +4747,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         } => {
             let result = super::json::decode_object(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
-            let session = super::publication::acquire_mutation_now(&root)?;
+            let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
             #[cfg(unix)]
             {
@@ -5695,6 +5702,7 @@ mod tests {
         let held = next.unwrap()["node_id"].as_str().unwrap().to_owned();
         update_inspection_attempt(
             &root,
+            &super::super::ConfigurationPin::Absent,
             &config,
             &revision,
             &work.plan.id,
@@ -7579,6 +7587,7 @@ mod tests {
         );
         let binding = seal_roster(
             &root,
+            &super::super::ConfigurationPin::Absent,
             &current_screening(&root, &config, &config_revision, &task.task_id)
                 .unwrap()
                 .into_candidates()

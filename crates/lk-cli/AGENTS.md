@@ -19,7 +19,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   another path. A workflow also pins its original root selector, working path and
   directory identity. Bind parent and child I/O to that working path; validate selection
   before and after waiting/recovery and before host/publication; mutation sessions carry
-  their acquisition check as the publication precondition. Same-directory aliases
+  their acquisition check as the publication precondition, and every writer passes the
+  pin of the configuration it loaded (`Absent` without one). Same-directory aliases
   remain valid; another directory or incomplete inherited context refuses. Root context
   validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
   retain unfinished work.

@@ -234,7 +234,10 @@ fn revision(raw: &str) -> String {
 pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miette::Result<()> {
     let config_path = super::find_config(opts)?;
     let config_raw = read(&config_path)?;
-    let config = super::load_config(&config_path)?;
+    let (config, config_revision) = super::load_config_with_revision(&config_path)?;
+    if config_revision != revision(&config_raw) {
+        return Err(failure("configuration changed during migration"));
+    }
     verify_config(&config_path, &config_raw)?;
     let (path, applying, dry_run) = match &command {
         IdentityCommand::Plan { manifest, .. } | IdentityCommand::Check { manifest } => {
@@ -246,8 +249,9 @@ pub async fn run(opts: &super::GlobalOptions, command: IdentityCommand) -> miett
     };
     // Acquire before observing on apply; read-only commands never recover or lock.
     let session = if applying && !dry_run {
+        let pin = super::ConfigurationPin::from_loaded(config_path.clone(), config_revision);
         Some(
-            crate::commands::publication::acquire_mutation_now(&config.vault.root_path())
+            crate::commands::publication::acquire_mutation_now(&config.vault.root_path(), &pin)
                 .map_err(failure)?,
         )
     } else {

@@ -79,7 +79,7 @@ pub(super) fn run(
     opts: &crate::commands::GlobalOptions,
     root: Option<PathBuf>,
 ) -> miette::Result<()> {
-    let root = resolve_vault_root(opts, root)?;
+    let (root, _) = resolve_vault_root(opts, root)?;
     let state = inspect(&root)?;
     let ok = state.is_settled();
     let report = serde_json::json!({

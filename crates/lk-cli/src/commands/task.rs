@@ -521,8 +521,12 @@ impl IntentPlane {
                     lk_task::PlaneLock::hold(&vault_root).map_err(|e| miette::miette!("{e}"))?,
                 );
                 pin.validate()?;
-                mutation = Some(claim.into_session().map_err(|e| miette::miette!("{e}"))?);
+                let session = claim.into_session().map_err(|e| miette::miette!("{e}"))?;
                 pin.validate()?;
+                let selection = pin.clone();
+                mutation = Some(session.with_precondition(move || {
+                    selection.validate().map_err(|error| error.to_string())
+                }));
             }
             false => {
                 if let Err(why) = lk_task::PlaneLock::is_holdable(&vault_root) {

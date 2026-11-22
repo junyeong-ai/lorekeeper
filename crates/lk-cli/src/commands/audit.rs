@@ -33,6 +33,7 @@ fn into_graph_error(error: miette::Report) -> lk_graph::GraphError {
 pub(super) fn adopt_discovery(
     config: &lk_core::config::Config,
     config_revision: &str,
+    pin: &super::ConfigurationPin,
     request: lk_graph::audit::selection::AdoptionRequest,
     dry_run: bool,
 ) -> miette::Result<lk_graph::audit::selection::Adoption> {
@@ -48,7 +49,10 @@ pub(super) fn adopt_discovery(
         let session = if dry_run {
             None
         } else {
-            Some(super::publication::acquire_mutation_now(&requested_root)?)
+            Some(super::publication::acquire_mutation_now(
+                &requested_root,
+                pin,
+            )?)
         };
         let root = session
             .as_ref()
@@ -96,7 +100,7 @@ pub(super) fn adopt_discovery(
     }
     #[cfg(not(unix))]
     {
-        let _ = (config, config_revision, request, dry_run);
+        let _ = (config, config_revision, pin, request, dry_run);
         Err(miette::miette!(
             "guarded audit discovery adoption requires Unix native processing contracts"
         ))

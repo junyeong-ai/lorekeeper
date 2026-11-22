@@ -147,6 +147,15 @@ pub fn load_config(path: &Path) -> miette::Result<lk_core::config::Config> {
 pub(super) const CONFIG_REVISION_ENV: &str = "LORE_CONFIG_REVISION";
 pub(super) const EXECUTION_PROFILE_ENV: &str = "LORE_EXECUTION_PROFILE";
 
+/// The selected configuration and the pin its writers' sessions revalidate before publishing.
+pub(super) fn load_pinned_config(
+    opts: &GlobalOptions,
+) -> miette::Result<(lk_core::config::Config, ConfigurationPin)> {
+    let path = find_config(opts)?;
+    let (config, revision) = load_config_with_revision(&path)?;
+    Ok((config, ConfigurationPin::from_loaded(path, revision)))
+}
+
 pub(super) fn load_config_with_revision(
     path: &Path,
 ) -> miette::Result<(lk_core::config::Config, String)> {

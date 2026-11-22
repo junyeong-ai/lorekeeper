@@ -11,9 +11,9 @@ pub(super) fn run(
     task_id: String,
     dry_run: bool,
 ) -> miette::Result<()> {
-    let root = resolve_vault_root(opts, root)?;
+    let (root, pin) = resolve_vault_root(opts, root)?;
     let session = (!dry_run)
-        .then(|| crate::commands::publication::acquire_mutation_now(&root))
+        .then(|| crate::commands::publication::acquire_mutation_now(&root, &pin))
         .transpose()
         .map_err(|e| miette::miette!("{e}"))?;
     let root = session

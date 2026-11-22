@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use lk_queue::{QueueFile, QueueTask};
 use miette::IntoDiagnostic;
 
-use super::{find_config, load_config, load_config_with_revision};
+use super::{find_config, load_config_with_revision};
 
 #[derive(clap::Subcommand)]
 pub enum QueueCommand {
@@ -241,7 +241,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
             include_content,
         } => packet::run(opts, root, task_ids, include_content),
         QueueCommand::Status { root, status, json } => {
-            let vault_root = resolve_vault_root(opts, root)?;
+            let (vault_root, _) = resolve_vault_root(opts, root)?;
             print_status(&queue_status(&vault_root, status)?, json);
             Ok(())
         }
@@ -260,15 +260,23 @@ pub async fn run(opts: &super::GlobalOptions, cmd: QueueCommand) -> miette::Resu
     }
 }
 
+/// The vault a queue command addresses and the configuration its writes revalidate; an
+/// explicit root loads none.
 fn resolve_vault_root(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
-) -> miette::Result<PathBuf> {
-    let root = match root {
-        Some(r) => super::resolve_root_override(r),
-        None => Ok(load_config(&find_config(opts)?)?.vault.root_path()),
-    }?;
-    super::workflow::bind_root(root)
+) -> miette::Result<(PathBuf, super::ConfigurationPin)> {
+    let (root, pin) = match root {
+        Some(root) => (
+            super::resolve_root_override(root)?,
+            super::ConfigurationPin::Absent,
+        ),
+        None => {
+            let (config, pin) = super::load_pinned_config(opts)?;
+            (config.vault.root_path(), pin)
+        }
+    };
+    Ok((super::workflow::bind_root(root)?, pin))
 }
 
 pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTask> {
@@ -1592,7 +1600,7 @@ pub(crate) fn queue_load_controlled(
 }
 
 async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Result<()> {
-    let vault_root = resolve_vault_root(opts, root)?;
+    let (vault_root, _) = resolve_vault_root(opts, root)?;
     let QueueLoad {
         work: current,
         unreadable,
@@ -1768,9 +1776,14 @@ struct PruneSummary {
 /// A file with nothing retained held only dead tasks, so it never edited a page and there
 /// is nothing to archive; it is deleted. Queue and sidecar retirement share one guarded
 /// journal prepared before mutation; unchanged files remain byte-identical.
-fn prune_queue(vault_root: &Path, queue_dir: &Path, dry_run: bool) -> miette::Result<PruneSummary> {
+fn prune_queue(
+    vault_root: &Path,
+    pin: &super::ConfigurationPin,
+    queue_dir: &Path,
+    dry_run: bool,
+) -> miette::Result<PruneSummary> {
     let session = (!dry_run)
-        .then(|| crate::commands::publication::acquire_mutation_now(vault_root))
+        .then(|| crate::commands::publication::acquire_mutation_now(vault_root, pin))
         .transpose()
         .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
     prune_queue_with_session(vault_root, queue_dir, session.as_ref())
@@ -1805,9 +1818,9 @@ pub(super) async fn prune(
     json: bool,
     dry_run: bool,
 ) -> miette::Result<()> {
-    let vault_root = resolve_vault_root(opts, root)?;
+    let (vault_root, pin) = resolve_vault_root(opts, root)?;
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
-    let summary = prune_queue(&vault_root, &queue_dir, dry_run)?;
+    let summary = prune_queue(&vault_root, &pin, &queue_dir, dry_run)?;
     report_prune(summary, json, dry_run)
 }
 
@@ -2434,6 +2447,7 @@ fn classify_parsed_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::ConfigurationPin;
     use lk_queue::{TargetKind, TaskKind, TaskTarget};
     use strum::IntoEnumIterator;
     use tempfile::TempDir;
@@ -2450,16 +2464,18 @@ mod tests {
         assert!(matches!(claim, lk_queue::QueueClaim::Held(_)));
         let pending = queue.join("empty.jsonl");
         std::fs::write(&pending, "").unwrap();
-        assert!(prune_queue(dir.path(), &queue, false).is_err());
+        assert!(prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, false).is_err());
         assert!(pending.exists());
         assert_eq!(
-            prune_queue(dir.path(), &queue, true).unwrap().files_deleted,
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, true)
+                .unwrap()
+                .files_deleted,
             1
         );
         assert!(pending.exists());
         drop(claim);
         assert_eq!(
-            prune_queue(dir.path(), &queue, false)
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, false)
                 .unwrap()
                 .files_deleted,
             1
@@ -2517,12 +2533,15 @@ mod tests {
         .to_string();
         std::fs::write(&recipe, &original).unwrap();
 
-        assert!(prune_queue(root, &queue, false).is_err());
+        assert!(prune_queue(root, &ConfigurationPin::Absent, &queue, false).is_err());
         let claim = lk_queue::claim_queue(&queue).unwrap();
         assert!(matches!(claim, lk_queue::QueueClaim::Held(_)));
         let error = super::prune_with_session(&session, false).unwrap_err();
         assert!(error.to_string().contains("another queue writer"));
-        assert_eq!(prune_queue(root, &queue, true).unwrap(), Default::default());
+        assert_eq!(
+            prune_queue(root, &ConfigurationPin::Absent, &queue, true).unwrap(),
+            Default::default()
+        );
         assert_eq!(std::fs::read_to_string(&recipe).unwrap(), original);
         drop(claim);
 
@@ -2548,7 +2567,7 @@ mod tests {
         std::fs::write(&queue, "not a directory").unwrap();
         assert!(pending_queue_files(&queue).is_err());
         assert!(queue_load(dir.path()).is_err());
-        assert!(prune_queue(dir.path(), &queue, true).is_err());
+        assert!(prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, true).is_err());
         assert!(
             synthesis::apply(dir.path(), &queue, &config, "config-revision", true, None).is_err()
         );
@@ -2599,7 +2618,8 @@ mod tests {
         assert_eq!(statuses, vec!["current", "unreadable"]);
 
         // Retained, not pruned: repairing the page brings the task back.
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.kept_unreadable, 1);
         assert_eq!(summary.kept_current, 1);
         assert_eq!(
@@ -3118,7 +3138,8 @@ mod tests {
                 let queue = dir.path().join(".lorekeeper/queue");
                 let pending = write_queue_file(&queue, "run.jsonl", &[task]);
                 let before = std::fs::read(&pending).unwrap();
-                let report = prune_queue(dir.path(), &queue, false).unwrap();
+                let report =
+                    prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, false).unwrap();
                 assert_eq!(report.kept_unreadable, 1);
                 assert_eq!(report.files_archived, 0);
                 assert_eq!(report.files_deleted, 0);
@@ -3349,7 +3370,8 @@ mod tests {
             ],
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(
             summary,
             PruneSummary {
@@ -3492,11 +3514,12 @@ mod tests {
             &[task("daily/s/2026-05-23.md", "live")],
         );
 
-        let dry = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        let dry = prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, true).unwrap();
         assert_eq!(dry.files_archived, 1, "dry-run reports the same retirement");
         assert!(file.exists(), "dry-run archives nothing");
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.retired_done, 1);
         assert_eq!(summary.files_archived, 1);
         assert_eq!(summary.kept_current, 0);
@@ -3537,7 +3560,8 @@ mod tests {
             ],
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.files_archived, 1);
         assert_eq!(summary.pruned_stale, 1);
         assert_eq!(summary.pruned_missing_target, 1);
@@ -3591,7 +3615,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(prune_queue(dir.path(), &queue_dir, false).is_err());
+        assert!(prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).is_err());
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
             before,
@@ -3621,14 +3645,14 @@ mod tests {
             before.push(std::fs::read_to_string(path).unwrap());
         }
         assert_eq!(
-            prune_queue(dir.path(), &queue_dir, true)
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, true)
                 .unwrap()
                 .files_archived,
             2
         );
         assert!(!processed.join("run.1.jsonl").exists());
         assert_eq!(
-            prune_queue(dir.path(), &queue_dir, false)
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false)
                 .unwrap()
                 .files_archived,
             2
@@ -3647,7 +3671,7 @@ mod tests {
         archived.sort();
         assert_eq!(archived, before);
         assert_eq!(
-            prune_queue(dir.path(), &queue_dir, false)
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false)
                 .unwrap()
                 .files_archived,
             0
@@ -3682,7 +3706,8 @@ mod tests {
             ],
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.retired_done, 1);
         assert_eq!(summary.kept_current, 1);
         assert_eq!(summary.pruned_missing_target, 1);
@@ -3705,7 +3730,8 @@ mod tests {
             &[task("daily/s/2026-05-23.md", "x")], // missing-target
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(summary.files_deleted, 1);
         assert!(!file.exists(), "an all-dead file must be deleted");
@@ -3743,7 +3769,7 @@ mod tests {
         )
         .unwrap();
 
-        let summary = prune_queue(dir.path(), &queue_dir, false)
+        let summary = prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false)
             .expect("a file that raced away is not a failure");
         assert_eq!(
             summary.pruned_missing_target, 1,
@@ -3776,7 +3802,8 @@ mod tests {
             &[task("daily/s/2026-05-23.md", "live")],
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.kept_unreadable, 1);
         assert_eq!(summary.files_archived, 0, "not retired");
         assert!(
@@ -3818,7 +3845,8 @@ mod tests {
             &[task("daily/s/2026-05-23.md", "stale-hash")],
         );
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.kept_unparseable, 1);
         assert_eq!(summary.pruned_stale, 1, "the healthy file is still pruned");
         assert_eq!(
@@ -3836,11 +3864,12 @@ mod tests {
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
         let file = write_queue_file(&queue_dir, "run-1.jsonl", &[]);
 
-        let dry = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        let dry = prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, true).unwrap();
         assert_eq!(dry.files_deleted, 1, "dry-run reports the same retirement");
         assert!(file.exists(), "and deletes nothing");
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.files_deleted, 1);
         assert!(!file.exists());
     }
@@ -3861,7 +3890,8 @@ mod tests {
         );
         let before = std::fs::read_to_string(&file).unwrap();
 
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary.kept_current, 1);
         assert_eq!(summary.files_rewritten, 0);
         assert_eq!(summary.files_deleted, 0);
@@ -3879,7 +3909,7 @@ mod tests {
         );
         let before = std::fs::read_to_string(&file).unwrap();
 
-        let summary = prune_queue(dir.path(), &queue_dir, true).unwrap();
+        let summary = prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, true).unwrap();
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(
             summary.files_deleted, 1,
@@ -3893,7 +3923,8 @@ mod tests {
     fn prune_without_queue_dir_is_a_clean_noop() {
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
-        let summary = prune_queue(dir.path(), &queue_dir, false).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
         assert_eq!(summary, PruneSummary::default());
     }
 }

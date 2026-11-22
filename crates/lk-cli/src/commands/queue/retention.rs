@@ -390,7 +390,12 @@ mod tests {
             std::fs::rename(&queue, &destination).unwrap();
             std::os::unix::fs::symlink(&destination, &queue).unwrap();
             for dry_run in [true, false] {
-                let result = super::super::prune_queue(&fixture.root, &queue, dry_run);
+                let result = super::super::prune_queue(
+                    &fixture.root,
+                    &crate::commands::ConfigurationPin::Absent,
+                    &queue,
+                    dry_run,
+                );
                 if external {
                     assert!(result.is_err());
                     assert!(!destination.join(".lock").exists());
@@ -689,6 +694,7 @@ mod tests {
             for dry_run in [true, false] {
                 let summary = super::super::prune_queue(
                     &fixture.root,
+                    &crate::commands::ConfigurationPin::Absent,
                     &fixture.root.join(".lorekeeper/queue"),
                     dry_run,
                 )
@@ -974,6 +980,7 @@ mod tests {
                 assert!(
                     super::super::prune_queue(
                         &fixture.root,
+                        &crate::commands::ConfigurationPin::Absent,
                         &fixture.root.join(".lorekeeper/queue"),
                         dry_run
                     )
