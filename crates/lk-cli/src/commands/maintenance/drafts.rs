@@ -78,7 +78,8 @@ fn inventory(entry: PathBuf) -> miette::Result<Option<Draft>> {
 /// The caller holds the workflow lease and passes its mutation session; without a session
 /// this only reports what a removal would cover. Drafts are not journaled: an interrupted
 /// run leaves older files that the next run removes, and a file written meanwhile keeps
-/// its draft.
+/// its draft. The session's precondition runs before each draft is removed, so a retention
+/// changed during the run refuses instead of applying the superseded one.
 pub(super) fn prune(
     root: &Path,
     session: Option<&lk_vault::MutationSession>,
@@ -101,11 +102,16 @@ pub(super) fn prune(
             report.unsupported += 1;
             continue;
         };
-        if draft.newest.is_some_and(|newest| newest >= cutoff)
-            || (session.is_some() && !remove(&draft)?)
-        {
+        if draft.newest.is_some_and(|newest| newest >= cutoff) {
             report.recent += 1;
             continue;
+        }
+        if let Some(session) = session {
+            session.validate().into_diagnostic()?;
+            if !remove(&draft)? {
+                report.recent += 1;
+                continue;
+            }
         }
         report.removed += 1;
         report.files += draft.files.len();

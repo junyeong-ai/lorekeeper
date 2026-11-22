@@ -36,6 +36,7 @@ pub use propose::{Candidate, Candidates, Consumed, Gathered, Judged, select};
 pub use reconcile::{Reconciled, rollover, sync};
 pub use remind::{Reminder, Reminders};
 pub use schedule::{Appointment, Schedule};
+pub use store::Retirement;
 pub use task::{Task, TaskId, TaskState};
 
 use thiserror::Error;

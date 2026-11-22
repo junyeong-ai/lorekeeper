@@ -20,10 +20,14 @@ paths:
   prove a task absent. `status` delegates each subsystem's state to its owner.
 - Maintenance reads store lifetime declarations. Keep newest collected source
   currency even when old, and preserve raw stream logs. Never prune another live
-  worker's tmp directory or treat a disabled source as removed. A pass that deletes
-  outside the journal runs the mutation session's configuration/root precondition
-  immediately before it deletes, so a source restored or a retention changed during an
-  earlier pass refuses the deletion instead of applying the superseded policy.
+  worker's tmp directory or treat a disabled source as removed. Intent snapshots and
+  judgments no configured source answers for retire through the mutation journal, guarded
+  by the exact bytes read, so the session's configuration/root precondition checks the
+  selection they were derived under immediately before anything is written. Other
+  deletions outside the journal run that precondition immediately before each deletion
+  (once per pass for the disposable projection cache and the retired selection store); a
+  source restored or a retention changed meanwhile refuses instead of applying the
+  superseded policy.
   Bounded-work retention captures pending requests, staged results and transitive
   reuse references under workflow→mutation→queue claims. Unrelated valid pending
   work does not block expired published work; unknown references refuse cleanup.

@@ -13,6 +13,7 @@ use lk_core::event::WorkObserved;
 use serde::{Deserialize, Serialize};
 
 use crate::TaskError;
+use crate::store::Retirement;
 
 /// One source's open work, as of the last ingest that reached it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,14 +117,14 @@ impl Judged {
     /// source deleted from `config.yaml` leaves judgments nothing can ever act on; one merely
     /// dropped from `propose_from` is PAUSED, and its judgment waits on disk for the day it
     /// comes back.
-    pub fn orphans(&self, configured: &[String]) -> Result<Vec<Consumed>, TaskError> {
+    pub fn orphans(&self, configured: &[String]) -> Result<Vec<Retirement>, TaskError> {
         let mut orphaned = Vec::new();
         for key in self.shelf.keys()? {
             let file = self.shelf.file(&key);
             // A file that will not read is left exactly where it is, as everywhere here: it
             // holds judgments nobody has seen, and a janitor is the last thing that should be
             // deciding they are gone.
-            let Ok(held) = file.read::<Candidate>() else {
+            let Ok((Some(before), held)) = file.capture::<Candidate>() else {
                 continue;
             };
             let left: Vec<Candidate> = held
@@ -132,9 +133,14 @@ impl Judged {
                 .cloned()
                 .collect();
             if left.len() != held.len() {
-                orphaned.push(Consumed {
+                orphaned.push(Retirement {
                     path: file.path().to_path_buf(),
-                    left,
+                    before,
+                    after: if left.is_empty() {
+                        None
+                    } else {
+                        Some(crate::store::Jsonl::encode(&left)?)
+                    },
                 });
             }
         }
@@ -315,14 +321,9 @@ impl Candidates {
     }
 
     /// The snapshots no configured source answers for.
-    pub fn orphans(&self, configured: &[String]) -> Result<Vec<PathBuf>, TaskError> {
-        Ok(self
-            .shelf
-            .keys()?
-            .into_iter()
-            .filter(|key| !configured.contains(key))
-            .map(|key| self.shelf.file(&key).path().to_path_buf())
-            .collect())
+    pub fn orphans(&self, configured: &[String]) -> Result<Vec<Retirement>, TaskError> {
+        self.shelf
+            .removals(|key| !configured.iter().any(|source| source == key))
     }
 
     pub fn retire(paths: &[PathBuf]) -> Result<(), TaskError> {
@@ -591,9 +592,14 @@ mod tests {
 
         let orphans = candidates.orphans(&configured).unwrap();
         assert_eq!(orphans.len(), 1);
-        assert!(orphans[0].ends_with("gone.jsonl"));
+        assert!(orphans[0].path.ends_with("gone.jsonl"));
+        assert_eq!(
+            orphans[0].before,
+            std::fs::read_to_string(&orphans[0].path).unwrap()
+        );
+        assert_eq!(orphans[0].after, None);
 
-        Candidates::retire(&orphans).unwrap();
+        Candidates::retire(&[orphans[0].path.clone()]).unwrap();
         assert!(candidates.orphans(&configured).unwrap().is_empty());
     }
 }

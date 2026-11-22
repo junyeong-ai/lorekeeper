@@ -29,7 +29,9 @@ stores. CLI orchestration and `IntentPlane::commit` live in `lk-cli/commands/tas
   appointments, not work proposals. Appointments are reported, never proposed.
 - Store lifetime is declared by its owner for maintenance. Completion history is
   permanent; reminder/state snapshots are not age-pruned. Clean up sources removed
-  from configuration, but `enabled: false` is a pause, not removal.
+  from configuration, but `enabled: false` is a pause, not removal. Orphan queries
+  return exact-byte `Retirement`s and write nothing; maintenance publishes them through
+  its mutation journal.
 
 ## Board parsing preserves the person's page
 

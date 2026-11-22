@@ -232,7 +232,6 @@ pub async fn run(
     }
     if drafts_present {
         if work_available {
-            revalidate(_mutation.as_ref())?;
             let report = drafts::prune(&vault_root, _mutation.as_ref(), cutoff_secs)?;
             eprintln!(
                 "{prefix}drafts: removed {} draft(s) unused for {retention_days}d, {} file(s), {} bytes; kept {} recent and {} holding links or special files.",
@@ -285,7 +284,6 @@ pub async fn run(
     let processed_dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     if processed_dir.exists() {
         let _claim = super::queue::claim_writer(&queue_dir, dry_run)?;
-        revalidate(_mutation.as_ref())?;
         let mut entries = tokio::fs::read_dir(&processed_dir)
             .await
             .map_err(|e| miette::miette!("read queue/processed: {e}"))?;
@@ -310,6 +308,7 @@ pub async fn run(
             });
             if mtime_secs.is_some_and(|m| m < cutoff_secs) {
                 if !dry_run {
+                    revalidate(_mutation.as_ref())?;
                     tokio::fs::remove_file(&path)
                         .await
                         .map_err(|e| miette::miette!("remove {}: {e}", path.display()))?;
@@ -352,8 +351,8 @@ pub async fn run(
     if let Some(personal) = &config.personal
         && personal.tasks.is_some()
     {
-        // Held for this whole block when it WRITES: `Judged::orphans` reads a day's file and
-        // `retire` writes back what survives, which is a read-modify-write on the same file
+        // Held for this whole block when it WRITES: `Judged::orphans` reads a day's file and the
+        // retirement writes back what survives, which is a read-modify-write on the same file
         // `lore task candidate` appends to under this lock, and a janitor overlapping one drops
         // a judgment nobody has seen. A dry run does neither, so it takes nothing — it reports
         // the same counts and changes nothing, like every other mutating command, and a plane
@@ -362,45 +361,53 @@ pub async fn run(
             .then(|| lk_task::PlaneLock::hold(&vault_root))
             .transpose()
             .map_err(|e| miette::miette!("{e}"))?;
-        revalidate(_mutation.as_ref())?;
         let configured: Vec<String> = config.sources.keys().cloned().collect();
-        let candidates = lk_task::Candidates::new(&vault_root);
-        let schedule = lk_task::Schedule::new(&vault_root);
-        let mut orphans = candidates
+        let mut snapshots = lk_task::Candidates::new(&vault_root)
             .orphans(&configured)
             .map_err(|e| miette::miette!("{e}"))?;
-        orphans.extend(
-            schedule
+        snapshots.extend(
+            lk_task::Schedule::new(&vault_root)
                 .orphans(&configured)
                 .map_err(|e| miette::miette!("{e}"))?,
         );
-        if !orphans.is_empty() {
-            if !dry_run {
-                lk_task::Candidates::retire(&orphans).map_err(|e| miette::miette!("{e}"))?;
-            }
-            eprintln!(
-                "{prefix}intent: removed {} snapshot(s) no configured source answers for.",
-                orphans.len()
-            );
-        }
-
         // The same rule one level down. A snapshot is keyed by SOURCE, so an orphan is a whole
         // file; a judgment is keyed by DATE and one day's file holds every source's, so an
         // orphan is a ROW and what is left is written back. Without this the judgments of a
         // source deleted from `config.yaml` stayed on disk forever — the one store here that no
         // declared lifetime covered, because nothing could ever read them again and nothing
         // swept them either.
-        let judged = lk_task::Judged::new(&vault_root);
-        let stale = judged
+        let judgments = lk_task::Judged::new(&vault_root)
             .orphans(&configured)
             .map_err(|e| miette::miette!("{e}"))?;
-        if !stale.is_empty() {
-            if !dry_run {
-                lk_task::Judged::retire(&stale).map_err(|e| miette::miette!("{e}"))?;
+        // Judgments have no other copy, so they retire through the journal: preflight checks the
+        // bytes read and the session's precondition the configuration and root they were derived
+        // under, both immediately before anything is written.
+        if let Some(session) = &_mutation {
+            let mut plan = lk_vault::MutationPlan::default();
+            for retirement in snapshots.iter().chain(&judgments) {
+                let path = retirement
+                    .path
+                    .strip_prefix(session.root())
+                    .map_err(|error| miette::miette!("intent store outside the vault: {error}"))?;
+                match &retirement.after {
+                    Some(after) => plan.edit(path, retirement.before.clone(), after.clone()),
+                    None => plan.remove(path, retirement.before.clone()),
+                }
             }
+            session
+                .apply(plan)
+                .map_err(|error| miette::miette!("{error}"))?;
+        }
+        if !snapshots.is_empty() {
+            eprintln!(
+                "{prefix}intent: removed {} snapshot(s) no configured source answers for.",
+                snapshots.len()
+            );
+        }
+        if !judgments.is_empty() {
             eprintln!(
                 "{prefix}intent: cleared judgments in {} file(s) no configured source answers for.",
-                stale.len()
+                judgments.len()
             );
         }
     }
@@ -425,8 +432,8 @@ pub async fn run(
 }
 
 /// Retention outside the journal derives what it deletes from the configuration and root this
-/// run selected, so each such pass runs the session's precondition immediately before it
-/// deletes; a dry run holds no session and deletes nothing.
+/// run selected, so it runs the session's precondition immediately before each deletion; a dry
+/// run holds no session and deletes nothing.
 fn revalidate(session: Option<&lk_vault::MutationSession>) -> miette::Result<()> {
     session.map_or(Ok(()), |session| {
         session

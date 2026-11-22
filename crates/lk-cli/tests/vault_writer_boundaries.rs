@@ -160,16 +160,23 @@ fn scheduled_writers_wait_then_read_after_the_previous_writer_finishes() {
 }
 
 #[test]
-fn maintenance_keeps_judgments_of_a_source_restored_while_it_held_the_vault() {
+fn maintenance_retires_unconfigured_intent_only_under_the_configuration_it_read() {
     use std::io::Read;
     use std::process::Stdio;
     let dir = tempfile::tempdir().unwrap();
     let vault = dir.path().join("vault");
     let judged = vault.join(".lorekeeper/proposals/judged/2026-11-20.jsonl");
+    let snapshot = vault.join(".lorekeeper/proposals/mail.jsonl");
     std::fs::create_dir_all(judged.parent().unwrap()).unwrap();
-    let judgment =
+    let kept =
+        "{\"source_id\":\"tasks\",\"summary\":\"Plan\",\"url\":\"https://example.invalid/0\"}\n";
+    let judgments = format!(
+        "{kept}{{\"source_id\":\"mail\",\"summary\":\"Reply\",\"url\":\"https://example.invalid/1\"}}\n"
+    );
+    let snapshotted =
         "{\"source_id\":\"mail\",\"summary\":\"Reply\",\"url\":\"https://example.invalid/1\"}\n";
-    std::fs::write(&judged, judgment).unwrap();
+    std::fs::write(&judged, &judgments).unwrap();
+    std::fs::write(&snapshot, snapshotted).unwrap();
     let config = dir.path().join("config.yaml");
     let base = "vault: {root: vault, timezone: UTC}\nidentity: {name: Test, email: test@example.invalid}\npersonal:\n  tasks: {}\nsources:\n  tasks: {type: tasks}\n";
     std::fs::write(&config, base).unwrap();
@@ -204,7 +211,6 @@ fn maintenance_keeps_judgments_of_a_source_restored_while_it_held_the_vault() {
     )
     .unwrap();
     drop(plane);
-
     let mut stderr = String::new();
     child
         .stderr
@@ -217,7 +223,19 @@ fn maintenance_keeps_judgments_of_a_source_restored_while_it_held_the_vault() {
         stderr.contains("selected configuration changed during the job"),
         "{stderr}"
     );
-    assert_eq!(std::fs::read_to_string(&judged).unwrap(), judgment);
+    assert_eq!(std::fs::read_to_string(&judged).unwrap(), judgments);
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), snapshotted);
+    assert!(!vault.join(".lorekeeper/mutation/pending.json").exists());
+
+    std::fs::write(&config, base).unwrap();
+    let out = run(dir.path(), &["maintenance"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(&judged).unwrap(), kept);
+    assert!(!snapshot.exists());
 }
 
 #[test]

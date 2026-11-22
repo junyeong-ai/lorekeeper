@@ -8,7 +8,7 @@
 //! something that happens whether they clear it or not. So the agenda reports it beside the
 //! day's tasks and the board never learns of it.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -74,21 +74,12 @@ impl Schedule {
     }
 
     /// The snapshots no configured source answers for.
-    pub fn orphans(&self, configured: &[String]) -> Result<Vec<PathBuf>, TaskError> {
-        Ok(self
-            .shelf
-            .keys()?
-            .into_iter()
-            .filter(|key| !configured.contains(key))
-            .map(|key| self.shelf.file(&key).path().to_path_buf())
-            .collect())
-    }
-
-    pub fn retire(paths: &[PathBuf]) -> Result<(), TaskError> {
-        for path in paths {
-            crate::store::Jsonl::at(path.clone()).retire()?;
-        }
-        Ok(())
+    pub fn orphans(
+        &self,
+        configured: &[String],
+    ) -> Result<Vec<crate::store::Retirement>, TaskError> {
+        self.shelf
+            .removals(|key| !configured.iter().any(|source| source == key))
     }
 }
 

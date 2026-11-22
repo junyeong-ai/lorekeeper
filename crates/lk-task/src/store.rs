@@ -48,10 +48,8 @@ impl Jsonl {
     pub(crate) fn capture<T: DeserializeOwned>(
         &self,
     ) -> Result<(Option<String>, Vec<T>), TaskError> {
-        let content = match std::fs::read_to_string(&self.path) {
-            Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((None, Vec::new())),
-            Err(e) => return Err(TaskError::io(format!("read {}", self.path.display()), e)),
+        let Some(content) = self.text()? else {
+            return Ok((None, Vec::new()));
         };
         let rows = content
             .lines()
@@ -68,6 +66,15 @@ impl Jsonl {
             })
             .collect::<Result<_, _>>()?;
         Ok((Some(content), rows))
+    }
+
+    /// The file's exact text, `None` when it is absent.
+    pub(crate) fn text(&self) -> Result<Option<String>, TaskError> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(TaskError::io(format!("read {}", self.path.display()), e)),
+        }
     }
 
     /// Replace the file with `rows`, creating the directory it belongs in.
@@ -107,6 +114,17 @@ impl Jsonl {
     }
 }
 
+/// A store file maintenance retires: the exact text it read and what replaces it, `None`
+/// removing the file. The caller publishes retirements through its mutation journal, guarded
+/// by `before`, so a file that changed since it was read, or a selection that changed since
+/// these were derived from it, refuses the whole retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Retirement {
+    pub path: PathBuf,
+    pub before: String,
+    pub after: Option<String>,
+}
+
 /// A directory of JSONL files, each named by a key.
 ///
 /// The key is a date for the stores that record a day and a source id for the one that records
@@ -123,6 +141,26 @@ impl Shelf {
 
     pub(crate) fn file(&self, key: &str) -> Jsonl {
         Jsonl::at(self.root.join(format!("{key}.jsonl")))
+    }
+
+    /// The whole files whose key `retired` names. A file that will not read is left where it
+    /// is: nothing here may decide that what it holds is gone.
+    pub(crate) fn removals(
+        &self,
+        retired: impl Fn(&str) -> bool,
+    ) -> Result<Vec<Retirement>, TaskError> {
+        let mut removals = Vec::new();
+        for key in self.keys()?.into_iter().filter(|key| retired(key)) {
+            let file = self.file(&key);
+            if let Ok(Some(before)) = file.text() {
+                removals.push(Retirement {
+                    path: file.path().to_path_buf(),
+                    before,
+                    after: None,
+                });
+            }
+        }
+        Ok(removals)
     }
 
     /// Every key the shelf holds, sorted, so a run over them is reproducible.
