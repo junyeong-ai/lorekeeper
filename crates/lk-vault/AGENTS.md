@@ -50,7 +50,8 @@ canonical; SQLite navigation is derived.
   full before/after steps before edits. Recovery accepts expected states only and
   preserves conflicts. Lock order is mutation session before narrower queue locks.
   A session's `with_precondition` check runs under the lock before each plan is
-  journaled; `PublicationRefused` publishes nothing.
+  journaled; `PublicationRefused` publishes nothing. A holder writing outside the
+  journal runs the same check with `validate` immediately before that write.
 - `MutationClaim` acquires the same writer boundary without reading or recovering
   journals. Installation uses it for settlement inspection and replacement; it is
   not a publication session and must be released before schema publication.

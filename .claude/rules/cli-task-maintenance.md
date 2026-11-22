@@ -20,7 +20,10 @@ paths:
   prove a task absent. `status` delegates each subsystem's state to its owner.
 - Maintenance reads store lifetime declarations. Keep newest collected source
   currency even when old, and preserve raw stream logs. Never prune another live
-  worker's tmp directory or treat a disabled source as removed.
+  worker's tmp directory or treat a disabled source as removed. A pass that deletes
+  outside the journal runs the mutation session's configuration/root precondition
+  immediately before it deletes, so a source restored or a retention changed during an
+  earlier pass refuses the deletion instead of applying the superseded policy.
   Bounded-work retention captures pending requests, staged results and transitive
   reuse references under workflow→mutation→queue claims. Unrelated valid pending
   work does not block expired published work; unknown references refuse cleanup.

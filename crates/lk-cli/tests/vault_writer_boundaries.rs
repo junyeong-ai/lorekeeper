@@ -160,6 +160,67 @@ fn scheduled_writers_wait_then_read_after_the_previous_writer_finishes() {
 }
 
 #[test]
+fn maintenance_keeps_judgments_of_a_source_restored_while_it_held_the_vault() {
+    use std::io::Read;
+    use std::process::Stdio;
+    let dir = tempfile::tempdir().unwrap();
+    let vault = dir.path().join("vault");
+    let judged = vault.join(".lorekeeper/proposals/judged/2026-11-20.jsonl");
+    std::fs::create_dir_all(judged.parent().unwrap()).unwrap();
+    let judgment =
+        "{\"source_id\":\"mail\",\"summary\":\"Reply\",\"url\":\"https://example.invalid/1\"}\n";
+    std::fs::write(&judged, judgment).unwrap();
+    let config = dir.path().join("config.yaml");
+    let base = "vault: {root: vault, timezone: UTC}\nidentity: {name: Test, email: test@example.invalid}\npersonal:\n  tasks: {}\nsources:\n  tasks: {type: tasks}\n";
+    std::fs::write(&config, base).unwrap();
+
+    let plane = lk_task::PlaneLock::hold(&vault).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    for (key, _) in std::env::vars() {
+        if key.starts_with("LORE_") {
+            command.env_remove(key);
+        }
+    }
+    let mut child = command
+        .arg("--config")
+        .arg(&config)
+        .args(["maintenance", "--wait-for-vault"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while lk_vault::MutationClaim::acquire(&vault).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "maintenance never held the vault"
+        );
+        assert!(child.try_wait().unwrap().is_none());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(
+        &config,
+        format!("{base}  mail: {{type: gmail, params: {{include_queries: ['from:test@example.invalid']}}}}\n"),
+    )
+    .unwrap();
+    drop(plane);
+
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert!(!child.wait().unwrap().success(), "{stderr}");
+    assert!(
+        stderr.contains("selected configuration changed during the job"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&judged).unwrap(), judgment);
+}
+
+#[test]
 fn review_check_preserves_open_and_historical_judgments_but_refuses_stale_or_invalid() {
     let dir = fixture();
     let vault = dir.path().join("vault");

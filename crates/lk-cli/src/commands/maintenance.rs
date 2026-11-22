@@ -218,6 +218,7 @@ pub async fn run(
     }
     if retired_selection_present {
         if work_available {
+            revalidate(_mutation.as_ref())?;
             let report = super::work::retired_selection::retire(&vault_root, _mutation.as_ref())?;
             eprintln!(
                 "{prefix}retired selection store: removed {} file(s) in {} directories, {} bytes; no command reads this store.",
@@ -231,6 +232,7 @@ pub async fn run(
     }
     if drafts_present {
         if work_available {
+            revalidate(_mutation.as_ref())?;
             let report = drafts::prune(&vault_root, _mutation.as_ref(), cutoff_secs)?;
             eprintln!(
                 "{prefix}drafts: removed {} draft(s) unused for {retention_days}d, {} file(s), {} bytes; kept {} recent and {} holding links or special files.",
@@ -258,6 +260,7 @@ pub async fn run(
             .collect();
 
         if !dry_run && !expired.is_empty() {
+            revalidate(_mutation.as_ref())?;
             let new_content = kept.join("\n") + "\n";
             super::write_atomic(log_path.clone(), new_content.into_bytes())
                 .await
@@ -282,6 +285,7 @@ pub async fn run(
     let processed_dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     if processed_dir.exists() {
         let _claim = super::queue::claim_writer(&queue_dir, dry_run)?;
+        revalidate(_mutation.as_ref())?;
         let mut entries = tokio::fs::read_dir(&processed_dir)
             .await
             .map_err(|e| miette::miette!("read queue/processed: {e}"))?;
@@ -358,6 +362,7 @@ pub async fn run(
             .then(|| lk_task::PlaneLock::hold(&vault_root))
             .transpose()
             .map_err(|e| miette::miette!("{e}"))?;
+        revalidate(_mutation.as_ref())?;
         let configured: Vec<String> = config.sources.keys().cloned().collect();
         let candidates = lk_task::Candidates::new(&vault_root);
         let schedule = lk_task::Schedule::new(&vault_root);
@@ -410,12 +415,24 @@ pub async fn run(
     let cutoff = std::time::UNIX_EPOCH
         .checked_add(std::time::Duration::from_secs(cutoff_secs as u64))
         .ok_or_else(|| miette::miette!("invalid projection cache retention cutoff"))?;
+    revalidate(_mutation.as_ref())?;
     let removed = lk_source::content::prune_projection_cache(&vault_root, cutoff, dry_run)
         .map_err(|error| miette::miette!("{error}"))?;
     if removed != 0 {
         eprintln!("{prefix}projection cache: pruned {removed} expired derived entries.");
     }
     Ok(())
+}
+
+/// Retention outside the journal derives what it deletes from the configuration and root this
+/// run selected, so each such pass runs the session's precondition immediately before it
+/// deletes; a dry run holds no session and deletes nothing.
+fn revalidate(session: Option<&lk_vault::MutationSession>) -> miette::Result<()> {
+    session.map_or(Ok(()), |session| {
+        session
+            .validate()
+            .map_err(|error| miette::miette!("{error}"))
+    })
 }
 
 #[cfg(test)]

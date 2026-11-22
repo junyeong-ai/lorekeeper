@@ -310,6 +310,16 @@ impl MutationSession {
         self
     }
 
+    /// Run the precondition alone, immediately before a write this session's holder makes
+    /// outside the journal (retention of discarded state). Like the check inside
+    /// [`Self::apply`], it answers for the moment it runs.
+    pub fn validate(&self) -> Result<(), VaultError> {
+        match &self.precondition {
+            Some(precondition) => precondition().map_err(VaultError::PublicationRefused),
+            None => Ok(()),
+        }
+    }
+
     pub fn apply(&self, plan: MutationPlan) -> Result<(), VaultError> {
         if self.journal.try_exists()? {
             return Err(io::Error::other(
@@ -321,9 +331,7 @@ impl MutationSession {
             return Ok(());
         }
         self.preflight(&plan)?;
-        if let Some(precondition) = &self.precondition {
-            precondition().map_err(VaultError::PublicationRefused)?;
-        }
+        self.validate()?;
         self.clear_progress()?;
         let journal = Journal { version: 1, plan };
         self.save(&journal)?;
@@ -1642,8 +1650,13 @@ mod tests {
         ));
         assert!(!root.path().join("page.md").exists());
         assert!(!session.journal.exists());
+        assert!(matches!(
+            session.validate(),
+            Err(VaultError::PublicationRefused(reason)) if reason == "selection changed"
+        ));
 
         current.store(true, std::sync::atomic::Ordering::SeqCst);
+        session.validate().unwrap();
         session.apply(plan()).unwrap();
         assert_eq!(
             fs::read_to_string(root.path().join("page.md")).unwrap(),
