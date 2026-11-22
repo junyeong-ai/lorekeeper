@@ -65,6 +65,12 @@ paths:
 - Daily and process classify review health through the shared typed reports.
   Reassessment keeps strict completion nonzero without halting independent queue
   progress or pausing automation; invalid reviews and failed reads remain fatal.
+  Backlink reconciliation and graph lint run inside the run through the shared graph
+  owners and the run's read control. A concept page reconciliation skips and a lint
+  violation name their pages: they keep completion nonzero without halting or pausing.
+  Failed reads, publication conflicts and checks that could not complete stay fatal.
+  Their stage records carry the counts and the first skipped pages; `lore graph lint`
+  and `lore graph backlinks-sync --dry-run` report the rest.
   Queue settlement alone cannot satisfy review completion. Daily requires a passing
   review check before period resumption and checks again after publication.
 - Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.

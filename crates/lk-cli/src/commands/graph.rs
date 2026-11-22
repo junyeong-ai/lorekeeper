@@ -2,7 +2,7 @@ mod repair_link;
 mod resynthesize;
 mod retract_citation;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lk_core::config::{ConceptCategory, GraphConfig, VaultDirs};
 use lk_core::i18n::Locale;
@@ -12,12 +12,43 @@ use super::GlobalOptions;
 
 struct ResolvedConfig {
     root: PathBuf,
-    pin: super::ConfigurationPin,
     graph: GraphConfig,
     locale: Locale,
     vault_dirs: VaultDirs,
     concept_categories: Vec<ConceptCategory>,
     llm: lk_core::config::LlmConfig,
+}
+
+impl ResolvedConfig {
+    /// Single override semantics (shared with `wiki`/`schema`): a present config drives
+    /// dirs/locale/graph/categories even under `--root` (only the root is overridden) — falling
+    /// back to defaults wholesale would scan the WRONG dirs, skip category lint, and resolve
+    /// headings in the wrong locale. Defaults apply ONLY when no config file exists.
+    fn from_config(root: PathBuf, config: Option<&lk_core::config::Config>) -> Self {
+        match config {
+            Some(config) => Self {
+                root,
+                locale: config.vault.locale(),
+                vault_dirs: config.vault.dirs.clone(),
+                graph: config.graph.clone(),
+                concept_categories: config.concepts.categories.clone(),
+                llm: config.llm.clone(),
+            },
+            None => {
+                let vault_dirs = VaultDirs::default();
+                let mut graph = GraphConfig::default();
+                graph.apply_vault_defaults(&vault_dirs);
+                Self {
+                    root,
+                    graph,
+                    locale: Locale::default(),
+                    vault_dirs,
+                    concept_categories: Vec::new(),
+                    llm: lk_core::config::LlmConfig::default(),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, clap::ValueEnum, serde::Serialize)]
@@ -282,16 +313,42 @@ pub(crate) fn lint(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
 ) -> Result<output::LintReport, String> {
-    let rc = resolve_config_full(opts, root_override)?;
-    let views = scan::VaultViews::resolve(
-        &rc.root,
-        &rc.graph,
-        &rc.vault_dirs,
-        &lk_vault::ReadControl::default(),
+    let (rc, _) = resolve_config_full(opts, root_override)?;
+    lint_resolved(&rc, &lk_vault::ReadControl::default())
+}
+
+/// The lint verdict for a native run's vault, read through the run's control.
+pub(crate) fn lint_controlled(
+    config: &lk_core::config::Config,
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> Result<output::LintReport, String> {
+    lint_resolved(
+        &ResolvedConfig::from_config(root.to_path_buf(), Some(config)),
+        read,
     )
-    .map_err(|e| format!("{e}"))?;
+}
+
+fn lint_resolved(
+    rc: &ResolvedConfig,
+    read: &lk_vault::ReadControl,
+) -> Result<output::LintReport, String> {
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
+        .map_err(|e| format!("{e}"))?;
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
-    lint_report(&rc, &g, &views)
+    lint_report(rc, &g, &views)
+}
+
+/// `graph backlinks-sync` under a native run's writer session, read through the run's control.
+pub(crate) fn backlinks_sync_in_session(
+    config: &lk_core::config::Config,
+    session: &lk_vault::MutationSession,
+    read: &lk_vault::ReadControl,
+) -> Result<output::BacklinksSyncReport, String> {
+    let rc = ResolvedConfig::from_config(session.root().to_path_buf(), Some(config));
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
+        .map_err(|e| format!("{e}"))?;
+    synchronize_backlinks(&rc, &views.scanned, false, Some(session), read)
 }
 
 async fn run_inner(
@@ -312,7 +369,7 @@ async fn run_inner(
             ..
         }
     );
-    let rc = resolve_config_full(opts, root_override)?;
+    let (rc, pin) = resolve_config_full(opts, root_override)?;
     let mutation = if matches!(
         &cmd,
         GraphCommand::Normalize { fix: true }
@@ -323,7 +380,7 @@ async fn run_inner(
             | GraphCommand::RepairLink { dry_run: false, .. }
     ) {
         Some(
-            super::publication::acquire_mutation(&rc.root, wait_for_vault, &rc.pin)
+            super::publication::acquire_mutation(&rc.root, wait_for_vault, &pin)
                 .await
                 .map_err(|error| error.to_string())?,
         )
@@ -772,6 +829,7 @@ fn synchronize_backlinks(
     };
     let (plan, report) = plan_backlinks_publication(rc, pages, policy, read)?;
     if report.changed > 0 || report.queued > 0 {
+        read.check().map_err(|error| error.to_string())?;
         session
             .ok_or("backlinks publication requires a vault mutation session")?
             .apply(plan)
@@ -870,38 +928,10 @@ fn plan_backlinks_publication(
 fn resolve_config_full(
     opts: &GlobalOptions,
     root_override: Option<PathBuf>,
-) -> Result<ResolvedConfig, String> {
-    // Single override semantics (shared with `wiki`/`schema`): a present config drives
-    // dirs/locale/graph/categories even under `--root` (only the root is overridden) — falling
-    // back to defaults wholesale would scan the WRONG dirs, skip category lint, and resolve
-    // headings in the wrong locale. Defaults apply ONLY when no config file exists.
+) -> Result<(ResolvedConfig, super::ConfigurationPin), String> {
     let super::RootConfig { root, config, pin } =
         super::resolve_root_config(opts, root_override).map_err(|e| format!("{e}"))?;
-    match config {
-        Some(config) => Ok(ResolvedConfig {
-            root,
-            pin,
-            locale: config.vault.locale(),
-            vault_dirs: config.vault.dirs.clone(),
-            graph: config.graph,
-            concept_categories: config.concepts.categories,
-            llm: config.llm,
-        }),
-        None => {
-            let vault_dirs = VaultDirs::default();
-            let mut graph = GraphConfig::default();
-            graph.apply_vault_defaults(&vault_dirs);
-            Ok(ResolvedConfig {
-                root,
-                pin,
-                graph,
-                locale: Locale::default(),
-                vault_dirs,
-                concept_categories: Vec::new(),
-                llm: lk_core::config::LlmConfig::default(),
-            })
-        }
-    }
+    Ok((ResolvedConfig::from_config(root, config.as_ref()), pin))
 }
 
 #[cfg(test)]
@@ -921,7 +951,6 @@ mod tests {
         )
         .unwrap();
         let config = ResolvedConfig {
-            pin: super::super::ConfigurationPin::Absent,
             root: root.path().into(),
             graph: Default::default(),
             locale: Locale::En,

@@ -189,6 +189,8 @@ scheduled runs of that operation pause. `lore status` names the stage that stopp
 fix that cause and continue with `lore run OPERATION --scheduled --resume`.
 A call that keeps timing out or exits with an error on one input holds only that input:
 completed results stay saved, independent work continues, and the held input is not called again until you release it or it changes.
+Likewise, a concept page the backlink sweep cannot update and a `lore graph lint` violation name the pages to fix:
+the job stays incomplete while other work continues. A page that cannot be read still pauses the operation.
 Ask `/lore-process` to diagnose and release it, or follow [plan and resume](skills/lore-process/references/bounded-work.md#plan-and-resume)
 for the exact `lore work retry` commands, each previewable with `--dry-run`.
 

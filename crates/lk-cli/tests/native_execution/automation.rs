@@ -58,6 +58,85 @@ fn daily_review_reassessment_defers_without_pausing_and_invalid_reviews_remain_f
 }
 
 #[test]
+fn an_unrecordable_concept_defers_graph_stages_and_unreadable_pages_remain_fatal() {
+    for unreadable in [None, Some("backlinks-sync"), Some("graph lint")] {
+        let fixture = Fixture::new("codex", 30, "exit 91");
+        configure(&fixture, Some(20), 60);
+        let wiki = fixture.root().join("vault/wiki");
+        std::fs::create_dir_all(wiki.join("concepts")).unwrap();
+        std::fs::create_dir_all(wiki.join("documents")).unwrap();
+        std::fs::write(
+            wiki.join("concepts/owed.md"),
+            "---\ntype: concept\ntitle: Owed\n---\n# Owed\n\n## Synthesis\n\n## Sources\n\n## Related\n",
+        )
+        .unwrap();
+        std::fs::write(
+            wiki.join("concepts/legacy.md"),
+            "---\ntitle: Legacy\n---\n# Legacy\n\nWritten before concept pages carried Sources.\n",
+        )
+        .unwrap();
+        let mut source = b"---\ntype: document\ntitle: Source\n---\nSee [Owed](../concepts/owed.md) and [Legacy](../concepts/legacy.md).\n".to_vec();
+        match unreadable {
+            Some("backlinks-sync") => source.push(0xff),
+            Some(_) => {
+                let notes = fixture.root().join("vault/notes");
+                std::fs::create_dir_all(&notes).unwrap();
+                std::fs::write(notes.join("private.md"), b"Personal note\n\xff").unwrap();
+            }
+            None => {}
+        }
+        std::fs::write(wiki.join("documents/source.md"), source).unwrap();
+
+        let report = run(&fixture, "process", false);
+        assert_eq!(report["ok"], false, "{report}");
+        assert_eq!(
+            report["runs"][0]["halted"],
+            unreadable.is_some(),
+            "{report}"
+        );
+        if let Some(stage) = unreadable {
+            assert_eq!(
+                usage(&fixture)["paused"]["process"]["cause"]["stage"],
+                stage,
+                "{report}"
+            );
+            let repeated = run(&fixture, "process", false);
+            assert_eq!(
+                repeated["runs"][0]["automation"]["stop"], "paused",
+                "{repeated}"
+            );
+            continue;
+        }
+        assert_eq!(
+            calls(&report),
+            1,
+            "independent synthesis must proceed: {report}"
+        );
+        let stages = report["runs"][0]["stages"].as_array().unwrap();
+        for name in ["backlinks-sync", "graph lint"] {
+            assert!(
+                stages
+                    .iter()
+                    .any(|stage| stage["name"] == name && stage["state"] == "failed"),
+                "{name} must defer: {report}"
+            );
+        }
+        assert!(stages.iter().any(|stage| {
+            stage["name"] == "backlinks-sync"
+                && stage["detail"]
+                    .as_str()
+                    .is_some_and(|detail| detail.contains("wiki/concepts/legacy.md"))
+        }));
+        let owed = std::fs::read_to_string(wiki.join("concepts/owed.md")).unwrap();
+        assert!(owed.contains("source_count: 1"), "{owed}");
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        let repeated = run(&fixture, "process", false);
+        assert_eq!(repeated["runs"][0]["halted"], false, "{repeated}");
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 1, "exec sleep 30");
@@ -422,7 +501,7 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
         for marker in ["host-stderr-marker", "host-stdout-marker"] {
             assert_eq!(diagnostics.contains(marker), !scheduled, "{diagnostics}");
         }
-        for stage_output in ["Prepared navigation snapshot", "=== Lint Report ==="] {
+        for stage_output in ["Prepared navigation snapshot", "graph lint: completed"] {
             assert!(diagnostics.contains(stage_output), "{diagnostics}");
         }
     }

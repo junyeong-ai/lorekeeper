@@ -189,6 +189,7 @@ launchd 작업은 `~/Library/Logs/lorekeeper`에 기록하므로 등록하기 �
 `lore status`가 중지를 일으킨 단계를 보여 줍니다. 원인을 해결한 뒤 `lore run OPERATION --scheduled --resume`으로 재개하세요.
 한 입력에서 시간 초과가 반복되거나 호출이 오류 코드로 끝나면 그 입력만 보류됩니다.
 끝난 결과는 저장된 채로 남고 다른 작업은 계속 진행되며, 보류된 입력은 해제하거나 입력이 바뀔 때까지 다시 호출되지 않습니다.
+마찬가지로 백링크 정합화가 갱신하지 못하는 개념 페이지나 `lore graph lint` 위반은 고칠 페이지를 알려 줄 뿐, 다른 작업은 계속 진행되고 작업은 미완료로 남습니다. 읽을 수 없는 페이지는 여전히 해당 작업을 일시 중지합니다.
 `/lore-process`에 진단과 해제를 맡기거나, 정확한 `lore work retry` 명령은 [계획과 재개](skills/lore-process/references/bounded-work.md#plan-and-resume)를 따르세요. 각 명령은 `--dry-run`으로 먼저 확인할 수 있습니다.
 
 업데이트는 `lore self update`, 설치 상태 확인은 `lore self status`를 사용합니다. 큐 작업이나 중단된 게시가 남아 있으면 업데이트를 거부하며,

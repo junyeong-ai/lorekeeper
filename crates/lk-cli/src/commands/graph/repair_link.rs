@@ -166,7 +166,6 @@ mod tests {
                 target,
                 config: ResolvedConfig {
                     root,
-                    pin: crate::commands::ConfigurationPin::Absent,
                     graph: Default::default(),
                     locale: lk_core::i18n::Locale::En,
                     vault_dirs: Default::default(),

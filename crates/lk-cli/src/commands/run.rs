@@ -993,7 +993,6 @@ mod native {
             }
             let mut command_args = args.to_vec();
             if args == ["schema"]
-                || args == ["graph", "backlinks-sync"]
                 || args == ["wiki", "refresh"]
                 || args.starts_with(&["wiki", "audit-record"])
             {
@@ -1003,6 +1002,107 @@ mod native {
                 Ok(command) => self.child(name, command, None).await,
                 Err(error) => self.failure(name, error),
             }
+        }
+
+        /// Backlink reconciliation inside the run. Its planner takes the pages this run already
+        /// read while their files keep their stamps, and publication guards their current bytes.
+        /// A concept page that cannot record its derived evidence leaves the job incomplete while
+        /// independent work continues; failed reads and publication conflicts stop the job.
+        async fn backlinks_sync(&mut self, name: &str) -> bool {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
+                return false;
+            }
+            let Some((session, _)) = self.mutation_session(name).await else {
+                return false;
+            };
+            let synchronized = crate::commands::graph::backlinks_sync_in_session(
+                &self.config,
+                &session,
+                self.supervisor.read_control(),
+            );
+            drop(session);
+            if !self.configuration_is_current() {
+                return false;
+            }
+            let report = match synchronized {
+                Ok(report) => report,
+                Err(error) => return self.failure(name, error),
+            };
+            let detail = format!(
+                "{} updated, {} queued, {} owed a synthesis ({} replacing written sections)",
+                report.changed,
+                report.queued,
+                report.sync.resynthesize.len(),
+                report
+                    .sync
+                    .resynthesize
+                    .iter()
+                    .filter(|owed| !owed.discarding.is_empty())
+                    .count()
+            );
+            let skipped = &report.sync.skipped;
+            if skipped.is_empty() {
+                return self.record(name, StageState::Completed, Some(detail));
+            }
+            let shown = skipped
+                .iter()
+                .take(3)
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = match skipped.len().saturating_sub(3) {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            self.record(
+                name,
+                StageState::Failed,
+                Some(format!(
+                    "{detail}; {} concept page(s) cannot record derived evidence: {shown}{more}; inspect `lore graph backlinks-sync --dry-run`",
+                    skipped.len()
+                )),
+            );
+            true
+        }
+
+        /// Structural lint inside the run. A violation names the pages it concerns, so it leaves
+        /// the job incomplete without stopping independent work; a check that could not complete
+        /// stops the job.
+        fn graph_lint(&mut self, name: &str) -> bool {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
+                return false;
+            }
+            let linted = crate::commands::graph::lint_controlled(
+                &self.config,
+                &self.root,
+                self.supervisor.read_control(),
+            );
+            if !self.configuration_is_current() {
+                return false;
+            }
+            let report = match linted {
+                Ok(report) => report,
+                Err(error) => return self.failure(name, error),
+            };
+            if !report.errors.is_empty() {
+                return self.halt(name, Some(report.errors.join("; ")));
+            }
+            let violations = report.violations.count();
+            let detail = format!(
+                "{} pages, {} links, {violations} violation(s)",
+                report.pages, report.links
+            );
+            if violations == 0 {
+                return self.record(name, StageState::Completed, Some(detail));
+            }
+            self.record(
+                name,
+                StageState::Failed,
+                Some(format!("{detail}; inspect `lore graph lint`")),
+            );
+            true
         }
 
         fn check_queue(&mut self, name: &str) -> bool {
@@ -5188,10 +5288,7 @@ mod native {
                     }
                     if generation_deferred {
                         if !self
-                            .native(
-                                "queue publication reconciliation",
-                                &["graph", "backlinks-sync"],
-                            )
+                            .backlinks_sync("queue publication reconciliation")
                             .await
                         {
                             return false;
@@ -5245,10 +5342,7 @@ mod native {
                         });
                     if published_sources
                         && !self
-                            .native(
-                                "queue publication reconciliation",
-                                &["graph", "backlinks-sync"],
-                            )
+                            .backlinks_sync("queue publication reconciliation")
                             .await
                     {
                         return false;
@@ -5352,26 +5446,18 @@ mod native {
             if self.result.yield_reason.is_some() {
                 return;
             }
-            for (name, args) in [
-                ("schema", vec!["schema"]),
-                ("queue apply", vec!["queue", "apply"]),
-                ("backlinks-sync", vec!["graph", "backlinks-sync"]),
-            ] {
-                self.native(name, &args).await;
-            }
+            self.native("schema", &["schema"]).await;
+            self.native("queue apply", &["queue", "apply"]).await;
+            self.backlinks_sync("backlinks-sync").await;
             self.drain().await;
             if self.result.yield_reason.is_some() || self.yield_to_waiter() {
                 return;
             }
-            for (name, args) in [
-                ("queue apply", vec!["queue", "apply"]),
-                ("backlinks-sync", vec!["graph", "backlinks-sync"]),
-                ("wiki refresh", vec!["wiki", "refresh"]),
-                ("graph lint", vec!["graph", "lint"]),
-                ("queue completion", vec!["queue", "check"]),
-            ] {
-                self.native(name, &args).await;
-            }
+            self.native("queue apply", &["queue", "apply"]).await;
+            self.backlinks_sync("backlinks-sync").await;
+            self.native("wiki refresh", &["wiki", "refresh"]).await;
+            self.graph_lint("graph lint");
+            self.native("queue completion", &["queue", "check"]).await;
         }
 
         async fn inspect_halted_state(&mut self) {
@@ -6231,16 +6317,12 @@ mod native {
         }
 
         async fn reconcile_audit_inputs(&mut self) {
-            for (name, args) in [
-                ("schema", vec!["schema"]),
-                ("queue apply", vec!["queue", "apply"]),
-                ("backlinks-sync", vec!["graph", "backlinks-sync"]),
-                ("wiki refresh", vec!["wiki", "refresh"]),
-                ("graph lint", vec!["graph", "lint"]),
-            ] {
-                if !self.native(name, &args).await {
-                    return;
-                }
+            if self.native("schema", &["schema"]).await
+                && self.native("queue apply", &["queue", "apply"]).await
+                && self.backlinks_sync("backlinks-sync").await
+                && self.native("wiki refresh", &["wiki", "refresh"]).await
+            {
+                self.graph_lint("graph lint");
             }
         }
 
