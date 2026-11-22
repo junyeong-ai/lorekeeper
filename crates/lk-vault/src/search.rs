@@ -2645,6 +2645,7 @@ mod tests {
             assert_eq!(loaded.names, vocabulary.names);
             metrics.bytes > content.len()
         };
+        #[cfg(unix)]
         assert!(whole(
             &crate::ReadControl::default().with_immediate_page_reuse()
         ));

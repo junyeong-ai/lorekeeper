@@ -1322,6 +1322,7 @@ mod tests {
         batch
     }
 
+    #[cfg(unix)]
     #[test]
     fn captures_reuse_unchanged_pages_and_observe_rewritten_ones() {
         let root = tempfile::tempdir().unwrap();

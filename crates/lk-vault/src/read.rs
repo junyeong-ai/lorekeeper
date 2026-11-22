@@ -58,20 +58,28 @@ impl ReadControl {
     }
 
     pub fn read_to_string(&self, path: &Path) -> Result<String, VaultError> {
-        utf8(self.read_bytes(path, 0)?)
+        let file = self.open(path)?;
+        let mut bytes = Vec::new();
+        self.read_into(file, &mut bytes)?;
+        utf8(bytes)
     }
 
-    fn read_bytes(&self, path: &Path, expected: usize) -> Result<Vec<u8>, VaultError> {
-        use std::io::Read;
+    fn open(&self, path: &Path) -> Result<std::fs::File, VaultError> {
         self.check()?;
         let file = std::fs::File::open(path);
         self.check()?;
-        let mut file = file?;
-        let mut bytes = Vec::with_capacity(expected);
+        Ok(file?)
+    }
+
+    fn read_into(
+        &self,
+        mut reader: impl std::io::Read,
+        bytes: &mut Vec<u8>,
+    ) -> Result<(), VaultError> {
         let mut buffer = [0; 65536];
         loop {
             self.check()?;
-            let result = file.read(&mut buffer);
+            let result = reader.read(&mut buffer);
             self.check()?;
             let size = match result {
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -79,10 +87,25 @@ impl ReadControl {
             };
             self.check()?;
             if size == 0 {
-                return Ok(bytes);
+                return Ok(());
             }
             bytes.extend_from_slice(&buffer[..size]);
         }
+    }
+
+    /// The whole content of the file `stamp` describes, or `None` when the file opened at
+    /// `path` is no longer that file or holds more than its stamp's length. Reads at most one
+    /// byte past that length, so a file that grew after its stamp was taken is never held.
+    fn read_stamped(&self, path: &Path, stamp: FileStamp) -> Result<Option<Vec<u8>>, VaultError> {
+        use std::io::Read;
+        let file = self.open(path)?;
+        if FileStamp::of_file(&file) != Some(stamp) {
+            return Ok(None);
+        }
+        let length = usize::try_from(stamp.length).map_err(std::io::Error::other)?;
+        let mut bytes = Vec::with_capacity(length.saturating_add(1));
+        self.read_into(file.take(stamp.length.saturating_add(1)), &mut bytes)?;
+        Ok((bytes.len() == length).then_some(bytes))
     }
 
     /// Reuse that keeps even files written moments before their read, so tests can exercise
@@ -122,8 +145,8 @@ impl ReadControl {
         &self,
         path: &Path,
     ) -> Result<Option<(Arc<str>, bool)>, VaultError> {
-        self.kept(self.page_texts.as_deref(), path, |expected| {
-            Ok(utf8(self.read_bytes(path, expected)?)?.into())
+        self.kept(self.page_texts.as_deref(), path, |bytes| {
+            Ok(utf8(bytes)?.into())
         })
     }
 
@@ -133,19 +156,20 @@ impl ReadControl {
     /// reads it incrementally rather than holding it whole. Kept apart from page texts so large
     /// files never displace pages.
     pub fn kept_file_bytes(&self, path: &Path) -> Result<Option<Arc<Vec<u8>>>, VaultError> {
-        self.kept(self.file_bytes.as_deref(), path, |expected| {
-            Ok(Arc::new(self.read_bytes(path, expected)?))
+        self.kept(self.file_bytes.as_deref(), path, |bytes| {
+            Ok(Arc::new(bytes))
         })
         .map(|kept| kept.map(|(bytes, _)| bytes))
     }
 
     /// Reads `path` whole only when its stamp, taken first, is settled and its length fits the
-    /// budget, so nothing larger than the budget is ever held for a file that cannot be kept.
+    /// budget, and only up to that length from the file the stamp describes, so nothing larger
+    /// than the budget is ever held for a file that cannot be kept.
     fn kept<T: ?Sized + AsRef<[u8]>>(
         &self,
         kept: Option<&Kept<T>>,
         path: &Path,
-        read: impl FnOnce(usize) -> Result<Arc<T>, VaultError>,
+        content: impl FnOnce(Vec<u8>) -> Result<Arc<T>, VaultError>,
     ) -> Result<Option<(Arc<T>, bool)>, VaultError> {
         let Some(kept) = kept else {
             return Ok(None);
@@ -162,7 +186,11 @@ impl ReadControl {
             kept.replace(path, None);
             return Ok(None);
         }
-        let content = read(length)?;
+        let Some(bytes) = self.read_stamped(path, stamp)? else {
+            kept.replace(path, None);
+            return Ok(None);
+        };
+        let content = content(bytes)?;
         let unchanged = FileStamp::of(path) == Some(stamp);
         kept.replace(path, unchanged.then(|| (stamp, content.clone())));
         Ok(Some((content, false)))
@@ -283,10 +311,17 @@ struct FileStamp {
 }
 
 impl FileStamp {
-    #[cfg(unix)]
     fn of(path: &Path) -> Option<Self> {
+        Self::from_metadata(&std::fs::metadata(path).ok()?)
+    }
+
+    fn of_file(file: &std::fs::File) -> Option<Self> {
+        Self::from_metadata(&file.metadata().ok()?)
+    }
+
+    #[cfg(unix)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Option<Self> {
         use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::metadata(path).ok()?;
         let changed = SystemTime::UNIX_EPOCH.checked_add(Duration::new(
             u64::try_from(metadata.ctime()).ok()?,
             u32::try_from(metadata.ctime_nsec()).ok()?,
@@ -301,7 +336,7 @@ impl FileStamp {
     }
 
     #[cfg(not(unix))]
-    fn of(_path: &Path) -> Option<Self> {
+    fn from_metadata(_metadata: &std::fs::Metadata) -> Option<Self> {
         None
     }
 
@@ -443,6 +478,35 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stamped_read_never_holds_more_than_the_file_its_stamp_describes() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pending.jsonl");
+        std::fs::write(&path, "12345").unwrap();
+        let read = ReadControl::default();
+        let stamp = FileStamp::of(&path).unwrap();
+        assert_eq!(read.read_stamped(&path, stamp).unwrap().unwrap(), b"12345");
+
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[b'6'; 5883])
+            .unwrap();
+        assert_eq!(
+            read.read_stamped(&path, stamp).unwrap(),
+            None,
+            "a file that grew after its stamp is left to the incremental path"
+        );
+
+        let replacement = directory.path().join("replacement.jsonl");
+        std::fs::write(&replacement, "54321").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(read.read_stamped(&path, stamp).unwrap(), None);
     }
 
     #[cfg(unix)]
