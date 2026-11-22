@@ -22,7 +22,7 @@ pub struct VerifiedFileRevision {
 pub struct ReadControl {
     cancelled: Option<Arc<AtomicBool>>,
     page_texts: Option<Arc<Kept<str>>>,
-    file_bytes: Option<Arc<Kept<[u8]>>>,
+    file_bytes: Option<Arc<Kept<Vec<u8>>>>,
 }
 
 impl ReadControl {
@@ -58,17 +58,16 @@ impl ReadControl {
     }
 
     pub fn read_to_string(&self, path: &Path) -> Result<String, VaultError> {
-        String::from_utf8(self.read_bytes(path)?)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+        utf8(self.read_bytes(path, 0)?)
     }
 
-    fn read_bytes(&self, path: &Path) -> Result<Vec<u8>, VaultError> {
+    fn read_bytes(&self, path: &Path, expected: usize) -> Result<Vec<u8>, VaultError> {
         use std::io::Read;
         self.check()?;
         let file = std::fs::File::open(path);
         self.check()?;
         let mut file = file?;
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(expected);
         let mut buffer = [0; 65536];
         loop {
             self.check()?;
@@ -95,56 +94,78 @@ impl ReadControl {
         self
     }
 
-    /// Whether this control keeps the page texts its traversals read for later ones.
-    pub(crate) fn keeps_page_texts(&self) -> bool {
-        self.page_texts.is_some()
-    }
-
     /// A page's complete text for discovery or work selection, and whether an earlier read
     /// supplied it. Callers that guard publication or record evidence read with
     /// `read_to_string`.
     pub fn page_text(&self, path: &Path) -> Result<(Arc<str>, bool), VaultError> {
-        self.kept(self.page_texts.as_deref(), path, || {
-            Ok(self.read_to_string(path)?.into())
+        let Some(kept) = self.page_texts.as_deref() else {
+            return Ok((self.read_to_string(path)?.into(), false));
+        };
+        self.check()?;
+        let stamp = FileStamp::of(path);
+        if let Some(text) = stamp.and_then(|stamp| kept.find(path, stamp)) {
+            return Ok((text, true));
+        }
+        let started = SystemTime::now();
+        let text: Arc<str> = self.read_to_string(path)?.into();
+        let settled = stamp.filter(|stamp| {
+            stamp.settled_before(started, kept.unsettled) && FileStamp::of(path) == Some(*stamp)
+        });
+        kept.replace(path, settled.map(|stamp| (stamp, text.clone())));
+        Ok((text, false))
+    }
+
+    /// `page_text` when this control keeps the page: an earlier read while the file keeps its
+    /// stamp, or a whole read it keeps now. `None`, having read nothing, when it would not keep
+    /// the page, so a caller needing less than the whole page can read only that.
+    pub(crate) fn kept_page_text(
+        &self,
+        path: &Path,
+    ) -> Result<Option<(Arc<str>, bool)>, VaultError> {
+        self.kept(self.page_texts.as_deref(), path, |expected| {
+            Ok(utf8(self.read_bytes(path, expected)?)?.into())
         })
     }
 
-    /// The complete bytes of a file other than a page, such as a pending queue file, for work
-    /// selection. Kept apart from page texts so large files never displace pages.
-    pub fn file_bytes(&self, path: &Path) -> Result<Arc<[u8]>, VaultError> {
-        self.kept(self.file_bytes.as_deref(), path, || {
-            Ok(self.read_bytes(path)?.into())
+    /// The complete bytes of a file other than a page, such as a pending queue file, when this
+    /// control keeps it: an earlier read while the file keeps its stamp, or a whole read it
+    /// keeps now. `None`, having read nothing, when it would not keep the file, so the caller
+    /// reads it incrementally rather than holding it whole. Kept apart from page texts so large
+    /// files never displace pages.
+    pub fn kept_file_bytes(&self, path: &Path) -> Result<Option<Arc<Vec<u8>>>, VaultError> {
+        self.kept(self.file_bytes.as_deref(), path, |expected| {
+            Ok(Arc::new(self.read_bytes(path, expected)?))
         })
-        .map(|(bytes, _)| bytes)
+        .map(|kept| kept.map(|(bytes, _)| bytes))
     }
 
+    /// Reads `path` whole only when its stamp, taken first, is settled and its length fits the
+    /// budget, so nothing larger than the budget is ever held for a file that cannot be kept.
     fn kept<T: ?Sized + AsRef<[u8]>>(
         &self,
         kept: Option<&Kept<T>>,
         path: &Path,
-        read: impl FnOnce() -> Result<Arc<T>, VaultError>,
-    ) -> Result<(Arc<T>, bool), VaultError> {
+        read: impl FnOnce(usize) -> Result<Arc<T>, VaultError>,
+    ) -> Result<Option<(Arc<T>, bool)>, VaultError> {
         let Some(kept) = kept else {
-            return Ok((read()?, false));
+            return Ok(None);
         };
         self.check()?;
-        let stamp = FileStamp::of(path);
-        if let Some(content) = stamp.and_then(|stamp| kept.find(path, stamp)) {
-            return Ok((content, true));
+        let Some(stamp) = FileStamp::of(path) else {
+            return Ok(None);
+        };
+        if let Some(content) = kept.find(path, stamp) {
+            return Ok(Some((content, true)));
         }
-        let started = SystemTime::now();
-        let content = read()?;
-        let settled = stamp.filter(|stamp| {
-            stamp.settled_before(started, kept.unsettled) && FileStamp::of(path) == Some(*stamp)
-        });
-        kept.replace(path, settled.map(|stamp| (stamp, content.clone())));
-        Ok((content, false))
-    }
-
-    /// The text an earlier read returned, while the file still carries the same stamp.
-    pub(crate) fn reusable_page_text(&self, path: &Path) -> Option<Arc<str>> {
-        let texts = self.page_texts.as_ref()?;
-        texts.find(path, FileStamp::of(path)?)
+        let length = usize::try_from(stamp.length).unwrap_or(usize::MAX);
+        if !stamp.settled_before(SystemTime::now(), kept.unsettled) || !kept.admits(path, length) {
+            kept.replace(path, None);
+            return Ok(None);
+        }
+        let content = read(length)?;
+        let unchanged = FileStamp::of(path) == Some(stamp);
+        kept.replace(path, unchanged.then(|| (stamp, content.clone())));
+        Ok(Some((content, false)))
     }
 }
 
@@ -193,6 +214,20 @@ impl<T: ?Sized + AsRef<[u8]>> Kept<T> {
         }
     }
 
+    /// Whether `length` more bytes fit once the path's previous content, which can no longer
+    /// match, is dropped.
+    fn admits(&self, path: &Path, length: usize) -> bool {
+        self.entries.lock().is_ok_and(|entries| {
+            let previous = entries
+                .contents
+                .get(path)
+                .map_or(0, |(_, content)| (**content).as_ref().len());
+            (entries.bytes - previous)
+                .checked_add(length)
+                .is_some_and(|total| total <= self.budget)
+        })
+    }
+
     fn find(&self, path: &Path, stamp: FileStamp) -> Option<Arc<T>> {
         let entries = self.entries.lock().ok()?;
         entries
@@ -221,6 +256,11 @@ impl<T: ?Sized + AsRef<[u8]>> Kept<T> {
             }
         }
     }
+}
+
+fn utf8(bytes: Vec<u8>) -> Result<String, VaultError> {
+    String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
 }
 
 const UNSETTLED: Duration = Duration::from_secs(2);
@@ -317,10 +357,12 @@ mod tests {
         let read = ReadControl::default().with_immediate_page_reuse();
         assert_eq!(read.page_text(&path).unwrap(), ("first".into(), false));
         assert_eq!(read.page_text(&path).unwrap(), ("first".into(), true));
-        assert_eq!(read.reusable_page_text(&path).as_deref(), Some("first"));
+        assert_eq!(
+            read.kept_page_text(&path).unwrap(),
+            Some(("first".into(), true))
+        );
 
         std::fs::write(&path, "other").unwrap();
-        assert_eq!(read.reusable_page_text(&path), None);
         assert_eq!(read.page_text(&path).unwrap(), ("other".into(), false));
 
         let replacement = directory.path().join("replacement.md");
@@ -329,7 +371,7 @@ mod tests {
         assert_eq!(read.page_text(&path).unwrap(), ("moved".into(), false));
 
         std::fs::remove_file(&path).unwrap();
-        assert_eq!(read.reusable_page_text(&path), None);
+        assert!(read.kept_page_text(&path).unwrap().is_none());
         assert!(read.page_text(&path).is_err());
     }
 
@@ -347,7 +389,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(plain.page_text(&path).unwrap(), ("fresh".into(), false));
         }
-        assert_eq!(plain.reusable_page_text(&path), None);
+        assert!(plain.kept_page_text(&path).unwrap().is_none());
 
         let cancelled = Arc::new(AtomicBool::new(true));
         let read = ReadControl::new(cancelled).with_page_reuse();
@@ -356,15 +398,24 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn file_bytes_are_reused_while_unchanged_and_never_displace_pages() {
+    fn whole_files_are_read_only_when_they_can_be_kept() {
         let directory = tempfile::tempdir().unwrap();
-        let [queue, page] = ["pending.jsonl", "page.md"].map(|name| directory.path().join(name));
+        let [queue, page, large] =
+            ["pending.jsonl", "page.md", "large.jsonl"].map(|name| directory.path().join(name));
         std::fs::write(&queue, [b'1', b'2', 0xff, b'4', b'5', b'6']).unwrap();
         std::fs::write(&page, "abcd").unwrap();
+        std::fs::write(&large, "1234567").unwrap();
         let read = reusing(Duration::ZERO, 6);
-        let first = read.file_bytes(&queue).unwrap();
-        assert_eq!(&*first, [b'1', b'2', 0xff, b'4', b'5', b'6']);
-        assert!(Arc::ptr_eq(&first, &read.file_bytes(&queue).unwrap()));
+        let first = read.kept_file_bytes(&queue).unwrap().unwrap();
+        assert_eq!(**first, [b'1', b'2', 0xff, b'4', b'5', b'6']);
+        assert!(Arc::ptr_eq(
+            &first,
+            &read.kept_file_bytes(&queue).unwrap().unwrap()
+        ));
+        assert!(
+            read.kept_file_bytes(&large).unwrap().is_none(),
+            "a file over the budget is left to an incremental read"
+        );
         assert_eq!(read.page_text(&page).unwrap(), ("abcd".into(), false));
         assert_eq!(
             read.page_text(&page).unwrap(),
@@ -373,12 +424,25 @@ mod tests {
         );
 
         std::fs::write(&queue, "7").unwrap();
-        assert_eq!(&*read.file_bytes(&queue).unwrap(), b"7");
-        let plain = ReadControl::default();
-        assert!(!Arc::ptr_eq(
-            &plain.file_bytes(&queue).unwrap(),
-            &plain.file_bytes(&queue).unwrap()
-        ));
+        assert_eq!(**read.kept_file_bytes(&queue).unwrap().unwrap(), *b"7");
+        std::fs::remove_file(&queue).unwrap();
+        assert!(read.kept_file_bytes(&queue).unwrap().is_none());
+
+        let unsettled = reusing(Duration::from_secs(3600), PAGE_BUDGET);
+        assert!(unsettled.kept_file_bytes(&large).unwrap().is_none());
+        assert!(unsettled.kept_page_text(&page).unwrap().is_none());
+        assert!(
+            ReadControl::default()
+                .kept_file_bytes(&large)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            ReadControl::default()
+                .kept_page_text(&page)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[cfg(unix)]

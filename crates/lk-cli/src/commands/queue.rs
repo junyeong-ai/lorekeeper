@@ -580,13 +580,12 @@ fn read_pending_tasks_controlled(
     };
     for file in pending_queue_files_controlled(queue, control)? {
         control.check().into_diagnostic()?;
-        let captured = control
-            .file_bytes(&file)
-            .map_err(|error| miette::miette!("read {}: {error}", file.display()))
-            .and_then(|raw| {
-                lk_queue::decode_tasks(&file, &raw)
-                    .map_err(|error| miette::miette!("read {}: {error}", file.display()))
-            });
+        let captured = match control.kept_file_bytes(&file) {
+            Ok(Some(raw)) => lk_queue::decode_tasks(&file, &raw)
+                .map_err(|error| miette::miette!("read {}: {error}", file.display())),
+            Ok(None) => read_tasks(&file),
+            Err(error) => Err(miette::miette!("read {}: {error}", file.display())),
+        };
         control.check().into_diagnostic()?;
         let read = match captured {
             Ok(read) => read,

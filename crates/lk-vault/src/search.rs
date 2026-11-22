@@ -881,10 +881,10 @@ impl ConceptVocabulary {
         Self::from_files(&files, metrics, read)
     }
 
-    /// The vocabulary of the concept-collection pages in `files`. Under a control that keeps
-    /// page texts a page is read whole, so the traversal that follows reuses it instead of
-    /// opening the file again; otherwise only its metadata header is read. A body that is
-    /// not UTF-8 never fails the vocabulary: its header is read as before.
+    /// The vocabulary of the concept-collection pages in `files`. A page the control keeps is
+    /// read whole, so the traversal that follows reuses it instead of opening the file again;
+    /// a page it would not keep, and every page under a plain control, has only its metadata
+    /// header read. A body that is not UTF-8 never fails the vocabulary: its header is read.
     pub(super) fn from_files(
         files: &CollectionFiles,
         metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
@@ -899,38 +899,27 @@ impl ConceptVocabulary {
                     return Ok(());
                 }
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-                let header_only = || {
-                    crate::store::read_frontmatter_header_controlled(
-                        std::io::BufReader::new(std::fs::File::open(full)?),
-                        read,
-                    )
+                let kept = match read.kept_page_text(full) {
+                    Err(VaultError::Io(error))
+                        if error.kind() == std::io::ErrorKind::InvalidData =>
+                    {
+                        None
+                    }
+                    kept => kept?,
                 };
-                let (header, bytes, reused) = match read.reusable_page_text(full) {
-                    Some(text) => {
-                        let (header, bytes) = crate::store::read_frontmatter_header_controlled(
+                let (header, bytes, reused) = match kept {
+                    Some((text, reused)) => {
+                        let (header, consumed) = crate::store::read_frontmatter_header_controlled(
                             text.as_bytes(),
                             read,
                         )?;
-                        (header, bytes, true)
+                        (header, if reused { consumed } else { text.len() }, reused)
                     }
-                    None if read.keeps_page_texts() => match read.page_text(full) {
-                        Ok((text, reused)) => {
-                            let (header, _) = crate::store::read_frontmatter_header_controlled(
-                                text.as_bytes(),
-                                read,
-                            )?;
-                            (header, text.len(), reused)
-                        }
-                        Err(VaultError::Io(error))
-                            if error.kind() == std::io::ErrorKind::InvalidData =>
-                        {
-                            let (header, bytes) = header_only()?;
-                            (header, bytes, false)
-                        }
-                        Err(error) => return Err(error),
-                    },
                     None => {
-                        let (header, bytes) = header_only()?;
+                        let (header, bytes) = crate::store::read_frontmatter_header_controlled(
+                            std::io::BufReader::new(std::fs::File::open(full)?),
+                            read,
+                        )?;
                         (header, bytes, false)
                     }
                 };
@@ -2648,6 +2637,34 @@ mod tests {
         assert_eq!(metrics.files, 3);
         assert!(metrics.bytes < 256);
         assert!(content.len() > 500_000);
+        let whole = |read: &crate::ReadControl| {
+            let mut metrics = crate::DiscoveryReadMetrics::default();
+            let loaded =
+                ConceptVocabulary::load_controlled(root.path(), &dirs, Some(&mut metrics), read)
+                    .unwrap();
+            assert_eq!(loaded.names, vocabulary.names);
+            metrics.bytes > content.len()
+        };
+        assert!(whole(
+            &crate::ReadControl::default().with_immediate_page_reuse()
+        ));
+        for entry in std::fs::read_dir(root.path().join(concepts_dir(&dirs))).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                std::fs::File::options()
+                    .write(true)
+                    .open(path)
+                    .unwrap()
+                    .set_modified(
+                        std::time::SystemTime::now() + std::time::Duration::from_secs(3600),
+                    )
+                    .unwrap();
+            }
+        }
+        assert!(
+            !whole(&crate::ReadControl::default().with_page_reuse()),
+            "a page the control cannot keep yet has only its header read"
+        );
         let shared = CollectionFiles::knowledge_controlled(
             root.path(),
             &dirs,
