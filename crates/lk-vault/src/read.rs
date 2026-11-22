@@ -126,30 +126,20 @@ impl ReadControl {
     }
 
     /// A page's complete text for discovery or work selection, and whether an earlier read
-    /// supplied it. Callers that guard publication or record evidence read with
+    /// supplied it: the kept text when this control keeps the page, otherwise a read of the
+    /// current file. Callers that guard publication or record evidence read with
     /// `read_to_string`.
     pub fn page_text(&self, path: &Path) -> Result<(Arc<str>, bool), VaultError> {
-        let Some(kept) = self.page_texts.as_deref() else {
-            return Ok((self.read_to_string(path)?.into(), false));
-        };
-        self.check()?;
-        let stamp = FileStamp::of(path);
-        if let Some(text) = stamp.and_then(|stamp| kept.find(path, stamp)) {
-            return Ok((text, true));
+        match self.kept_page_text(path)? {
+            Some(kept) => Ok(kept),
+            None => Ok((self.read_to_string(path)?.into(), false)),
         }
-        let started = SystemTime::now();
-        let text: Arc<str> = self.read_to_string(path)?.into();
-        let settled = stamp.filter(|stamp| {
-            stamp.settled_before(started, kept.unsettled) && FileStamp::of(path) == Some(*stamp)
-        });
-        kept.replace(path, settled.map(|stamp| (stamp, text.clone())));
-        Ok((text, false))
     }
 
-    /// `page_text` when this control keeps the page: an earlier read while the file keeps its
-    /// stamp, or a whole read it keeps now. `None` when it would not keep the page, having read
-    /// nothing, or when the page changed while it was read, so a caller needing less than the
-    /// whole page reads only that from the current file.
+    /// A page's complete text when this control keeps it: an earlier read while the file keeps
+    /// its stamp, or a whole read it keeps now. `None` when it would not keep the page, having
+    /// read nothing, or when the page changed while it was read, so a caller needing less than
+    /// the whole page reads only that from the current file.
     pub(crate) fn kept_page_text(
         &self,
         path: &Path,
