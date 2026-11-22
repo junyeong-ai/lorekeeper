@@ -91,6 +91,15 @@ fn ensure_config_current(path: &std::path::Path, expected: &str) -> miette::Resu
     Ok(())
 }
 
+/// [`ensure_config_current`] as an owned check a vault session repeats before it publishes.
+fn config_check(
+    path: &std::path::Path,
+    expected: &str,
+) -> impl Fn() -> miette::Result<()> + Clone + Send + Sync + 'static {
+    let (path, expected) = (path.to_path_buf(), expected.to_owned());
+    move || ensure_config_current(&path, &expected)
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 pub enum PublicationWorkflow {
     Refuse,
@@ -276,7 +285,7 @@ async fn run_with_identity(
             &candidates,
             dry_run,
             access.wait_for_vault,
-            || ensure_config_current(&config_path, &config_revision),
+            config_check(&config_path, &config_revision),
         )
         .await?
         {
@@ -384,7 +393,7 @@ async fn run_with_identity(
                     &pipeline,
                     dry_run,
                     access.wait_for_vault,
-                    || ensure_config_current(&config_path, &config_revision),
+                    config_check(&config_path, &config_revision),
                 )
                 .await
             } else {
@@ -493,7 +502,7 @@ async fn run_with_identity(
             super::publication::acquire_mutation_checked(
                 &vault_root,
                 access.wait_for_vault,
-                || {
+                move || {
                     pin.validate()?;
                     #[cfg(unix)]
                     if let Some(root) = &root_pin {

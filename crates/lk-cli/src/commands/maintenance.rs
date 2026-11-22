@@ -136,7 +136,7 @@ pub async fn run(
     } else {
         let pin = super::ConfigurationPin::from_loaded(config_path, config_revision);
         Some(
-            super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, || {
+            super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, move || {
                 pin.validate()?;
                 #[cfg(unix)]
                 if let Some(root) = &root_pin {

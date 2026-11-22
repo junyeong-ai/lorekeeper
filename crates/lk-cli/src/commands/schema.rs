@@ -780,7 +780,7 @@ pub async fn run_with_wait(
 pub(super) async fn run_prepared(
     prepared: super::RootConfig,
     wait_for_vault: bool,
-    mut validate: impl FnMut() -> miette::Result<()>,
+    validate: impl Fn() -> miette::Result<()> + Send + Sync + 'static,
 ) -> miette::Result<()> {
     let super::RootConfig {
         root: vault_root,
@@ -813,12 +813,16 @@ pub(super) async fn run_prepared(
     };
 
     std::fs::create_dir_all(&vault_root).map_err(|e| miette::miette!("create vault: {e}"))?;
-    let mutation =
-        super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, || {
+    let validate = std::sync::Arc::new(validate);
+    let mutation = super::publication::acquire_mutation_checked(&vault_root, wait_for_vault, {
+        let pin = pin.clone();
+        let validate = std::sync::Arc::clone(&validate);
+        move || {
             pin.validate()?;
             validate()
-        })
-        .await?;
+        }
+    })
+    .await?;
     let vault_root = mutation.root().to_path_buf();
 
     let content = render_agents_md(locale, &dirs, personal, board.as_deref());

@@ -476,15 +476,18 @@ pub(super) async fn acquire(
     pipeline: &lk_pipeline::Pipeline,
     dry_run: bool,
     wait: bool,
-    validate_config: impl Fn() -> miette::Result<()>,
+    validate_config: impl Fn() -> miette::Result<()> + Clone + Send + Sync + 'static,
 ) -> Result<super::SourceCapture, SourceError> {
     let root = &context.vault_root;
     if !dry_run {
         std::fs::create_dir_all(root).map_err(error)?;
-        let _session =
-            super::super::publication::acquire_mutation_checked(root, wait, &validate_config)
-                .await
-                .map_err(error)?;
+        let _session = super::super::publication::acquire_mutation_checked(
+            root,
+            wait,
+            validate_config.clone(),
+        )
+        .await
+        .map_err(error)?;
     }
     let inbox = lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)?;
     let (path, marker_path, marker) = state_paths(id, &inbox);
@@ -551,10 +554,13 @@ pub(super) async fn acquire(
     let turn = state.reserve(&entries, &verified, limit)?;
     let reserved = serde_json::to_string(&state).map_err(error)?;
     if !dry_run {
-        let session =
-            super::super::publication::acquire_mutation_checked(root, wait, &validate_config)
-                .await
-                .map_err(error)?;
+        let session = super::super::publication::acquire_mutation_checked(
+            root,
+            wait,
+            validate_config.clone(),
+        )
+        .await
+        .map_err(error)?;
         if lk_source::manual_inbox_dir(&source.params, root, &context.vault_dirs)? != inbox {
             return Err(error("canonical inbox changed before reservation"));
         }

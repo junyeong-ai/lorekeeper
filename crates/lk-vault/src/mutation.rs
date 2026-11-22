@@ -249,7 +249,10 @@ pub struct MutationSession {
     root: PathBuf,
     journal: PathBuf,
     _lock: File,
+    precondition: Option<Precondition>,
 }
+
+type Precondition = Box<dyn Fn() -> Result<(), String> + Send + Sync>;
 
 impl MutationSession {
     pub fn acquire(root: &Path) -> Result<Self, VaultError> {
@@ -274,6 +277,7 @@ impl MutationSession {
             root,
             journal,
             _lock,
+            precondition: None,
         };
         match fs::read(&session.journal) {
             Ok(bytes) => {
@@ -294,6 +298,18 @@ impl MutationSession {
         &self.root
     }
 
+    /// Require `precondition` before every plan this session publishes. It runs under the
+    /// writer lock after preflight and immediately before the plan is journaled, so a refusal
+    /// publishes nothing: a selection checked only when the lock was taken cannot change under
+    /// a plan that is still being derived or verified.
+    pub fn with_precondition(
+        mut self,
+        precondition: impl Fn() -> Result<(), String> + Send + Sync + 'static,
+    ) -> Self {
+        self.precondition = Some(Box::new(precondition));
+        self
+    }
+
     pub fn apply(&self, plan: MutationPlan) -> Result<(), VaultError> {
         if self.journal.try_exists()? {
             return Err(io::Error::other(
@@ -305,6 +321,9 @@ impl MutationSession {
             return Ok(());
         }
         self.preflight(&plan)?;
+        if let Some(precondition) = &self.precondition {
+            precondition().map_err(VaultError::PublicationRefused)?;
+        }
         self.clear_progress()?;
         let journal = Journal { version: 1, plan };
         self.save(&journal)?;
@@ -1596,5 +1615,39 @@ mod tests {
         assert!(!root.path().join("new.md").exists());
         assert!(!session.journal.exists());
         assert!(MutationSession::acquire(root.path()).is_err());
+    }
+
+    #[test]
+    fn a_refused_precondition_publishes_and_journals_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let current = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let selection = std::sync::Arc::clone(&current);
+        let session = MutationSession::acquire(root.path())
+            .unwrap()
+            .with_precondition(move || {
+                if selection.load(std::sync::atomic::Ordering::SeqCst) {
+                    Ok(())
+                } else {
+                    Err("selection changed".into())
+                }
+            });
+        let plan = || {
+            let mut plan = MutationPlan::default();
+            plan.create("page.md", "body".into());
+            plan
+        };
+        assert!(matches!(
+            session.apply(plan()),
+            Err(VaultError::PublicationRefused(reason)) if reason == "selection changed"
+        ));
+        assert!(!root.path().join("page.md").exists());
+        assert!(!session.journal.exists());
+
+        current.store(true, std::sync::atomic::Ordering::SeqCst);
+        session.apply(plan()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("page.md")).unwrap(),
+            "body"
+        );
     }
 }

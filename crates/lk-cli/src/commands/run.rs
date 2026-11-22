@@ -1329,7 +1329,7 @@ mod native {
             let started_at = Instant::now();
             let acquired = self
                 .supervisor
-                .acquire_mutation(&self.root, || {
+                .acquire_mutation(&self.root, move || {
                     pin.validate()?;
                     if let Some(root) = &root_pin {
                         root.validate()?;

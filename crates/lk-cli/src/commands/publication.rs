@@ -10,16 +10,23 @@ pub(super) fn acquire_mutation_now(root: &Path) -> miette::Result<lk_vault::Muta
     finish_claim(claim, || Ok(()))
 }
 
+/// The selection checked around acquisition and recovery also guards every publication
+/// through the session, so a plan derived after the selection changed never publishes.
 fn finish_claim(
     claim: lk_vault::MutationClaim,
-    mut validate: impl FnMut() -> miette::Result<()>,
+    validate: impl Fn() -> miette::Result<()> + Send + Sync + 'static,
 ) -> miette::Result<lk_vault::MutationSession> {
     validate()?;
     super::workflow::validate_root(claim.root())?;
     let session = claim.into_session().into_diagnostic()?;
     validate()?;
     super::workflow::validate_root(session.root())?;
-    Ok(session)
+    let root = session.root().to_path_buf();
+    Ok(session.with_precondition(move || {
+        validate()
+            .and_then(|()| super::workflow::validate_root(&root))
+            .map_err(|error| error.to_string())
+    }))
 }
 
 pub(super) async fn acquire_mutation(
@@ -27,13 +34,14 @@ pub(super) async fn acquire_mutation(
     wait: bool,
     pin: &super::ConfigurationPin,
 ) -> miette::Result<lk_vault::MutationSession> {
-    acquire_mutation_checked(root, wait, || pin.validate()).await
+    let pin = pin.clone();
+    acquire_mutation_checked(root, wait, move || pin.validate()).await
 }
 
 pub(super) async fn acquire_mutation_checked(
     root: &Path,
     wait: bool,
-    mut validate: impl FnMut() -> miette::Result<()>,
+    validate: impl Fn() -> miette::Result<()> + Send + Sync + 'static,
 ) -> miette::Result<lk_vault::MutationSession> {
     let mut waiting = false;
     loop {
@@ -216,5 +224,37 @@ mod tests {
         assert!(error.to_string().contains("unpublished targets"));
         assert!(!directory.path().join("daily").exists());
         assert!(!directory.path().join(".lorekeeper/queue").exists());
+    }
+    #[tokio::test]
+    async fn a_session_publishes_only_under_the_configuration_it_was_acquired_with() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config.yaml");
+        let original = "llm:\n  provider: queue\n";
+        std::fs::write(&config, original).unwrap();
+        let config = config.canonicalize().unwrap();
+        let vault = directory.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let pin = super::super::ConfigurationPin::from_loaded(
+            config.clone(),
+            lk_core::concept::file_revision(original),
+        );
+        let session = acquire_mutation(&vault, false, &pin).await.unwrap();
+        let plan = || {
+            let mut plan = lk_vault::MutationPlan::default();
+            plan.create("page.md", "body".into());
+            plan
+        };
+
+        std::fs::write(&config, "llm:\n  provider: noop\n").unwrap();
+        let error = session.apply(plan()).unwrap_err();
+        assert!(
+            error.to_string().contains("selected configuration changed"),
+            "{error}"
+        );
+        assert!(!vault.join("page.md").exists());
+
+        std::fs::write(&config, original).unwrap();
+        session.apply(plan()).unwrap();
+        assert!(vault.join("page.md").exists());
     }
 }

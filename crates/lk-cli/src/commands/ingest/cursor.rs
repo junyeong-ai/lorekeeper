@@ -41,7 +41,7 @@ pub(super) async fn reserve_start(
     candidates: &BTreeSet<String>,
     dry_run: bool,
     wait: bool,
-    mut validate_config: impl FnMut() -> miette::Result<()>,
+    validate_config: impl Fn() -> miette::Result<()> + Clone + Send + Sync + 'static,
 ) -> miette::Result<Option<String>> {
     if candidates.is_empty() {
         return Ok(None);
@@ -51,8 +51,12 @@ pub(super) async fn reserve_start(
     } else {
         std::fs::create_dir_all(root).into_diagnostic()?;
         Some(
-            super::super::publication::acquire_mutation_checked(root, wait, &mut validate_config)
-                .await?,
+            super::super::publication::acquire_mutation_checked(
+                root,
+                wait,
+                validate_config.clone(),
+            )
+            .await?,
         )
     };
     validate_config()?;
@@ -97,7 +101,7 @@ mod tests {
         candidates: &BTreeSet<String>,
         dry_run: bool,
         wait: bool,
-        validate: impl FnMut() -> miette::Result<()>,
+        validate: impl Fn() -> miette::Result<()> + Clone + Send + Sync + 'static,
     ) -> miette::Result<Option<String>> {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()

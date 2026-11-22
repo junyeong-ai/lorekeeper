@@ -140,6 +140,9 @@ pub enum VaultError {
     Cancelled,
     #[error("vault mutation is busy: lock acquisition would block")]
     MutationBusy,
+    /// A session's publication precondition refused a plan before it was journaled.
+    #[error("{0}")]
+    PublicationRefused(String),
     #[error("section: {0}")]
     SectionBody(#[from] lk_core::markdown::SectionBodyError),
     #[error("missing or duplicate section: {0}")]

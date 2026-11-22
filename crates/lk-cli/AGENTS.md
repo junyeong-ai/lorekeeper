@@ -18,7 +18,8 @@ deferred subcommands expose their names eagerly for name-only discovery.
   and `LORE_CONFIG_REVISION` to children; every CLI config load rejects changed bytes or
   another path. A workflow also pins its original root selector, working path and
   directory identity. Bind parent and child I/O to that working path; validate selection
-  before and after waiting/recovery and before host/publication. Same-directory aliases
+  before and after waiting/recovery and before host/publication; mutation sessions carry
+  their acquisition check as the publication precondition. Same-directory aliases
   remain valid; another directory or incomplete inherited context refuses. Root context
   validates scope, never lease ownership or reentrancy. Native jobs stop after drift and
   retain unfinished work.

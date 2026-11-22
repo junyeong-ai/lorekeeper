@@ -28,6 +28,7 @@ pub(crate) struct Protection {
     root_pin: Option<crate::commands::workflow::VaultRootPin>,
 }
 
+#[derive(Clone)]
 struct Configuration {
     path: PathBuf,
     revision: String,
@@ -74,6 +75,20 @@ impl Configuration {
         }
         Ok(())
     }
+}
+
+fn recheck(
+    config: Option<&Configuration>,
+    #[cfg(unix)] root_pin: Option<&crate::commands::workflow::VaultRootPin>,
+) -> miette::Result<()> {
+    if let Some(config) = config {
+        config.validate()?;
+    }
+    #[cfg(unix)]
+    if let Some(pin) = root_pin {
+        pin.validate()?;
+    }
+    Ok(())
 }
 
 impl Protection {
@@ -470,8 +485,17 @@ impl Protection {
                 selected.revision.clone(),
             ),
         };
-        crate::commands::schema::run_prepared(prepared, false, || self.recheck_configuration())
-            .await
+        let config = self.config.clone();
+        #[cfg(unix)]
+        let root_pin = self.root_pin.clone();
+        crate::commands::schema::run_prepared(prepared, false, move || {
+            recheck(
+                config.as_ref(),
+                #[cfg(unix)]
+                root_pin.as_ref(),
+            )
+        })
+        .await
     }
 
     pub(super) fn claim_publication(
@@ -501,14 +525,11 @@ impl Protection {
     }
 
     pub(super) fn recheck_configuration(&self) -> miette::Result<()> {
-        if let Some(config) = &self.config {
-            config.validate()?;
-        }
-        #[cfg(unix)]
-        if let Some(pin) = &self.root_pin {
-            pin.validate()?;
-        }
-        Ok(())
+        recheck(
+            self.config.as_ref(),
+            #[cfg(unix)]
+            self.root_pin.as_ref(),
+        )
     }
 
     pub(super) fn release(&mut self) {

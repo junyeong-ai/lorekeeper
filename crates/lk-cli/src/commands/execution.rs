@@ -156,10 +156,12 @@ impl Supervisor {
         }
     }
 
+    /// The selection `validate` checks around acquisition and recovery also guards every
+    /// publication through the returned session.
     pub async fn acquire_mutation(
         &mut self,
         root: &Path,
-        mut validate: impl FnMut() -> miette::Result<()>,
+        validate: impl Fn() -> miette::Result<()> + Send + Sync + 'static,
     ) -> miette::Result<Option<(lk_vault::MutationSession, bool)>> {
         if self.is_cancelled() {
             return Ok(None);
@@ -174,6 +176,8 @@ impl Supervisor {
                         validate()?;
                         let session = claim.into_session().into_diagnostic()?;
                         validate()?;
+                        let session = session
+                            .with_precondition(move || validate().map_err(|e| e.to_string()));
                         return Ok(Some((session, waited)));
                     }
                     Err(lk_vault::VaultError::MutationBusy) => {

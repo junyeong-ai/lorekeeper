@@ -40,6 +40,7 @@ pub struct GlobalOptions {
     pub template_dir: Option<PathBuf>,
 }
 
+#[derive(Clone)]
 pub(super) enum ConfigurationPin {
     Absent,
     Loaded { path: PathBuf, revision: String },
