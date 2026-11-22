@@ -191,6 +191,8 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
   Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
+  A page missing its Sources heading still records count and input; the heading is
+  not invented, and lint reports it.
   `graph backlinks-sync` plans from its scan's texts: it scans through a page-keeping
   `ReadControl`, and the planner reads concept and source pages with `page_text`. The
   plan guards the current bytes of every page it derives from, so kept texts never

@@ -131,9 +131,10 @@ pub struct BacklinksSyncResult {
     /// evidence it answers to.
     pub resynthesize: Vec<ConceptResynthesis>,
     /// Concept pages that could not record their derived state: they carry no frontmatter
-    /// block, one that will not parse, no heading to hold one of the sections, or no declared
-    /// concept type where a new typed synthesis is required. Reported rather than silently
-    /// skipped; these pages remain unchanged and the command exits non-zero while any remain.
+    /// block, one that will not parse, an `llm_inputs` mapping no key can be added to, or no
+    /// declared concept type where a new typed synthesis is required. Reported rather than
+    /// silently skipped; these pages remain unchanged and the command exits non-zero while any
+    /// remain.
     /// Skipped rather than fatal, because aborting mid-sweep leaves every page already written
     /// synced and every page after it not, and one corrupt page blocks it forever.
     ///
@@ -160,7 +161,8 @@ pub struct BacklinksSyncResult {
 /// same routine that compares against it.
 ///
 /// Takes no locale: the existing Sources heading selects the discovery instruction's
-/// language. A page carrying no supported heading is skipped rather than given one.
+/// language. A page carrying no supported heading is not given one; its count and synthesis
+/// input are still recorded.
 /// Whether this sweep records the input a concept's synthesis is owed against.
 ///
 /// The input is a promise that something will answer it: `lore doctor` reports a recorded
@@ -707,9 +709,6 @@ pub fn concept_resynthesis(
     frontmatter::parse_page(&raw).map_err(|e| fail(&e.to_string()))?;
     let section = resolve_section(&raw, |s| s.concept_synthesis)
         .ok_or_else(|| fail("concept lacks synthesis heading"))?;
-    if resolve_section(&raw, |s| s.concept_sources).is_none() {
-        return Err(fail("concept lacks sources heading"));
-    }
     let related = resolve_section(&raw, |s| s.related);
     Ok(ConceptResynthesis {
         path: path.to_path_buf(),
@@ -850,20 +849,23 @@ fn plan_concept_backlinks_inner(
         // keeps its old-language spelling) and rewritten under the one the page actually
         // carries — mirrors the pipeline's all-locale `capture_section`.
         //
-        // Preserve the page-format contract: a missing Sources heading is reported/skipped,
-        // rather than inventing a section while reconciling its derived bookkeeping.
-        let Some(sources_section) = resolve_section(raw, |s| s.concept_sources) else {
-            report.skipped.push(page.path.clone());
-            continue;
-        };
-
-        let sources_body = lk_core::concept_sources::classify(sources_section.body, &page.path);
-        let existing_set = match &sources_body {
-            lk_core::concept_sources::SourcesBody::Legacy(sources) => {
+        // The Sources body is a discovery instruction, not the evidence: the count and the
+        // synthesis input below derive from the citation graph and live in frontmatter. A page
+        // missing the heading still records both, so whatever answers its synthesis answers its
+        // current citations. The section is not invented; `graph lint` reports the heading.
+        let sources_section = resolve_section(raw, |s| s.concept_sources).map(|section| {
+            let body = lk_core::concept_sources::classify(section.body, &page.path);
+            (section, body)
+        });
+        let existing_set = match sources_section.as_ref().map(|(_, body)| body) {
+            Some(lk_core::concept_sources::SourcesBody::Legacy(sources)) => {
                 Some(sources.iter().map(String::as_str).collect::<BTreeSet<_>>())
             }
-            lk_core::concept_sources::SourcesBody::Compact
-            | lk_core::concept_sources::SourcesBody::Authored => None,
+            Some(
+                lk_core::concept_sources::SourcesBody::Compact
+                | lk_core::concept_sources::SourcesBody::Authored,
+            )
+            | None => None,
         };
         let desired_set: BTreeSet<&str> = sources.iter().map(String::as_str).collect();
 
@@ -996,19 +998,23 @@ fn plan_concept_backlinks_inner(
         // the command still exits non-zero — including for the synthesis it can no longer be
         // owed, since a task naming a page that cannot receive the result would fail every
         // drain forever.
-        let sources_content = if sources_body == lk_core::concept_sources::SourcesBody::Authored {
-            report.preserved_sources.push(page.path.clone());
-            raw.to_owned()
-        } else {
-            let locale = lk_core::i18n::Locale::ALL
-                .iter()
-                .find(|locale| locale.strings().concept_sources == sources_section.heading)
-                .expect("resolved source heading belongs to a known locale");
-            replace_section(
-                raw,
-                sources_section.heading,
-                lk_core::concept_sources::render(*locale),
-            )
+        let sources_content = match &sources_section {
+            None => raw.to_owned(),
+            Some((_, lk_core::concept_sources::SourcesBody::Authored)) => {
+                report.preserved_sources.push(page.path.clone());
+                raw.to_owned()
+            }
+            Some((section, _)) => {
+                let locale = lk_core::i18n::Locale::ALL
+                    .iter()
+                    .find(|locale| locale.strings().concept_sources == section.heading)
+                    .expect("resolved source heading belongs to a known locale");
+                replace_section(
+                    raw,
+                    section.heading,
+                    lk_core::concept_sources::render(*locale),
+                )
+            }
         };
         let Some(updated_content) = set_source_count(&sources_content, desired_count).and_then(
             |content| match &owed_input {
@@ -1179,6 +1185,11 @@ fn guard_source_aliases(
 fn carries_an_answer(body: &str) -> bool {
     use pulldown_cmark::{Event, Tag};
 
+    // The generated Sources instruction is machine-owned. Left under Synthesis by a deleted
+    // Sources heading, it states nothing about the concept.
+    if lk_core::concept_sources::is_compact(body) {
+        return false;
+    }
     let markdown = lk_core::markdown::MarkdownInput::from_text(body);
     let mut ignored_until = 0;
     for (event, range) in markdown.offset_events(lk_core::markdown::OPTIONS) {
@@ -3964,28 +3975,23 @@ mod tests {
         assert!(report.updated.is_empty(), "{report:?}");
     }
 
-    /// A concept page with no sources heading at all is skipped, not half-written.
-    ///
-    /// The count and the body are one fact. Writing `source_count: 1` onto a page where no
-    /// citation appears — while the report says `+1 source(s)` — is exactly the disagreement
-    /// between a derived count and its evidence that this sweep exists to remove.
+    /// The Sources body is a discovery instruction, not the evidence. A page missing its heading
+    /// still records the count and the input its synthesis is owed against, so a drain answers
+    /// the citations the page has now; no heading is invented for it.
     #[test]
-    fn a_page_with_nowhere_to_record_its_sources_is_skipped() {
+    fn a_page_without_its_sources_heading_still_records_its_evidence() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("wiki/concepts/headless.md");
+        let path = dir.path().join("wiki/concepts/bare.md");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &path,
-            "---\nid: headless\ntype: concept\ntitle: \"Headless\"\nsource_count: 0\n---\n\n\
-             # Headless\n\n## Synthesis\n\nNo sources heading anywhere.\n",
-        )
-        .unwrap();
+        let original = "---\nid: bare\ntype: concept\ntitle: \"Bare\"\nsource_count: 0\n---\n\n\
+             # Bare\n\n## Synthesis\n";
+        std::fs::write(&path, original).unwrap();
         let pages = vec![
-            build_page("wiki/concepts/headless", "wiki/concepts/headless.md", &[]),
+            build_page("wiki/concepts/bare", "wiki/concepts/bare.md", &[]),
             build_page(
                 "daily/slack/2026-05-20",
                 "daily/slack/2026-05-20.md",
-                &["wiki/concepts/headless"],
+                &["wiki/concepts/bare"],
             ),
         ];
 
@@ -3997,16 +4003,67 @@ mod tests {
             SynthesisPolicy::Record,
         )
         .unwrap();
-        assert_eq!(
-            report.skipped,
-            vec![PathBuf::from("wiki/concepts/headless.md")]
-        );
-        assert!(report.updated.is_empty(), "{report:?}");
+        assert!(report.skipped.is_empty(), "{report:?}");
+        assert_eq!(report.updated.len(), 1, "{report:?}");
+        assert_eq!(report.resynthesize.len(), 1, "{report:?}");
+        let owed = citation_digest(&report.resynthesize[0].citations);
 
         let after = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            after.contains("source_count: 0"),
-            "the count must not claim a citation the page cannot show:\n{after}"
+        let parsed = frontmatter::parse_page(&after).unwrap();
+        assert_eq!(
+            llm_input(&parsed, frontmatter::field::SYNTHESIS),
+            Some(owed.as_str())
         );
+        assert!(after.contains("source_count: 1"), "{after}");
+        assert!(
+            resolve_section(&after, |s| s.concept_sources).is_none(),
+            "{after}"
+        );
+        assert!(after.ends_with("## Synthesis\n"), "{after}");
+    }
+
+    /// Deleting only the Sources heading leaves its generated instruction under Synthesis. That
+    /// instruction is not an answer to adopt: the page stays owed a synthesis.
+    #[test]
+    fn a_generated_instruction_left_under_synthesis_is_not_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wiki/concepts/bare.md");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "---\nid: bare\ntype: concept\ntitle: \"Bare\"\nsource_count: 0\n---\n\n\
+                 # Bare\n\n## Synthesis\n\n{}\n",
+                lk_core::concept_sources::render(lk_core::i18n::Locale::En)
+            ),
+        )
+        .unwrap();
+        let pages = vec![
+            build_page("wiki/concepts/bare", "wiki/concepts/bare.md", &[]),
+            build_page(
+                "daily/slack/2026-05-20",
+                "daily/slack/2026-05-20.md",
+                &["wiki/concepts/bare"],
+            ),
+        ];
+
+        let report = sync_fixture(
+            &pages,
+            dir.path(),
+            false,
+            &VaultDirs::default(),
+            SynthesisPolicy::Record,
+        )
+        .unwrap();
+        assert!(report.adopted.is_empty(), "{report:?}");
+        assert_eq!(report.resynthesize.len(), 1, "{report:?}");
+        let after = std::fs::read_to_string(&path).unwrap();
+        let parsed = frontmatter::parse_page(&after).unwrap();
+        let completion = frontmatter::field::completion(frontmatter::field::SYNTHESIS);
+        assert!(
+            llm_input(&parsed, frontmatter::field::SYNTHESIS).is_some(),
+            "{after}"
+        );
+        assert_eq!(llm_input(&parsed, &completion), None, "{after}");
     }
 }

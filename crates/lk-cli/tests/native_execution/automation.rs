@@ -72,7 +72,7 @@ fn an_unrecordable_concept_defers_graph_stages_and_unreadable_pages_remain_fatal
         .unwrap();
         std::fs::write(
             wiki.join("concepts/legacy.md"),
-            "---\ntitle: Legacy\n---\n# Legacy\n\nWritten before concept pages carried Sources.\n",
+            "---\ntitle: Legacy\n---\n# Legacy\n\n## Synthesis\n",
         )
         .unwrap();
         let mut source = b"---\ntype: document\ntitle: Source\n---\nSee [Owed](../concepts/owed.md) and [Legacy](../concepts/legacy.md).\n".to_vec();

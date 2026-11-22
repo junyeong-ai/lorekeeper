@@ -663,8 +663,7 @@ pub fn print_backlinks(r: &BacklinksSyncReport) {
         println!(
             "\nSkipped: {} concept page(s) could not safely publish derived state and were \
              left unchanged. A page with no frontmatter block needs one added; \
-             frontmatter that will not parse needs the YAML fixed; a page missing its sources \
-             heading needs it back, in any locale's spelling; and an `llm_inputs:` written as \
+             frontmatter that will not parse needs the YAML fixed; an `llm_inputs:` written as \
              an inline `{{…}}` mapping needs rewriting as a block mapping — the line is there, \
              but nothing can add a key to it without dropping the ones it holds. A legacy page \
              needing a new synthesis must explicitly declare `type: concept`",
