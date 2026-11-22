@@ -107,8 +107,8 @@ fn rust_artifacts(format: InputFormat) -> String {
 // this list to the resolved lock without hashing workspace release stamps.
 const PARSER_IDENTITIES: &[(&str, &str)] = &[
     ("cssparser", "0.38.0"),
-    ("dom_query", "0.29.0"),
-    ("dom_smoothie", "0.19.0"),
+    ("dom_query", "0.30.0"),
+    ("dom_smoothie", "0.20.0"),
     ("encoding_rs", "0.8.44"),
     ("htmd", "0.6.0"),
     ("html-escape", "0.2.15"),
