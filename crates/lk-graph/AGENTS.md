@@ -191,6 +191,11 @@ belong to exploration reviews, not a machine-persisted callout inferred by locat
 - This is the sole derivation of Sources, `source_count`, and synthesis input.
   Derive citations from actual eligible source body links with exact authored
   revisions. Update the three together; unreadable sources forbid publication.
+  `graph backlinks-sync` plans from its scan's texts: it scans through a page-keeping
+  `ReadControl`, and the planner reads concept and source pages with `page_text`. The
+  plan guards the current bytes of every page it derives from, so kept texts never
+  decide what publishes. Reads shared with audit, and in-process recording scans
+  (`scan_vault_controlled`), read afresh.
   Symlink spellings share one verified source owner; hard-link entries remain distinct.
   Concept target spellings share evidence by verified owner without changing link
   occurrences or declared RSS selections; hard-link targets remain distinct.

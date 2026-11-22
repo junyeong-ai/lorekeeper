@@ -283,8 +283,13 @@ pub(crate) fn lint(
     root_override: Option<PathBuf>,
 ) -> Result<output::LintReport, String> {
     let rc = resolve_config_full(opts, root_override)?;
-    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
-        .map_err(|e| format!("{e}"))?;
+    let views = scan::VaultViews::resolve(
+        &rc.root,
+        &rc.graph,
+        &rc.vault_dirs,
+        &lk_vault::ReadControl::default(),
+    )
+    .map_err(|e| format!("{e}"))?;
     let g = graph::WikiGraph::build_with_existence(&views.pages, &views.existence, &rc.vault_dirs);
     lint_report(&rc, &g, &views)
 }
@@ -367,7 +372,14 @@ fn run_resolved(
         return Ok(false);
     }
 
-    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs)
+    // Reconciliation reads every concept and source page again to plan its guarded
+    // publication; keeping the scan's texts spares those second opens.
+    let read = if matches!(cmd, GraphCommand::BacklinksSync { .. }) {
+        lk_vault::ReadControl::default().with_page_reuse()
+    } else {
+        lk_vault::ReadControl::default()
+    };
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, &read)
         .map_err(|e| format!("{e}"))?;
     let required: &[scan::ScannedPage] = match &cmd {
         GraphCommand::Hubs { .. }
@@ -383,7 +395,8 @@ fn run_resolved(
         return Err(errors.join("; "));
     }
     if let GraphCommand::BacklinksSync { dry_run, .. } = &cmd {
-        let report = synchronize_backlinks(&rc, &views.scanned, *dry_run, mutation.as_ref())?;
+        let report =
+            synchronize_backlinks(&rc, &views.scanned, *dry_run, mutation.as_ref(), &read)?;
         let violated = !report.sync.skipped.is_empty();
         if json {
             output::print_json(&report, violated)?;
@@ -734,14 +747,17 @@ fn synchronize_backlinks(
     pages: &[scan::ScannedPage],
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
+    read: &lk_vault::ReadControl,
 ) -> Result<output::BacklinksSyncReport, String> {
     let policy = match rc.llm.provider {
         lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
         lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
     };
     if dry_run {
-        let sync = backlinks::sync_concept_backlinks(pages, &rc.root, true, &rc.vault_dirs, policy)
-            .map_err(|error| error.to_string())?;
+        let (_, mut sync) =
+            backlinks::plan_concept_backlinks(pages, &rc.root, &rc.vault_dirs, policy, read)
+                .map_err(|error| error.to_string())?;
+        sync.dry_run = true;
         return Ok(output::BacklinksSyncReport {
             changed: sync.updated.len(),
             sync,
@@ -754,7 +770,7 @@ fn synchronize_backlinks(
     } else {
         None
     };
-    let (plan, report) = plan_backlinks_publication(rc, pages, policy)?;
+    let (plan, report) = plan_backlinks_publication(rc, pages, policy, read)?;
     if report.changed > 0 || report.queued > 0 {
         session
             .ok_or("backlinks publication requires a vault mutation session")?
@@ -768,9 +784,10 @@ fn plan_backlinks_publication(
     rc: &ResolvedConfig,
     pages: &[scan::ScannedPage],
     policy: backlinks::SynthesisPolicy,
+    read: &lk_vault::ReadControl,
 ) -> Result<(lk_vault::MutationPlan, output::BacklinksSyncReport), String> {
     let (mut plan, sync) =
-        backlinks::plan_concept_backlinks_for_work(pages, &rc.root, &rc.vault_dirs, policy)
+        backlinks::plan_concept_backlinks_for_work(pages, &rc.root, &rc.vault_dirs, policy, read)
             .map_err(|error| error.to_string())?;
     // A task already waiting for the SAME INPUT is the same task. This sweep runs on every
     // pipeline pass and by hand, and re-queueing what a drain has not reached yet accumulates
@@ -957,7 +974,14 @@ mod tests {
     fn backlinks_queue_contention_preserves_pages_and_preview_is_read_only() {
         let (_root, config) = fixture();
         let before = std::fs::read_to_string(config.root.join(TARGET)).unwrap();
-        let preview = synchronize_backlinks(&config, &pages(&config), true, None).unwrap();
+        let preview = synchronize_backlinks(
+            &config,
+            &pages(&config),
+            true,
+            None,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert_eq!(preview.changed, 1);
         assert_eq!(preview.queued, 0);
         assert!(!config.root.join(".lorekeeper").exists());
@@ -965,12 +989,28 @@ mod tests {
         let _claim =
             super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
                 .unwrap();
-        assert!(synchronize_backlinks(&config, &pages(&config), false, Some(&session)).is_err());
+        assert!(
+            synchronize_backlinks(
+                &config,
+                &pages(&config),
+                false,
+                Some(&session),
+                &lk_vault::ReadControl::default(),
+            )
+            .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(config.root.join(TARGET)).unwrap(),
             before
         );
-        let preview = synchronize_backlinks(&config, &pages(&config), true, None).unwrap();
+        let preview = synchronize_backlinks(
+            &config,
+            &pages(&config),
+            true,
+            None,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert!(preview.sync.dry_run);
         assert!(
             !config
@@ -992,6 +1032,7 @@ mod tests {
             &config,
             &pages(&config),
             backlinks::SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
         )
         .unwrap();
         assert_eq!(report.queued, 1);
@@ -1038,6 +1079,7 @@ mod tests {
             &config,
             &pages(&config),
             backlinks::SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
         )
         .unwrap();
         assert_eq!(report.changed, 1);
@@ -1070,8 +1112,14 @@ mod tests {
             task.input["citations"],
             serde_json::to_value(&report.sync.resynthesize[0].citations).unwrap()
         );
-        let repeated =
-            synchronize_backlinks(&config, &pages(&config), false, Some(&session)).unwrap();
+        let repeated = synchronize_backlinks(
+            &config,
+            &pages(&config),
+            false,
+            Some(&session),
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert_eq!(repeated.changed, 0);
         assert_eq!(repeated.queued, 0);
         let same = super::super::queue::current_synthesis_request(&config.root, TARGET, &hash)
@@ -1094,8 +1142,14 @@ mod tests {
         let _claim =
             super::super::queue::claim_writer(&config.root.join(".lorekeeper/queue"), false)
                 .unwrap();
-        let result =
-            synchronize_backlinks(&config, &pages(&config), false, Some(&session)).unwrap();
+        let result = synchronize_backlinks(
+            &config,
+            &pages(&config),
+            false,
+            Some(&session),
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert_eq!(result.changed, 1);
         assert_eq!(result.queued, 0);
         let concept = std::fs::read_to_string(config.root.join(TARGET)).unwrap();

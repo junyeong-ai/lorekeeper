@@ -127,10 +127,11 @@ canonical; SQLite navigation is derived.
   collection before traversing the same files. A run's supervising `ReadControl` may supply
   a body an earlier read returned while the file keeps its device, inode, size, mtime and
   ctime, never one changed within the settling window before that read (`read.rs`):
-  `page_text` for discovery traversals and work selection, `kept_file_bytes` for other files
-  selection reads, such as pending queue files. A whole read is held only for a file the
-  control keeps: its stamp, taken before the read, is settled and its length fits the
-  budget. Otherwise `kept_page_text`/`kept_file_bytes` read nothing, so the vocabulary reads
+  `page_text` for discovery traversals, work selection and backlink planning,
+  `kept_file_bytes` for other files selection reads, such as pending queue files. A
+  whole read is held only for a file the control keeps: its stamp, taken before the
+  read, is settled and its length fits the budget. Otherwise
+  `kept_page_text`/`kept_file_bytes` read nothing, so the vocabulary reads
   only that page's header and queue files are decoded incrementally. The vocabulary reads
   each page it keeps whole, so the traversal does not open it again; a body that is not
   UTF-8 still never fails the vocabulary, which then reads only its header. Page texts and

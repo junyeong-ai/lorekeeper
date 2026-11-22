@@ -114,21 +114,24 @@ pub(crate) fn scan_vault_with_revisions(
     root: &Path,
     follow_links: bool,
 ) -> Result<ScannedVault, GraphError> {
-    scan_vault_with_revisions_controlled(root, follow_links, &lk_vault::ReadControl::default())
+    let read = lk_vault::ReadControl::default();
+    scan_pages(root, follow_links, &read, |path| read.read_to_string(path))
 }
 
+/// [`scan_vault`] under a caller's cancellation, reading every page afresh.
 pub fn scan_vault_controlled(
     root: &Path,
     follow_links: bool,
     read: &lk_vault::ReadControl,
 ) -> Result<Vec<ScannedPage>, GraphError> {
-    Ok(scan_vault_with_revisions_controlled(root, follow_links, read)?.pages)
+    Ok(scan_pages(root, follow_links, read, |path| read.read_to_string(path))?.pages)
 }
 
-fn scan_vault_with_revisions_controlled(
+fn scan_pages<T: std::ops::Deref<Target = str>>(
     root: &Path,
     follow_links: bool,
     read: &lk_vault::ReadControl,
+    page_text: impl Fn(&Path) -> Result<T, lk_vault::VaultError> + Sync,
 ) -> Result<ScannedVault, GraphError> {
     read.check().map_err(GraphError::from)?;
     if !root.exists() {
@@ -188,7 +191,7 @@ fn scan_vault_with_revisions_controlled(
         .map(|path| {
             read.check().map_err(GraphError::from)?;
             let rel = path.strip_prefix(root).unwrap_or(path);
-            let (page, revision) = match read.read_to_string(path) {
+            let (page, revision) = match page_text(path) {
                 Ok(raw) => (
                     parse_content(path, root, &raw),
                     Some(lk_core::concept::file_revision(&raw)),
@@ -247,7 +250,17 @@ pub struct VaultViews {
 impl VaultViews {
     /// `scope.exclude` and `scope.dirs` narrow the last two views only: an excluded page still
     /// exists, so it still resolves a link and still has its own links repointed by a rename.
-    pub fn resolve(root: &Path, graph: &GraphConfig, dirs: &VaultDirs) -> Result<Self, GraphError> {
+    ///
+    /// Pages are read with [`lk_vault::ReadControl::page_text`], so under a control that keeps
+    /// page texts a command's later read of a page that keeps its stamp takes this text instead
+    /// of opening the file again. A command publishing from these views guards the current bytes
+    /// of every page it derives from when it commits.
+    pub fn resolve(
+        root: &Path,
+        graph: &GraphConfig,
+        dirs: &VaultDirs,
+        read: &lk_vault::ReadControl,
+    ) -> Result<Self, GraphError> {
         // A configured directory must name exactly one directory on disk. Absent is a typo —
         // silently yielding nothing lets analysis report an empty graph and
         // exit 0, and every analysis command agree the vault has no pages. Two spellings
@@ -258,7 +271,10 @@ impl VaultViews {
             resolve_dir(root, dir)?;
         }
 
-        let scanned = scan_vault(root, graph.scope.follow_links)?;
+        let scanned = scan_pages(root, graph.scope.follow_links, read, |path| {
+            Ok(read.page_text(path)?.0)
+        })?
+        .pages;
         let existence = VaultExistence::build_at(root, &scanned, dirs)?;
         let excluded = Excludes::compile(&graph.scope.exclude)?;
 
@@ -1235,7 +1251,12 @@ mod tests {
 
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wiki")];
-        let resolved = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default());
+        let resolved = VaultViews::resolve(
+            tmp.path(),
+            &config,
+            &VaultDirs::default(),
+            &lk_vault::ReadControl::default(),
+        );
 
         if folds {
             let views = resolved.expect("one directory under two names");
@@ -1271,7 +1292,13 @@ mod tests {
 
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wiki")];
-        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
+        let views = VaultViews::resolve(
+            tmp.path(),
+            &config,
+            &VaultDirs::default(),
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert!(
             views
                 .link_sources
@@ -1289,7 +1316,15 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("wiki")).unwrap();
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wikii")];
-        assert!(VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).is_err());
+        assert!(
+            VaultViews::resolve(
+                tmp.path(),
+                &config,
+                &VaultDirs::default(),
+                &lk_vault::ReadControl::default(),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1432,8 +1467,13 @@ mod tests {
         )
         .unwrap();
 
-        let views = VaultViews::resolve(tmp.path(), &GraphConfig::default(), &VaultDirs::default())
-            .expect("scan");
+        let views = VaultViews::resolve(
+            tmp.path(),
+            &GraphConfig::default(),
+            &VaultDirs::default(),
+            &lk_vault::ReadControl::default(),
+        )
+        .expect("scan");
 
         assert!(
             views.scanned.iter().any(|p| p.id == "me/tasks"),
@@ -1574,7 +1614,13 @@ mod tests {
         let mut config = GraphConfig::default();
         config.scope.dirs = vec![PathBuf::from("wiki")];
         config.scope.exclude = vec!["wiki/skip.md".to_string()];
-        let views = VaultViews::resolve(tmp.path(), &config, &VaultDirs::default()).unwrap();
+        let views = VaultViews::resolve(
+            tmp.path(),
+            &config,
+            &VaultDirs::default(),
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             views

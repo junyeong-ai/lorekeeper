@@ -738,7 +738,13 @@ pub fn sync_concept_backlinks(
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
     if dry_run {
-        let (_, mut report) = plan_concept_backlinks(pages, vault_root, dirs, synthesis)?;
+        let (_, mut report) = plan_concept_backlinks(
+            pages,
+            vault_root,
+            dirs,
+            synthesis,
+            &lk_vault::ReadControl::default(),
+        )?;
         report.dry_run = true;
         return Ok(report);
     }
@@ -754,7 +760,13 @@ pub fn sync_concept_backlinks_in_session(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
 ) -> Result<BacklinksSyncResult, GraphError> {
-    let (plan, report) = plan_concept_backlinks(pages, session.root(), dirs, synthesis)?;
+    let (plan, report) = plan_concept_backlinks(
+        pages,
+        session.root(),
+        dirs,
+        synthesis,
+        &lk_vault::ReadControl::default(),
+    )?;
     session
         .apply(plan)
         .map_err(|error| GraphError::Io(error.to_string()))?;
@@ -763,13 +775,16 @@ pub fn sync_concept_backlinks_in_session(
 
 /// Derive a complete before/after plan without writing, locking or recovering journals.
 /// All eligible sources retain their scanned authored revisions and canonical direct owners.
+/// Concept and source pages are read with [`lk_vault::ReadControl::page_text`], so a control
+/// that kept the scan's texts spares a second open; the plan guards every one of them.
 pub fn plan_concept_backlinks(
     pages: &[ScannedPage],
     vault_root: &Path,
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
+    read: &lk_vault::ReadControl,
 ) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
-    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, false)
+    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, false, read)
 }
 
 /// Retain unchanged owed targets and evidence when a caller also publishes derived work.
@@ -778,8 +793,9 @@ pub fn plan_concept_backlinks_for_work(
     vault_root: &Path,
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
+    read: &lk_vault::ReadControl,
 ) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
-    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, true)
+    plan_concept_backlinks_inner(pages, vault_root, dirs, synthesis, true, read)
 }
 
 fn plan_concept_backlinks_inner(
@@ -788,8 +804,9 @@ fn plan_concept_backlinks_inner(
     dirs: &VaultDirs,
     synthesis: SynthesisPolicy,
     guard_work: bool,
+    read: &lk_vault::ReadControl,
 ) -> Result<(MutationPlan, BacklinksSyncResult), GraphError> {
-    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
+    let evidence = CitationGraph::build_controlled(pages, vault_root, dirs, read)?;
     let canonical_root = vault_root
         .canonicalize()
         .map_err(|error| GraphError::Io(error.to_string()))?;
@@ -811,14 +828,17 @@ fn plan_concept_backlinks_inner(
         let citations = evidence.citations_for(page, &sources);
 
         let full_path = vault_root.join(&page.path);
-        let raw = std::fs::read_to_string(&full_path)
-            .map_err(|e| GraphError::Io(format!("failed to read {}: {e}", full_path.display())))?;
+        let (text, _) = read.page_text(&full_path).map_err(|error| match error {
+            lk_vault::VaultError::Cancelled => GraphError::Cancelled,
+            error => GraphError::Io(format!("failed to read {}: {error}", full_path.display())),
+        })?;
+        let raw: &str = &text;
 
         // The page was read successfully; a frontmatter that will not parse here is real
         // corruption, and every write below would have to guess what it is replacing.
         // Record and skip the malformed page rather than inventing its metadata or
         // blocking every independently readable concept in the reconciliation plan.
-        let Ok(parsed) = frontmatter::parse_page(&raw) else {
+        let Ok(parsed) = frontmatter::parse_page(raw) else {
             report.skipped.push(page.path.clone());
             continue;
         };
@@ -832,7 +852,7 @@ fn plan_concept_backlinks_inner(
         //
         // Preserve the page-format contract: a missing Sources heading is reported/skipped,
         // rather than inventing a section while reconciling its derived bookkeeping.
-        let Some(sources_section) = resolve_section(&raw, |s| s.concept_sources) else {
+        let Some(sources_section) = resolve_section(raw, |s| s.concept_sources) else {
             report.skipped.push(page.path.clone());
             continue;
         };
@@ -873,7 +893,7 @@ fn plan_concept_backlinks_inner(
         // unconditionally would let a page missing that one section keep a citation count the
         // graph contradicts, forever, and hold the sweep's exit code non-zero with it — a
         // page nothing cites owes no synthesis and is still owed a correct count of zero.
-        let synthesis_section = resolve_section(&raw, |s| s.concept_synthesis);
+        let synthesis_section = resolve_section(raw, |s| s.concept_synthesis);
         let owed_input = (synthesis == SynthesisPolicy::Record
             && !sources.is_empty()
             && synthesis_section.is_some())
@@ -933,7 +953,7 @@ fn plan_concept_backlinks_inner(
                 continue;
             }
             requires_synthesis = true;
-            let related = resolve_section(&raw, |s| s.related);
+            let related = resolve_section(raw, |s| s.related);
             report.resynthesize.push(ConceptResynthesis {
                 path: page.path.clone(),
                 anchor: format!("## {}", section.heading),
@@ -978,14 +998,14 @@ fn plan_concept_backlinks_inner(
         // drain forever.
         let sources_content = if sources_body == lk_core::concept_sources::SourcesBody::Authored {
             report.preserved_sources.push(page.path.clone());
-            raw.clone()
+            raw.to_owned()
         } else {
             let locale = lk_core::i18n::Locale::ALL
                 .iter()
                 .find(|locale| locale.strings().concept_sources == sources_section.heading)
                 .expect("resolved source heading belongs to a known locale");
             replace_section(
-                &raw,
+                raw,
                 sources_section.heading,
                 lk_core::concept_sources::render(*locale),
             )
@@ -1040,14 +1060,14 @@ fn plan_concept_backlinks_inner(
             .map_err(|error| GraphError::Io(error.to_string()))?
             .to_path_buf();
         if let Some((before, after)) = targets.get(&owner) {
-            if before != &raw || after != &updated_content {
+            if before != raw || after != &updated_content {
                 return Err(GraphError::Io(format!(
                     "concept aliases have conflicting backlink plans: {}",
                     page.path.display()
                 )));
             }
         } else {
-            targets.insert(owner, (raw.clone(), updated_content));
+            targets.insert(owner, (raw.to_owned(), updated_content));
         }
 
         if changed {
@@ -1070,7 +1090,7 @@ fn plan_concept_backlinks_inner(
     }
 
     let mut plan = MutationPlan::default();
-    guard_backlink_sources(&mut plan, vault_root, &canonical_root, &evidence)?;
+    guard_backlink_sources(&mut plan, vault_root, &canonical_root, &evidence, read)?;
     if targets.is_empty() {
         // Validation still detects stale scans, but an unchanged projection has nothing
         // to publish and needs no dependency-only journal or per-source fsyncs.
@@ -1091,12 +1111,14 @@ fn guard_backlink_sources(
     root: &Path,
     canonical_root: &Path,
     evidence: &CitationGraph<'_>,
+    read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
+    let text =
+        |path: &Path| -> Result<String, GraphError> { Ok(read.page_text(path)?.0.to_string()) };
     // Sources with no old incoming links are negative dependencies too: adding a
     // citation after scanning must not publish a stale empty set or source count.
     for source in evidence.sources.values() {
-        let raw = std::fs::read_to_string(&source.owner)
-            .map_err(|error| GraphError::Io(error.to_string()))?;
+        let raw = text(&source.owner)?;
         let page = frontmatter::parse_page(&raw)
             .map_err(|_| GraphError::UnreadableSource(source.page.path.clone()))?;
         if source.page.revision.as_deref()
@@ -1107,9 +1129,7 @@ fn guard_backlink_sources(
                 source.page.path.display()
             )));
         }
-        guard_source_aliases(root, canonical_root, source, &raw, |path| {
-            std::fs::read_to_string(path).map_err(|error| GraphError::Io(error.to_string()))
-        })?;
+        guard_source_aliases(root, canonical_root, source, &raw, text)?;
         let owner = source
             .owner
             .strip_prefix(canonical_root)
@@ -1339,9 +1359,14 @@ mod tests {
                 std::fs::read_to_string(root.path().join("wiki/concepts/other.md")).unwrap();
             let second =
                 std::fs::read_to_string(root.path().join("wiki/concepts/topic.md")).unwrap();
-            let (plan, report) =
-                plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-                    .unwrap();
+            let (plan, report) = plan_concept_backlinks(
+                &pages,
+                root.path(),
+                &dirs,
+                SynthesisPolicy::Record,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap();
             assert_eq!(report.updated.len(), 2);
             let external = format!(
                 "{}\nExternal edit.\n",
@@ -1378,7 +1403,12 @@ mod tests {
 
     #[test]
     fn zero_link_source_changes_are_guarded_before_planning_and_publication() {
-        for after_plan in [false, true] {
+        for (after_plan, reuse) in [(false, false), (true, false), (false, true), (true, true)] {
+            let read = if reuse {
+                lk_vault::ReadControl::default().with_immediate_page_reuse()
+            } else {
+                lk_vault::ReadControl::default()
+            };
             let root = tempfile::tempdir().unwrap();
             let dirs = VaultDirs::default();
             let target = write_owner_test_concept(root.path());
@@ -1386,13 +1416,25 @@ mod tests {
             std::fs::create_dir_all(root.path().join("daily")).unwrap();
             let source = root.path().join("daily/quiet.md");
             std::fs::write(&source, "---\ntype: daily\n---\nNo citations yet.\n").unwrap();
-            let pages = crate::scan::scan_vault(root.path(), false).unwrap();
+            let pages = crate::scan::VaultViews::resolve(
+                root.path(),
+                &lk_core::config::GraphConfig::default(),
+                &dirs,
+                &read,
+            )
+            .unwrap()
+            .scanned;
             let external = "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n";
             if after_plan {
                 let session = MutationSession::acquire(root.path()).unwrap();
-                let (plan, report) =
-                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-                        .unwrap();
+                let (plan, report) = plan_concept_backlinks(
+                    &pages,
+                    root.path(),
+                    &dirs,
+                    SynthesisPolicy::Record,
+                    &read,
+                )
+                .unwrap();
                 assert_eq!(report.updated.len(), 1);
                 std::fs::write(&source, external).unwrap();
                 let error = session.apply(plan).unwrap_err();
@@ -1405,10 +1447,15 @@ mod tests {
                 );
             } else {
                 std::fs::write(&source, external).unwrap();
-                let error =
-                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-                        .err()
-                        .unwrap();
+                let error = plan_concept_backlinks(
+                    &pages,
+                    root.path(),
+                    &dirs,
+                    SynthesisPolicy::Record,
+                    &read,
+                )
+                .err()
+                .unwrap();
                 assert!(
                     error.to_string().contains("source changed since scan"),
                     "{error}"
@@ -1430,8 +1477,14 @@ mod tests {
         let source = root.path().join("daily/quiet.md");
         std::fs::write(&source, "---\ntype: daily\n---\nNo citations yet.\n").unwrap();
         let pages = crate::scan::scan_vault(root.path(), false).unwrap();
-        let (plan, report) =
-            plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record).unwrap();
+        let (plan, report) = plan_concept_backlinks(
+            &pages,
+            root.path(),
+            &dirs,
+            SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert_eq!(report.unchanged, 2);
         assert!(
             serde_json::to_value(plan).unwrap()["steps"]
@@ -1444,9 +1497,15 @@ mod tests {
             "---\ntype: daily\n---\n[Topic](../wiki/concepts/topic.md)\n",
         )
         .unwrap();
-        let error = plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-            .err()
-            .unwrap();
+        let error = plan_concept_backlinks(
+            &pages,
+            root.path(),
+            &dirs,
+            SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
+        )
+        .err()
+        .unwrap();
         assert!(
             error.to_string().contains("source changed since scan"),
             "{error}"
@@ -1466,6 +1525,7 @@ mod tests {
                 root.path(),
                 &dirs,
                 SynthesisPolicy::Record,
+                &lk_vault::ReadControl::default(),
             )
             .unwrap();
             assert!(report.updated.is_empty());
@@ -1496,9 +1556,15 @@ mod tests {
         let source = root.path().join("daily/report.md");
         let original = std::fs::read_to_string(&source).unwrap();
         std::fs::write(&source, format!("{original}\nChanged after scan.\n")).unwrap();
-        let error = plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-            .err()
-            .unwrap();
+        let error = plan_concept_backlinks(
+            &pages,
+            root.path(),
+            &dirs,
+            SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
+        )
+        .err()
+        .unwrap();
         assert!(
             error.to_string().contains("source changed since scan"),
             "{error}"
@@ -1525,8 +1591,14 @@ mod tests {
     fn backlink_publication_recovers_the_complete_guarded_plan_and_is_idempotent() {
         let (root, dirs, pages) = build_guarded_fixture();
         let session = MutationSession::acquire(root.path()).unwrap();
-        let (plan, _) =
-            plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record).unwrap();
+        let (plan, _) = plan_concept_backlinks(
+            &pages,
+            root.path(),
+            &dirs,
+            SynthesisPolicy::Record,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         let serialized = serde_json::to_value(&plan).unwrap();
         let first = serialized["steps"]
             .as_array()
@@ -2400,10 +2472,15 @@ mod tests {
                         "../concepts/topic.md"
                     }
                 );
-                let refusal =
-                    plan_concept_backlinks(&pages, root.path(), &dirs, SynthesisPolicy::Record)
-                        .err()
-                        .expect("leaf symlink publication must remain refused");
+                let refusal = plan_concept_backlinks(
+                    &pages,
+                    root.path(),
+                    &dirs,
+                    SynthesisPolicy::Record,
+                    &lk_vault::ReadControl::default(),
+                )
+                .err()
+                .expect("leaf symlink publication must remain refused");
                 assert!(refusal.to_string().contains("direct file address"));
                 assert_eq!(
                     std::fs::read_to_string(root.path().join(origin)).unwrap(),

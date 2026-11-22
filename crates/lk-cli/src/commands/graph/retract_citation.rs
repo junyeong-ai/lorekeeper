@@ -335,10 +335,14 @@ mod tests {
         dry: bool,
         session: Option<&lk_vault::MutationSession>,
     ) -> Result<serde_json::Value, String> {
-        let pages =
-            lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-                .map_err(|e| e.to_string())?
-                .scanned;
+        let pages = lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .map_err(|e| e.to_string())?
+        .scanned;
         request(
             config,
             &pages,
@@ -397,6 +401,7 @@ mod tests {
                     &config.root,
                     &config.graph,
                     &config.vault_dirs,
+                    &lk_vault::ReadControl::default(),
                 )
                 .unwrap()
                 .scanned;
@@ -636,10 +641,14 @@ mod tests {
             "../../knowledge%20base/concepts/retry.md",
         );
         std::fs::write(config.root.join(daily), &raw).unwrap();
-        let pages =
-            lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-                .unwrap()
-                .scanned;
+        let pages = lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .scanned;
         let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
         request(
             &config,
@@ -670,10 +679,14 @@ mod tests {
         if !config.root.join("wiki").exists() {
             return;
         } // case-sensitive volume
-        let pages =
-            lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-                .unwrap()
-                .scanned;
+        let pages = lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .scanned;
         assert!(
             request(
                 &config,
@@ -743,10 +756,14 @@ mod tests {
     #[test]
     fn stale_scan_does_not_authorize_an_escaping_source_symlink() {
         let (_dir, config) = fixture(RAW);
-        let pages =
-            lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-                .unwrap()
-                .scanned;
+        let pages = lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .scanned;
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("outside.md"), RAW).unwrap();
         std::fs::remove_file(config.root.join(ORIGIN)).unwrap();
@@ -775,10 +792,14 @@ mod tests {
     #[test]
     fn fresh_type_checks_refuse_concept_ownership_even_after_scan() {
         let (_dir, config) = fixture(RAW);
-        let pages =
-            lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-                .unwrap()
-                .scanned;
+        let pages = lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .scanned;
         for kind in [
             "concept",
             lk_core::vault_path::TASK_BOARD_FORMAT,

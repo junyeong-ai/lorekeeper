@@ -11,9 +11,14 @@ fn fixture_root() -> PathBuf {
 
 /// The analysis view of a vault — what `hubs`/`cluster`/`normalize` read.
 fn fixture_pages(root: &Path, config: &GraphConfig) -> Vec<scan::ScannedPage> {
-    scan::VaultViews::resolve(root, config, &VaultDirs::default())
-        .unwrap()
-        .pages
+    scan::VaultViews::resolve(
+        root,
+        config,
+        &VaultDirs::default(),
+        &lk_vault::ReadControl::default(),
+    )
+    .unwrap()
+    .pages
 }
 
 fn default_config() -> GraphConfig {

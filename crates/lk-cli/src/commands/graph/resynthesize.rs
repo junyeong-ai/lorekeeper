@@ -126,9 +126,14 @@ mod tests {
     }
 
     fn pages(config: &ResolvedConfig) -> Vec<lk_graph::scan::ScannedPage> {
-        lk_graph::scan::VaultViews::resolve(&config.root, &config.graph, &config.vault_dirs)
-            .unwrap()
-            .scanned
+        lk_graph::scan::VaultViews::resolve(
+            &config.root,
+            &config.graph,
+            &config.vault_dirs,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap()
+        .scanned
     }
 
     #[test]
