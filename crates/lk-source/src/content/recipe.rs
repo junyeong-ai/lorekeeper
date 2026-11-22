@@ -134,7 +134,7 @@ const PARSER_IDENTITIES: &[(&str, &str)] = &[
     ("serde_json", "1.0.154"),
     ("unicode-normalization", "0.1.26"),
     ("unicode-segmentation", "1.13.3"),
-    ("url", "2.5.8"),
+    ("url", "2.5.9"),
 ];
 
 #[derive(Serialize)]
