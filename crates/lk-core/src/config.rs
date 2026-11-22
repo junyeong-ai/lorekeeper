@@ -595,9 +595,14 @@ fn work_policy_revision(content: &str) -> Result<String, ConfigError> {
         && let Some(audit) = graph
             .get_mut("audit")
             .and_then(serde_json::Value::as_object_mut)
-        && [audit.remove("subjects"), audit.remove("min_sources")]
-            .iter()
-            .any(Option::is_some)
+        && [
+            audit.remove("subjects"),
+            audit.remove("min_sources"),
+            audit.remove("batch_size"),
+            audit.remove("schedule"),
+        ]
+        .iter()
+        .any(Option::is_some)
         && audit.is_empty()
     {
         graph.remove("audit");
@@ -1901,6 +1906,8 @@ mod tests {
             "subjects: [concept, document]",
             "min_sources: 3",
             "subjects: [concept], min_sources: 3",
+            "batch_size: 1",
+            "schedule: '30 10 * * 1-5', batch_size: 20, min_sources: 3",
         ] {
             std::fs::write(&path, format!("{base}graph: {{audit: {{{audit}}}}}\n")).unwrap();
             assert_eq!(
@@ -1924,6 +1931,7 @@ mod tests {
             ),
             base.replace("max_input_bytes: 262144", "max_input_bytes: 131072"),
             base.replace("max_result_bytes: 32768", "max_result_bytes: 16384"),
+            format!("{base}graph: {{audit: {{max_input_bytes: 131072, batch_size: 1}}}}\n"),
             base.replace(
                 "work: {max_input_bytes:",
                 "work: {extraction_context: full-context, max_input_bytes:",

@@ -10,11 +10,12 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   vault roots resolve against the config file. Use `yaml::from_str`: duplicate keys,
   YAML scalar policy, parser budgets and snippet-free errors are shared contracts.
   Config loading also derives semantic Work policy from parsed values in that same read,
-  excluding `execution.automation`, `graph.audit.subjects`/`min_sources`, profile `timeout_seconds` and
-  the global/profile `work` keys `max_calls`, `max_parallel`, `max_consecutive_calls`,
-  `max_screening_batches` and `max_query_candidates`. Preserve the separate complete byte revision for live workflow
-  pinning. Direct deserialization has no loaded policy revision; it must not fabricate
-  one from resolved paths.
+  excluding `execution.automation`, the `graph.audit` keys `subjects`, `min_sources`,
+  `batch_size` and `schedule`, profile `timeout_seconds` and the global/profile `work`
+  keys `max_calls`, `max_parallel`, `max_consecutive_calls`, `max_screening_batches` and
+  `max_query_candidates`: they choose and pace work, never what a Work reads. Preserve
+  the separate complete byte revision for live workflow pinning. Direct deserialization
+  has no loaded policy revision; it must not fabricate one from resolved paths.
   Null `execution` and global/profile `work` containers mean their defaults;
   other supplied values still pass the ordinary typed field validation.
 - Optional typed `execution.stages` references existing profiles. Omission and an
