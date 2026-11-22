@@ -373,7 +373,7 @@ pub(super) fn current_tasks_controlled(
             &task,
             &mut revisions,
             Artifact::Task,
-            &mut |path| read.read_to_string(&lk_vault::page_path(root, path)?),
+            &mut |path| selection_text(root, path, read),
             read,
         )?
         .status
@@ -478,7 +478,7 @@ impl PendingTasks {
             &task,
             &mut BTreeMap::new(),
             Artifact::Task,
-            &mut |path| control.read_to_string(&lk_vault::page_path(root, path)?),
+            &mut |path| selection_text(root, path, control),
             control,
         )?
         .status;
@@ -547,6 +547,20 @@ fn pending_queue_files_controlled(
     Ok(files)
 }
 
+/// A page read only to select work. Preparation captures its inputs afresh and publication
+/// guards read current bytes, so selection may take a page an earlier read of this run
+/// returned while the file keeps its stamp.
+fn selection_text(
+    root: &Path,
+    path: &Path,
+    read: &lk_vault::ReadControl,
+) -> Result<String, lk_vault::VaultError> {
+    Ok(read
+        .page_text(&lk_vault::page_path(root, path)?)?
+        .0
+        .to_string())
+}
+
 fn read_tasks(file: &Path) -> miette::Result<QueueFile> {
     lk_queue::read_tasks(file).map_err(|e| miette::miette!("read {}: {e}", file.display()))
 }
@@ -566,7 +580,13 @@ fn read_pending_tasks_controlled(
     };
     for file in pending_queue_files_controlled(queue, control)? {
         control.check().into_diagnostic()?;
-        let captured = read_tasks(&file);
+        let captured = control
+            .file_bytes(&file)
+            .map_err(|error| miette::miette!("read {}: {error}", file.display()))
+            .and_then(|raw| {
+                lk_queue::decode_tasks(&file, &raw)
+                    .map_err(|error| miette::miette!("read {}: {error}", file.display()))
+            });
         control.check().into_diagnostic()?;
         let read = match captured {
             Ok(read) => read,

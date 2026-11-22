@@ -52,3 +52,4 @@ signal-hook = { workspace = true }
 [dev-dependencies]
 insta = { workspace = true }
 assert_cmd = { workspace = true }
+lk-vault = { workspace = true, features = ["test-util"] }

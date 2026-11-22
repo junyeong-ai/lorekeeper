@@ -81,8 +81,10 @@ paths:
   skipping targets; actual prepared TaskWork remains authoritative, including saved
   plans. Small tasks also obey the input-byte bound. Share discovery traversal,
   projection and immutable raw bytes within that checkpoint while preserving task-local
-  recipes, reviews, guards and identities. Later checkpoints traverse afresh; only
-  stamp-verified page texts carry over (lk-vault), never a capture or its guards.
+  recipes, reviews, guards and identities. Later checkpoints read, classify and traverse
+  afresh; only stamp-verified page texts and pending queue bytes carry over (lk-vault),
+  never a capture, a classification or its guards. Selection classifies from them;
+  completion receipts and publication read current bytes.
   Unprepared targets remain pending. Empty or deferred windows never prove settlement.
   Check synthesis input readiness only within those fair windows; remove checked
   blockers from local dispatch keys, retain unexamined keys and continue past blocked

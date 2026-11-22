@@ -539,6 +539,67 @@ mod tests {
     }
 
     #[test]
+    fn selection_under_page_reuse_reads_new_queue_files_and_changed_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let source = "wiki/documents/source.md";
+        let evidence = "---\ntype: document\n---\nAn observation.\n";
+        let task = synthesis(vec![lk_core::concept::Citation::new(
+            Path::new(source),
+            &lk_vault::parse_page(evidence).unwrap(),
+        )]);
+        write(
+            root.path(),
+            "wiki/concepts/topic.md",
+            &format!(
+                "---\ntype: concept\nllm_inputs: {{synthesis: {}}}\n---\n## Synthesis\n\n## Related Concepts\n\n",
+                task.cache_hash
+            ),
+        );
+        write(root.path(), source, evidence);
+        write(root.path(), ".lorekeeper/queue/first.jsonl", "");
+        let read = lk_vault::ReadControl::default().with_immediate_page_reuse();
+        let current = || {
+            super::super::current_tasks_controlled(root.path(), &read)
+                .unwrap()
+                .into_iter()
+                .map(|task| task.task_id)
+                .collect::<Vec<_>>()
+        };
+        assert!(current().is_empty());
+
+        write(
+            root.path(),
+            ".lorekeeper/queue/second.jsonl",
+            &(serde_json::to_string(&task).unwrap() + "\n"),
+        );
+        assert_eq!(current(), std::slice::from_ref(&task.task_id));
+        assert_eq!(current(), std::slice::from_ref(&task.task_id));
+        let selected = super::super::select_task_controlled(
+            root.path(),
+            &task.task_id,
+            super::super::TaskSelection::Current,
+            &read,
+        );
+        assert_eq!(selected.unwrap().task_id, task.task_id);
+
+        write(
+            root.path(),
+            source,
+            "---\ntype: document\n---\nA revised and longer observation.\n",
+        );
+        assert!(current().is_empty());
+        assert!(
+            super::super::select_task_controlled(
+                root.path(),
+                &task.task_id,
+                super::super::TaskSelection::Current,
+                &read,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn synthesis_waits_for_its_mutable_origins_without_waiting_for_unrelated_inputs() {
         let root = tempfile::tempdir().unwrap();
         write(

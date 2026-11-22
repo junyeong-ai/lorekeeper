@@ -578,8 +578,13 @@ pub fn read_tasks(path: &Path) -> std::io::Result<QueueFile> {
 /// Capture exact queue bytes and decode that same snapshot for guarded replacement.
 pub fn read_tasks_snapshot(path: &Path) -> std::io::Result<(Vec<u8>, QueueFile)> {
     let raw = std::fs::read(path)?;
-    let decoded = read_tasks_from(path, raw.as_slice())?;
+    let decoded = decode_tasks(path, &raw)?;
     Ok((raw, decoded))
+}
+
+/// Decode the queue file `path` from bytes already read from it.
+pub fn decode_tasks(path: &Path, raw: &[u8]) -> std::io::Result<QueueFile> {
+    read_tasks_from(path, raw)
 }
 
 fn read_tasks_from(path: &Path, reader: impl BufRead) -> std::io::Result<QueueFile> {
