@@ -139,6 +139,14 @@ paths:
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.
+- A synthesis request answers the citation set it was made for. Drafting, preparation
+  and publication refuse it (`citations-changed`) once the concept's graph citations
+  captured with its context differ, whatever order reconciliation and application run
+  in: preparation defers it without a call, staging treats it as changed scope, and
+  apply holds its result under a rejection whose scope carries those citations. The
+  result publishes if they return, and retires with the request once reconciliation
+  records the current set. Like other graph-derived publication this detects drift up
+  to that capture inside the writer session, not external edits afterwards.
 - Optional synthesis recovery registers only closed periods starting on/after its
   explicit activation date. Persist per-kind cursors and fair turns in the existing
   intent store; bound examined slots, including existing requests. Disabled modes

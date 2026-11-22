@@ -1491,7 +1491,7 @@ fn sealed_synthesis_requires_exact_read_source_bytes_even_when_authored_revision
     bounded_config(&ws);
     let source_path = "wiki/documents/source.md";
     let source = format!(
-        "---\ntype: document\nupdated: 2026-01-01\n---\n{}",
+        "---\ntype: document\nupdated: 2026-01-01\n---\nSee [Topic](../concepts/topic.md).\n{}",
         "Complete source evidence.\n\n".repeat(1000)
     );
     ws.write(source_path, &source);
@@ -1725,7 +1725,7 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
         "existing-link",
     ] {
         let ws = Workspace::new();
-        let source = "---\ntype: document\n---\nTimeout is 30 seconds.\n";
+        let source = "---\ntype: document\n---\nTimeout is 30 seconds. See [Timeout](../concepts/timeout.md).\n";
         ws.write("wiki/documents/spec.md", source);
         let citation = lk_core::concept::Citation::new(
             Path::new("wiki/documents/spec.md"),
@@ -1845,6 +1845,105 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
 }
 
 #[test]
+fn a_synthesis_for_a_moved_citation_set_is_held_until_its_citations_settle() {
+    for order in ["applied first", "restored", "reconciled first"] {
+        let ws = Workspace::new();
+        let source = "---\ntype: document\n---\nTimeout is 30 seconds. See [Timeout](../concepts/timeout.md).\n";
+        ws.write("wiki/documents/spec.md", source);
+        let citation = lk_core::concept::Citation::new(
+            Path::new("wiki/documents/spec.md"),
+            &lk_core::frontmatter::parse_page(source).unwrap(),
+        );
+        let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+        let concept = format!(
+            "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nOld synthesis.\n\n## Sources\n\n## Related\n"
+        );
+        ws.write("wiki/concepts/timeout.md", &concept);
+        let task = serde_json::json!({"task_id":"syn-1", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+            "input":{"locale":"en","citations":[citation], "related_anchor":"## Related"}, "target":{"vault_path":"wiki/concepts/timeout.md","kind":"concept-synthesis","anchor":"## Synthesis"}});
+        ws.write(".lorekeeper/queue/tasks.jsonl", &task.to_string());
+        let status = work_json(&ws, &["queue", "status", "--json"]);
+        let result = serde_json::json!({"task_id":"syn-1", "cache_hash":hash, "context_revision":synthesis_context(&ws, "syn-1"), "target_revision":status["data"]["tasks"][0]["target_revision"], "synthesis":"Timeout is 30 seconds.", "related":"A sourced relationship."});
+        let retry = "wiki/documents/retry.md";
+        ws.write(
+            retry,
+            "---\ntype: document\n---\nRetries reuse the [timeout](../concepts/timeout.md).\n",
+        );
+        let proposal = ".lorekeeper/queue/results/syn-1.synthesis.json";
+        ws.write(proposal, &result.to_string());
+        if order == "reconciled first" {
+            let synced = ws.run(&["graph", "backlinks-sync"]);
+            assert!(
+                synced.status.success(),
+                "{}",
+                String::from_utf8_lossy(&synced.stderr)
+            );
+            let output = ws.run(&["queue", "apply", "--json"]);
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["applied"], 0, "{report}");
+            assert_eq!(report["dropped"], 1, "{report}");
+            assert!(!ws.vault().join(proposal).exists());
+            assert!(
+                !ws.read("wiki/concepts/timeout.md")
+                    .contains("synthesis_done:")
+            );
+            continue;
+        }
+
+        let context = ws.run(&["work", "context", "--task-id", "syn-1"]);
+        assert!(!context.status.success());
+        assert!(String::from_utf8_lossy(&context.stderr).contains("citations changed"));
+        let output = ws.run(&["queue", "apply", "--json"]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["fatal"].is_null(), "{report}");
+        assert_eq!(report["applied"], 0, "{report}");
+        assert!(
+            report["groups"].as_array().unwrap().iter().any(
+                |group| group["outcome"] == "rejected" && group["kind"] == "citations-changed"
+            ),
+            "{report}"
+        );
+        assert_eq!(ws.read("wiki/concepts/timeout.md"), concept);
+        assert!(ws.vault().join(proposal).exists());
+
+        if order == "restored" {
+            std::fs::remove_file(ws.vault().join(retry)).unwrap();
+            let output = ws.run(&["queue", "apply", "--json"]);
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["applied"], 1, "{report}");
+            assert!(
+                ws.read("wiki/concepts/timeout.md")
+                    .contains("synthesis_done:")
+            );
+            continue;
+        }
+        let synced = ws.run(&["graph", "backlinks-sync"]);
+        assert!(
+            synced.status.success(),
+            "{}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+        let output = ws.run(&["queue", "apply", "--json"]);
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(report["fatal"].is_null(), "{report}");
+        assert_eq!(report["dropped"], 1, "{report}");
+        let page = ws.read("wiki/concepts/timeout.md");
+        assert!(page.contains("Old synthesis."), "{page}");
+        assert!(!page.contains("synthesis_done:"), "{page}");
+        assert!(!ws.vault().join(proposal).exists());
+        let status = work_json(&ws, &["queue", "status", "--json"]);
+        let current = status["data"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["status"] == "current")
+            .collect::<Vec<_>>();
+        assert_eq!(current.len(), 1, "{status}");
+        assert_ne!(current[0]["task_id"], "syn-1", "{status}");
+    }
+}
+
+#[test]
 fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_review() {
     for synthesis in [false, true] {
         for conflicting in [false, true] {
@@ -1854,7 +1953,11 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
             } else {
                 "wiki/documents/subject.md"
             };
-            let source = "---\ntype: document\n---\nTimeout is 30 seconds.\n";
+            let source = if synthesis {
+                "---\ntype: document\n---\nTimeout is 30 seconds. See [Subject](../concepts/subject.md).\n"
+            } else {
+                "---\ntype: document\n---\nTimeout is 30 seconds.\n"
+            };
             ws.write("wiki/documents/spec.md", source);
             let citation = lk_core::concept::Citation::new(
                 Path::new("wiki/documents/spec.md"),
@@ -2005,7 +2108,7 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
             }
             let source_path = "wiki/documents/policy.md";
             let source = format!(
-                "---\ntype: document\n---\nRetention is 30 days.\n{}",
+                "---\ntype: document\n---\nRetention is 30 days. See [Retention](../concepts/retention.md).\n{}",
                 if bounded {
                     "Exact supporting context.\n\n".repeat(700)
                 } else {
@@ -2284,7 +2387,8 @@ fn corrupt_result_payloads_are_preserved_before_independent_synthesis_can_publis
             b"{\"task_id\":\"\xea\xb0".as_slice(),
         ] {
             let ws = Workspace::new();
-            let source = "---\ntype: document\n---\nEvidence.\n";
+            let source =
+                "---\ntype: document\n---\nEvidence for [Example](../concepts/example.md).\n";
             ws.write("wiki/documents/spec.md", source);
             let citation = lk_core::concept::Citation::new(
                 Path::new("wiki/documents/spec.md"),
@@ -2373,7 +2477,7 @@ fn invalid_section_bodies_are_retained_while_independent_results_publish() {
         (true, "synthesis", "<!-- Unclosed block"),
     ] {
         let ws = Workspace::new();
-        let source = "---\ntype: document\n---\nA retained observation.\n";
+        let source = "---\ntype: document\n---\nA retained observation about [Subject](../concepts/subject.md).\n";
         ws.write("wiki/documents/spec.md", source);
         let citation = lk_core::concept::Citation::new(
             Path::new("wiki/documents/spec.md"),
@@ -3156,7 +3260,7 @@ fn source_questions_can_publish_but_processing_blockers_cannot_bypass_explicit_w
         let ws = Workspace::new();
         bounded_config(&ws);
         let source_path = "wiki/documents/source.md";
-        let source = "---\ntype: document\n---\nPolicy drafts disagree on retention; the approving authority is not recorded.\n";
+        let source = "---\ntype: document\n---\nPolicy drafts disagree on [retention](../concepts/topic.md); the approving authority is not recorded.\n";
         ws.write(source_path, source);
         let citation = lk_core::concept::Citation::new(
             Path::new(source_path),

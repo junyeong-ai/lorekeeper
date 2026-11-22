@@ -62,6 +62,8 @@ pub(super) struct Prepared {
     /// The current candidate roster that admits this screened evidence. Result completion
     /// needs it; reading the evidence does not, so it is absent from a plain refresh.
     pub(super) roster: Option<super::selection::RosterBinding>,
+    /// Digest of a synthesis target's graph citations when this context was captured.
+    graph_citations: Option<String>,
 }
 
 /// The discovery recipes and screening proof Rust writes into an extraction result.
@@ -112,6 +114,25 @@ pub(super) struct SelectionInventory {
 }
 
 impl Prepared {
+    /// A synthesis request answers the citation set it was made for. Refuse drafting or
+    /// publishing it once the concept's graph citations captured here differ, whatever order
+    /// reconciliation and application run in. The refusal is a rejection, never a discard:
+    /// its scope carries these citations, so they returning releases the held result.
+    pub(super) fn require_requested_citations(&self) -> miette::Result<()> {
+        let (Some(current), Subject::Queue { cache_hash, .. }) =
+            (&self.graph_citations, &self.subject)
+        else {
+            return Ok(());
+        };
+        if current != cache_hash {
+            return Err(super::publication_rejection(
+                super::RejectionKind::CitationsChanged,
+                "concept citations changed since this synthesis was requested; `lore graph backlinks-sync` records the current set and requests its synthesis",
+            ));
+        }
+        Ok(())
+    }
+
     /// Whether `address` is a reusable owner captured at the exact file revision `revision`.
     /// Reuse publication writes the owner, so it binds the file, not the context read.
     pub(super) fn is_reuse_owner(&self, address: &str, revision: &str) -> bool {
@@ -432,6 +453,7 @@ impl<'a> Capture<'a> {
             audit_reviews: None,
             selected_owners: None,
             roster: None,
+            graph_citations: None,
         }
     }
 }
@@ -531,6 +553,7 @@ pub(super) fn task_with_audit_controlled(
         Vec::new()
     };
     let prepared = capture_task_with_audit_controlled(root, config, task, audit, read)?;
+    prepared.require_requested_citations()?;
     if extraction {
         with_discovery_controlled(root, config, prepared, &queries, read)
     } else {
@@ -955,6 +978,7 @@ fn capture_task_with_audit_controlled(
         ));
     }
     let mut captured = Capture::new(root, read);
+    let mut graph_citations = None;
     let target = captured.page(
         &task.target.vault_path,
         None,
@@ -1019,10 +1043,17 @@ fn capture_task_with_audit_controlled(
         purpose.insert("rss_evidence".into(), json!({"manifest_revision": manifest.reference().map_err(|e| miette::miette!("{e}"))?, "events": normalized.len()}));
     }
     if task.kind == lk_queue::TaskKind::SynthesizeConcept {
-        let scoped = match audit_input {
-            Some(candidate) => knowledge_candidate_controlled(root, config, candidate, read)?,
-            None => knowledge_scope_controlled(root, config, &task.target.vault_path, read)?,
+        let loaded;
+        let candidate = match audit_input {
+            Some(candidate) => candidate,
+            None => {
+                loaded =
+                    load_audit_candidate_controlled(root, config, &task.target.vault_path, read)?;
+                &loaded
+            }
         };
+        graph_citations = Some(lk_core::concept::citation_digest(&candidate.evidence));
+        let scoped = knowledge_candidate_controlled(root, config, candidate, read)?;
         for resource in scoped.resources {
             captured
                 .resources
@@ -1045,7 +1076,9 @@ fn capture_task_with_audit_controlled(
         "purpose": {"operation":"queue", "task_kind":task.kind, "target":task.target, "parameters":purpose},
         "authority": "Retained input is the task source; the current target is publication context. Source/page/RSS evidence retains its declared authority. A read or part receipt is not factual verification.",
     });
-    Ok(captured.finish(subject, context, config))
+    let mut prepared = captured.finish(subject, context, config);
+    prepared.graph_citations = graph_citations;
+    Ok(prepared)
 }
 
 pub(super) fn audit(root: &Path, config: &Config, path: &str) -> miette::Result<Prepared> {
@@ -1087,16 +1120,6 @@ fn load_audit_candidate_controlled(
         .next()
         .ok_or_else(|| miette::miette!("audit subject not found: {path}"))?;
     Ok(candidate)
-}
-
-fn knowledge_scope_controlled(
-    root: &Path,
-    config: &Config,
-    path: &str,
-    read: &lk_vault::ReadControl,
-) -> miette::Result<Prepared> {
-    let candidate = load_audit_candidate_controlled(root, config, path, read)?;
-    knowledge_candidate_controlled(root, config, &candidate, read)
 }
 
 fn knowledge_candidate_controlled(
@@ -1684,6 +1707,7 @@ mod tests {
             resources: Vec::new(),
             pages: BTreeMap::new(),
             roster: None,
+            graph_citations: None,
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
                 path: review.into(),
                 file_revision: None,

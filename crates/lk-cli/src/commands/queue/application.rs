@@ -9,6 +9,8 @@ pub(in crate::commands) enum RejectionKind {
     SelectionInventoryChanged,
     SelectionDecisionsChanged,
     SemanticContextChanged,
+    /// A concept's current citations differ from the set its synthesis request was made for.
+    CitationsChanged,
     EvidenceScopeChanged,
     TargetChanged,
     ConflictingProposals,
@@ -47,7 +49,18 @@ pub(in crate::commands) fn rejection(
 pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -> bool {
     matches!(
         error.downcast_ref::<PublicationRejection>(),
-        Some(rejection) if rejection.kind == RejectionKind::SemanticContextChanged
+        Some(rejection) if matches!(
+            rejection.kind,
+            RejectionKind::SemanticContextChanged | RejectionKind::CitationsChanged
+        )
+    )
+}
+
+/// Whether a synthesis request was refused because its concept's citations have since changed.
+pub(in crate::commands) fn is_citations_changed(error: &miette::Report) -> bool {
+    matches!(
+        error.downcast_ref::<PublicationRejection>(),
+        Some(rejection) if rejection.kind == RejectionKind::CitationsChanged
     )
 }
 

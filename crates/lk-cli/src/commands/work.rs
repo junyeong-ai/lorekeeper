@@ -42,7 +42,8 @@ pub(in crate::commands) use selection::{
 use state::{Work, WorkLimits, WorkOutput};
 
 use super::queue::application::{
-    RejectionKind, is_semantic_context_changed, rejection as publication_rejection,
+    RejectionKind, is_citations_changed, is_semantic_context_changed,
+    rejection as publication_rejection,
 };
 
 #[derive(clap::Subcommand)]
@@ -643,6 +644,9 @@ fn prepare_queue_publication_controlled(
     }
     let scoped_synthesis = prepared.context["purpose"]["task_kind"]
         == serde_json::to_value(lk_queue::TaskKind::SynthesizeConcept).into_diagnostic()?;
+    if scoped_synthesis {
+        prepared.require_requested_citations()?;
+    }
     if !scoped_synthesis && !scoped_extraction {
         let section: lk_queue::SectionResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
@@ -2020,10 +2024,12 @@ pub(super) struct TaskPreparation {
 impl TaskPreparation {
     fn from_result(result: miette::Result<Self>) -> miette::Result<Self> {
         match result {
-            Err(error) if state::is_input_capacity(&error) => Ok(TaskWork::Admission {
-                reason: error.to_string(),
+            Err(error) if state::is_input_capacity(&error) || is_citations_changed(&error) => {
+                Ok(TaskWork::Admission {
+                    reason: error.to_string(),
+                }
+                .into())
             }
-            .into()),
             result => result,
         }
     }

@@ -3961,6 +3961,12 @@ mod native {
                             self.queue_admitted.clear();
                             return true;
                         }
+                        Err(error) if is_semantic_context_changed(&error) => {
+                            self.deferred("bounded work context", error);
+                            self.queue_replan = QueueReplan::Invalidate;
+                            self.queue_admitted.clear();
+                            return true;
+                        }
                         Err(error) => return self.failure("bounded work progress", error),
                     };
                     if progress.complete {
