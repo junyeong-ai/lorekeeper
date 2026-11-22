@@ -87,6 +87,11 @@ impl ReadControl {
         self
     }
 
+    /// Whether this control keeps the page texts its traversals read for later ones.
+    pub(crate) fn keeps_page_texts(&self) -> bool {
+        self.page_texts.is_some()
+    }
+
     /// A discovery page's complete text, and whether an earlier traversal supplied it.
     /// Callers that guard publication or record evidence read with `read_to_string`.
     pub(crate) fn page_text(&self, path: &Path) -> Result<(Arc<str>, bool), VaultError> {

@@ -638,14 +638,28 @@ fn visit_collections_controlled(
     vault_root: &Path,
     dirs: &VaultDirs,
     directories: Vec<PathBuf>,
+    mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+    read: &crate::ReadControl,
+    visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
+) -> Result<(), VaultError> {
+    let files = CollectionFiles::load_controlled(
+        vault_root,
+        dirs,
+        directories,
+        metrics.as_deref_mut(),
+        read,
+    )?;
+    visit_listed_pages(&files, metrics, read, visit)
+}
+
+/// Read and parse every page of `files` in listing order.
+pub(super) fn visit_listed_pages(
+    files: &CollectionFiles,
     metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
     read: &crate::ReadControl,
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
-    visit_collection_files(
-        vault_root,
-        dirs,
-        directories,
+    files.visit(
         metrics,
         read,
         |path, full, concept_collection, mut metrics| {
@@ -715,57 +729,124 @@ fn visit_collection_files(
     directories: Vec<PathBuf>,
     mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
     read: &crate::ReadControl,
-    mut visit: impl FnMut(
+    visit: impl FnMut(
         &Path,
         &Path,
         bool,
         Option<&mut crate::discovery::DiscoveryReadMetrics>,
     ) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
-    read.check()?;
-    let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
-    let mut visited = std::collections::BTreeSet::new();
-    for rel_dir in directories {
-        read.check()?;
-        let concept_collection = rel_dir == concepts_dir(dirs);
-        let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-        let files = crate::store::load_markdown_inventory_controlled(vault_root, &rel_dir, read)?
-            .owners
-            .into_iter()
-            .map(|path| vault_root.join(path))
-            .collect::<Vec<_>>();
-        if let Some(metrics) = metrics.as_mut() {
-            metrics.enumeration_duration_us += started_at
-                .expect("measured enumeration")
-                .elapsed()
-                .as_micros() as u64;
-        }
-        for path in files {
-            read.check()?;
-            if !visited.insert(path.clone()) {
-                continue;
-            }
-            if reserved.contains(&path)? {
-                continue;
-            }
-            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-            let full = crate::page_path(
-                vault_root,
-                path.strip_prefix(vault_root)
-                    .map_err(std::io::Error::other)?,
-            )?;
-            if let Some(metrics) = metrics.as_mut() {
-                metrics.address_duration_us +=
-                    started_at.expect("measured address").elapsed().as_micros() as u64;
-            }
-            let relative = path
-                .strip_prefix(vault_root)
-                .map_err(std::io::Error::other)?;
-            visit(relative, &full, concept_collection, metrics.as_deref_mut())?;
-            read.check()?;
-        }
+    CollectionFiles::load_controlled(vault_root, dirs, directories, metrics.as_deref_mut(), read)?
+        .visit(metrics, read, visit)
+}
+
+/// The Markdown files of some collections in walk order, each with its verified address and
+/// whether it was listed from the concept collection. A capture lists the knowledge
+/// collections once, so its vocabulary and its page traversal read the same files.
+pub(super) struct CollectionFiles {
+    files: Vec<CollectionFile>,
+}
+
+struct CollectionFile {
+    relative: PathBuf,
+    full: PathBuf,
+    concept_collection: bool,
+}
+
+impl CollectionFiles {
+    /// The concept, document and exploration collections a knowledge traversal reads.
+    pub(super) fn knowledge_controlled(
+        vault_root: &Path,
+        dirs: &VaultDirs,
+        metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        read: &crate::ReadControl,
+    ) -> Result<Self, VaultError> {
+        Self::load_controlled(
+            vault_root,
+            dirs,
+            page_directories(dirs, false),
+            metrics,
+            read,
+        )
     }
-    Ok(())
+
+    fn load_controlled(
+        vault_root: &Path,
+        dirs: &VaultDirs,
+        directories: Vec<PathBuf>,
+        mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        read: &crate::ReadControl,
+    ) -> Result<Self, VaultError> {
+        read.check()?;
+        let reserved = crate::navigation::ReservedNavigationPaths::load(vault_root, dirs)?;
+        let mut visited = std::collections::BTreeSet::new();
+        let mut listed = Vec::new();
+        for rel_dir in directories {
+            read.check()?;
+            let concept_collection = rel_dir == concepts_dir(dirs);
+            let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+            let files =
+                crate::store::load_markdown_inventory_controlled(vault_root, &rel_dir, read)?
+                    .owners
+                    .into_iter()
+                    .map(|path| vault_root.join(path))
+                    .collect::<Vec<_>>();
+            if let Some(metrics) = metrics.as_mut() {
+                metrics.enumeration_duration_us += started_at
+                    .expect("measured enumeration")
+                    .elapsed()
+                    .as_micros() as u64;
+            }
+            for path in files {
+                read.check()?;
+                if !visited.insert(path.clone()) {
+                    continue;
+                }
+                if reserved.contains(&path)? {
+                    continue;
+                }
+                let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
+                let relative = path
+                    .strip_prefix(vault_root)
+                    .map_err(std::io::Error::other)?;
+                let full = crate::page_path(vault_root, relative)?;
+                if let Some(metrics) = metrics.as_mut() {
+                    metrics.address_duration_us +=
+                        started_at.expect("measured address").elapsed().as_micros() as u64;
+                }
+                listed.push(CollectionFile {
+                    relative: relative.to_path_buf(),
+                    full,
+                    concept_collection,
+                });
+            }
+        }
+        Ok(Self { files: listed })
+    }
+
+    fn visit(
+        &self,
+        mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        read: &crate::ReadControl,
+        mut visit: impl FnMut(
+            &Path,
+            &Path,
+            bool,
+            Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        ) -> Result<(), VaultError>,
+    ) -> Result<(), VaultError> {
+        for file in &self.files {
+            read.check()?;
+            visit(
+                &file.relative,
+                &file.full,
+                file.concept_collection,
+                metrics.as_deref_mut(),
+            )?;
+            read.check()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -783,35 +864,80 @@ impl ConceptVocabulary {
         Self::load_controlled(root, dirs, metrics, &crate::ReadControl::default())
     }
 
-    pub(super) fn load_controlled(
+    #[cfg(test)]
+    fn load_controlled(
         root: &Path,
         dirs: &VaultDirs,
+        mut metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
+        read: &crate::ReadControl,
+    ) -> Result<Self, VaultError> {
+        let files = CollectionFiles::load_controlled(
+            root,
+            dirs,
+            vec![concepts_dir(dirs)],
+            metrics.as_deref_mut(),
+            read,
+        )?;
+        Self::from_files(&files, metrics, read)
+    }
+
+    /// The vocabulary of the concept-collection pages in `files`. Under a control that keeps
+    /// page texts a page is read whole, so the traversal that follows reuses it instead of
+    /// opening the file again; otherwise only its metadata header is read. A body that is
+    /// not UTF-8 never fails the vocabulary: its header is read as before.
+    pub(super) fn from_files(
+        files: &CollectionFiles,
         metrics: Option<&mut crate::discovery::DiscoveryReadMetrics>,
         read: &crate::ReadControl,
     ) -> Result<Self, VaultError> {
         let mut vocabulary = Self::default();
-        visit_collection_files(
-            root,
-            dirs,
-            vec![concepts_dir(dirs)],
+        files.visit(
             metrics,
             read,
-            |path, full, _, mut metrics| {
+            |path, full, concept_collection, mut metrics| {
+                if !concept_collection {
+                    return Ok(());
+                }
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
-                let reused = read.reusable_page_text(full);
-                let (header, bytes) = match &reused {
-                    Some(text) => {
-                        crate::store::read_frontmatter_header_controlled(text.as_bytes(), read)?
-                    }
-                    None => crate::store::read_frontmatter_header_controlled(
+                let header_only = || {
+                    crate::store::read_frontmatter_header_controlled(
                         std::io::BufReader::new(std::fs::File::open(full)?),
                         read,
-                    )?,
+                    )
+                };
+                let (header, bytes, reused) = match read.reusable_page_text(full) {
+                    Some(text) => {
+                        let (header, bytes) = crate::store::read_frontmatter_header_controlled(
+                            text.as_bytes(),
+                            read,
+                        )?;
+                        (header, bytes, true)
+                    }
+                    None if read.keeps_page_texts() => match read.page_text(full) {
+                        Ok((text, reused)) => {
+                            let (header, _) = crate::store::read_frontmatter_header_controlled(
+                                text.as_bytes(),
+                                read,
+                            )?;
+                            (header, text.len(), reused)
+                        }
+                        Err(VaultError::Io(error))
+                            if error.kind() == std::io::ErrorKind::InvalidData =>
+                        {
+                            let (header, bytes) = header_only()?;
+                            (header, bytes, false)
+                        }
+                        Err(error) => return Err(error),
+                    },
+                    None => {
+                        let (header, bytes) = header_only()?;
+                        (header, bytes, false)
+                    }
                 };
                 if let Some(metrics) = metrics.as_mut() {
                     metrics
                         .record_read(bytes, started_at.expect("measured metadata read").elapsed());
-                    metrics.reused_files += usize::from(reused.is_some());
+                    metrics.reused_files += usize::from(reused);
                 }
                 let started_at = metrics.as_ref().map(|_| std::time::Instant::now());
                 let metadata = match header {
@@ -2488,6 +2614,13 @@ mod tests {
             "---\ntype: document\ntitle: Helios\naliases: [Not a concept]\n---\nSource.\n",
         )
         .unwrap();
+        let documents = root.path().join(documents_dir(&dirs));
+        std::fs::create_dir_all(&documents).unwrap();
+        std::fs::write(
+            documents.join("outsider.md"),
+            "---\ntype: concept\ntitle: Outsider\n---\nFiled outside the concept collection.\n",
+        )
+        .unwrap();
         let mut metrics = crate::DiscoveryReadMetrics::default();
         let vocabulary = ConceptVocabulary::load(root.path(), &dirs, Some(&mut metrics)).unwrap();
         let mut pages = Vec::new();
@@ -2515,6 +2648,19 @@ mod tests {
         assert_eq!(metrics.files, 3);
         assert!(metrics.bytes < 256);
         assert!(content.len() > 500_000);
+        let shared = CollectionFiles::knowledge_controlled(
+            root.path(),
+            &dirs,
+            None,
+            &crate::ReadControl::default(),
+        )
+        .unwrap();
+        let from_shared =
+            ConceptVocabulary::from_files(&shared, None, &crate::ReadControl::default()).unwrap();
+        assert_eq!(
+            from_shared.names, vocabulary.names,
+            "a knowledge listing yields the concept collection's vocabulary only"
+        );
         let query = lk_core::discovery::DiscoveryQuery {
             query: "Complete evidence".into(),
             phrase: true,
@@ -2539,6 +2685,16 @@ mod tests {
         raw.push(0xff);
         std::fs::write(&path, raw).unwrap();
         assert!(ConceptVocabulary::load(root.path(), &dirs, None).is_ok());
+        assert!(
+            ConceptVocabulary::load_controlled(
+                root.path(),
+                &dirs,
+                None,
+                &crate::ReadControl::default().with_immediate_page_reuse(),
+            )
+            .is_ok(),
+            "reading pages whole for reuse never makes an unreadable body fail the vocabulary"
+        );
         assert!(
             crate::capture_discovery(
                 root.path(),

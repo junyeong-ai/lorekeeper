@@ -573,15 +573,24 @@ fn capture_discovery_batch_inner(
         query.validate().map_err(std::io::Error::other)?;
     }
     let has_queries = recipes.iter().any(|recipe| !recipe.queries.is_empty());
-    let vocabulary = if has_queries {
-        search::ConceptVocabulary::load_controlled(
+    // One listing serves the vocabulary and the page traversal, which read the same files.
+    let files = if has_queries {
+        Some(search::CollectionFiles::knowledge_controlled(
             &root,
             dirs,
+            metrics.as_mut().map(|metrics| &mut metrics.knowledge),
+            read,
+        )?)
+    } else {
+        None
+    };
+    let vocabulary = match &files {
+        Some(files) => search::ConceptVocabulary::from_files(
+            files,
             metrics.as_mut().map(|metrics| &mut metrics.vocabulary),
             read,
-        )?
-    } else {
-        search::ConceptVocabulary::default()
+        )?,
+        None => search::ConceptVocabulary::default(),
     };
     let mut captures = recipes
         .iter()
@@ -643,7 +652,7 @@ fn capture_discovery_batch_inner(
     };
     let measured = metrics.is_some();
     let mut projection_match_duration_us = 0;
-    if has_queries {
+    if let Some(files) = &files {
         // Every page is matched against every recipe's queries, so pages are matched in
         // parallel. A batch bounds the pages and source bytes held at once; matches merge in
         // walk order, so the preferred path and best rank of each owner are chosen exactly
@@ -674,10 +683,8 @@ fn capture_discovery_batch_inner(
             }
             Ok(())
         };
-        search::visit_pages_controlled(
-            &root,
-            dirs,
-            false,
+        search::visit_listed_pages(
+            files,
             metrics.as_mut().map(|metrics| &mut metrics.knowledge),
             read,
             |page, _| {
@@ -1026,7 +1033,8 @@ pub fn discover_query_matches_controlled(
         read.check()?;
         return Ok(matches);
     }
-    let vocabulary = search::ConceptVocabulary::load_controlled(root, dirs, None, read)?;
+    let files = search::CollectionFiles::knowledge_controlled(root, dirs, None, read)?;
+    let vocabulary = search::ConceptVocabulary::from_files(&files, None, read)?;
     let plans = queries
         .iter()
         .collect::<BTreeSet<_>>()
@@ -1060,7 +1068,7 @@ pub fn discover_query_matches_controlled(
         }
         Ok(())
     };
-    search::visit_pages_controlled(root, dirs, false, None, read, |page, _| {
+    search::visit_listed_pages(&files, None, read, |page, _| {
         batch.push(page);
         if batch.len() == BATCH_PAGES {
             record(&mut batch)?;
@@ -1348,24 +1356,32 @@ mod tests {
             .unwrap();
             (
                 serialized(&captures).unwrap(),
+                metrics.vocabulary.reused_files,
                 metrics.knowledge.reused_files,
             )
         };
         let reuse = crate::ReadControl::default().with_immediate_page_reuse();
-        let (first, reused) = capture(&reuse);
-        assert_eq!(reused, 0);
-        assert_eq!(capture(&reuse), (first.clone(), 300));
-        assert_eq!(capture(&crate::ReadControl::default()), (first.clone(), 0));
+        let (first, vocabulary, knowledge) = capture(&reuse);
+        assert_eq!(
+            (vocabulary, knowledge),
+            (0, 300),
+            "the vocabulary reads each page whole once and the traversal reuses it"
+        );
+        assert_eq!(capture(&reuse), (first.clone(), 300, 300));
+        assert_eq!(
+            capture(&crate::ReadControl::default()),
+            (first.clone(), 0, 0)
+        );
 
         write(
             root.path(),
             "wiki/concepts/topic-0.md",
             &page(0, "quiet harbor"),
         );
-        let (changed, reused) = capture(&reuse);
-        assert_eq!(reused, 299);
+        let (changed, vocabulary, knowledge) = capture(&reuse);
+        assert_eq!((vocabulary, knowledge), (299, 300));
         assert_ne!(changed, first);
-        assert_eq!(capture(&crate::ReadControl::default()), (changed, 0));
+        assert_eq!(capture(&crate::ReadControl::default()), (changed, 0, 0));
     }
 
     #[test]

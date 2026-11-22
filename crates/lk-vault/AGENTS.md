@@ -122,14 +122,19 @@ canonical; SQLite navigation is derived.
   Default scope concepts/documents/explorations; source scope adds managed pages,
   never task boards. Concept vocabulary honors declared non-concept types, retaining
   untyped legacy concepts. Build that vocabulary from headers; full discovery still
-  reads and validates complete bodies. A run's supervising `ReadControl` may supply a body
-  an earlier traversal read while the file keeps its device, inode, size, mtime and ctime,
-  never one changed within the settling window before that read (`read.rs`). Kept bodies
-  stay within a byte budget that refuses admission rather than evicting, and capture
-  matching batches bound held pages by count and bytes. Matched
-  rereads and publication guards always read current bytes. Vocabulary metrics count
-  consumed header/probe bytes, excluding buffered read-ahead. Resolve aliases across scope before metadata filtering;
-  ambiguity doesn't expand. Declared names match phrases, other queries every term.
+  reads and validates complete bodies. A capture lists the knowledge collections once
+  (`search::CollectionFiles`) and builds its vocabulary from that listing's concept
+  collection before traversing the same files. A run's supervising `ReadControl` may supply
+  a body an earlier traversal read while the file keeps its device, inode, size, mtime and
+  ctime, never one changed within the settling window before that read (`read.rs`). Under
+  such a control the vocabulary reads each page whole, so the traversal does not open it
+  again; a body that is not UTF-8 still never fails the vocabulary, which then reads only
+  its header. Kept bodies stay within a byte budget that refuses admission rather than
+  evicting, and capture matching batches bound held pages by count and bytes. Matched
+  rereads and publication guards always read current bytes. Vocabulary metrics count the
+  bytes it consumed: the header/probe without buffered read-ahead, or the whole page it read
+  for reuse. Resolve aliases across scope before metadata filtering; ambiguity doesn't
+  expand. Declared names match phrases, other queries every term.
   Search and brief enumerate the shared verified Markdown owners per collection:
   contained leaf aliases remain readable, duplicate aliases share an owner, and hard links
   stay distinct. A nested directory alias is redundant only if its canonical directory was
