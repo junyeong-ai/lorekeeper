@@ -548,8 +548,8 @@ fn pending_queue_files_controlled(
 }
 
 /// A page read only to select work. Preparation captures its inputs afresh and publication
-/// guards read current bytes, so selection may take a page an earlier read of this run
-/// returned while the file keeps its stamp.
+/// guards read current bytes, so selection may take a page an earlier read under the same
+/// control returned while the file keeps its stamp.
 fn selection_text(
     root: &Path,
     path: &Path,
@@ -1945,10 +1945,11 @@ pub(super) fn current_synthesis_request(
     Ok(found)
 }
 
-/// The `(vault_path, cache_hash)` of every pending task of `kind` that still classifies as
-/// WORK — one a drain will act on.
+/// The `(vault_path, cache_hash)` of every pending task of `kind` for one of `targets` that
+/// still classifies as WORK — one a drain will act on. Its pages are selection reads under
+/// `read`.
 ///
-/// The alive question is asked HERE, through the same `classify_task` `queue status` uses,
+/// The alive question is asked HERE, through the classifier `queue status` uses,
 /// because a caller deciding whether to queue work again has to know whether what is on disk
 /// can still be answered. A task can die with its input unchanged: `vault.locale` renames a
 /// page's headings, the task's anchor is no longer on the page, and it classifies
@@ -1962,7 +1963,12 @@ pub(super) fn current_synthesis_request(
 pub(super) fn pending_work_inputs(
     vault_root: &Path,
     kind: lk_queue::TargetKind,
+    targets: &std::collections::HashSet<String>,
+    read: &lk_vault::ReadControl,
 ) -> std::collections::HashSet<(String, String)> {
+    if targets.is_empty() {
+        return std::collections::HashSet::new();
+    }
     let mut revisions = BTreeMap::new();
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let Ok(files) = pending_queue_files(&queue_dir) else {
@@ -1971,10 +1977,18 @@ pub(super) fn pending_work_inputs(
     files
         .into_iter()
         .filter_map(|file| read_tasks(&file).ok())
-        .flat_map(|read| read.tasks)
-        .filter(|task| task.target.kind == kind)
+        .flat_map(|queue| queue.tasks)
+        .filter(|task| task.target.kind == kind && targets.contains(&task.target.vault_path))
         .filter(|task| {
-            classify_task(vault_root, task, &mut revisions).is_ok_and(|status| status.is_work())
+            classify_with_reader_controlled(
+                vault_root,
+                task,
+                &mut revisions,
+                Artifact::Task,
+                &mut |path| selection_text(vault_root, path, read),
+                read,
+            )
+            .is_ok_and(|classification| classification.status.is_work())
         })
         .map(|task| (task.target.vault_path.clone(), task.cache_hash.clone()))
         .collect()

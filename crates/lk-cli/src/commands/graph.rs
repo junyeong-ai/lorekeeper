@@ -803,8 +803,17 @@ fn plan_backlinks_publication(
     // forever with a recorded input nothing can answer — the finding-that-never-clears
     // `SynthesisPolicy` exists to prevent, reached through a third door. So the aliveness
     // question is asked of `queue status`'s own classifier rather than of the bytes on disk.
-    let pending =
-        super::queue::pending_work_inputs(&rc.root, lk_queue::TargetKind::ConceptSynthesis);
+    let owed_targets = sync
+        .resynthesize
+        .iter()
+        .map(|entry| entry.path.to_string_lossy().into_owned())
+        .collect();
+    let pending = super::queue::pending_work_inputs(
+        &rc.root,
+        lk_queue::TargetKind::ConceptSynthesis,
+        &owed_targets,
+        read,
+    );
     let owed: Vec<&backlinks::ConceptResynthesis> = sync
         .resynthesize
         .iter()
