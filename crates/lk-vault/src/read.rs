@@ -94,18 +94,26 @@ impl ReadControl {
     }
 
     /// The whole content of the file `stamp` describes, or `None` when the file opened at
-    /// `path` is no longer that file or holds more than its stamp's length. Reads at most one
-    /// byte past that length, so a file that grew after its stamp was taken is never held.
+    /// `path` is no longer that file or does not hold exactly its stamp's length.
     fn read_stamped(&self, path: &Path, stamp: FileStamp) -> Result<Option<Vec<u8>>, VaultError> {
-        use std::io::Read;
         let file = self.open(path)?;
         if FileStamp::of_file(&file) != Some(stamp) {
             return Ok(None);
         }
-        let length = usize::try_from(stamp.length).map_err(std::io::Error::other)?;
-        let mut bytes = Vec::with_capacity(length.saturating_add(1));
-        self.read_into(file.take(stamp.length.saturating_add(1)), &mut bytes)?;
-        Ok((bytes.len() == length).then_some(bytes))
+        self.read_exactly(file, stamp.length)
+    }
+
+    /// Exactly `length` bytes from `reader`, or `None` when it holds more or fewer. Reads at
+    /// most one byte past `length`, so a file that grows while it is read is never held.
+    fn read_exactly(
+        &self,
+        reader: impl std::io::Read,
+        length: u64,
+    ) -> Result<Option<Vec<u8>>, VaultError> {
+        let capacity = usize::try_from(length).map_err(std::io::Error::other)?;
+        let mut bytes = Vec::with_capacity(capacity.saturating_add(1));
+        self.read_into(reader.take(length.saturating_add(1)), &mut bytes)?;
+        Ok((bytes.len() == capacity).then_some(bytes))
     }
 
     /// Reuse that keeps even files written moments before their read, so tests can exercise
@@ -139,8 +147,9 @@ impl ReadControl {
     }
 
     /// `page_text` when this control keeps the page: an earlier read while the file keeps its
-    /// stamp, or a whole read it keeps now. `None`, having read nothing, when it would not keep
-    /// the page, so a caller needing less than the whole page can read only that.
+    /// stamp, or a whole read it keeps now. `None` when it would not keep the page, having read
+    /// nothing, or when the page changed while it was read, so a caller needing less than the
+    /// whole page reads only that from the current file.
     pub(crate) fn kept_page_text(
         &self,
         path: &Path,
@@ -152,9 +161,9 @@ impl ReadControl {
 
     /// The complete bytes of a file other than a page, such as a pending queue file, when this
     /// control keeps it: an earlier read while the file keeps its stamp, or a whole read it
-    /// keeps now. `None`, having read nothing, when it would not keep the file, so the caller
-    /// reads it incrementally rather than holding it whole. Kept apart from page texts so large
-    /// files never displace pages.
+    /// keeps now. `None` when it would not keep the file, having read nothing, or when the file
+    /// changed while it was read, so the caller reads the current file incrementally rather
+    /// than holding it whole. Kept apart from page texts so large files never displace pages.
     pub fn kept_file_bytes(&self, path: &Path) -> Result<Option<Arc<Vec<u8>>>, VaultError> {
         self.kept(self.file_bytes.as_deref(), path, |bytes| {
             Ok(Arc::new(bytes))
@@ -164,7 +173,9 @@ impl ReadControl {
 
     /// Reads `path` whole only when its stamp, taken first, is settled and its length fits the
     /// budget, and only up to that length from the file the stamp describes, so nothing larger
-    /// than the budget is ever held for a file that cannot be kept.
+    /// than the budget is ever held for a file that cannot be kept. Content is returned only
+    /// when the path still carries that stamp after the read; a file replaced meanwhile is left
+    /// to the caller's read of the current file.
     fn kept<T: ?Sized + AsRef<[u8]>>(
         &self,
         kept: Option<&Kept<T>>,
@@ -191,8 +202,11 @@ impl ReadControl {
             return Ok(None);
         };
         let content = content(bytes)?;
-        let unchanged = FileStamp::of(path) == Some(stamp);
-        kept.replace(path, unchanged.then(|| (stamp, content.clone())));
+        if FileStamp::of(path) != Some(stamp) {
+            kept.replace(path, None);
+            return Ok(None);
+        }
+        kept.replace(path, Some((stamp, content.clone())));
         Ok(Some((content, false)))
     }
 }
@@ -507,6 +521,39 @@ mod tests {
         std::fs::write(&replacement, "54321").unwrap();
         std::fs::rename(&replacement, &path).unwrap();
         assert_eq!(read.read_stamped(&path, stamp).unwrap(), None);
+    }
+
+    #[test]
+    fn an_exact_read_refuses_input_longer_or_shorter_than_its_length() {
+        let read = ReadControl::default();
+        assert_eq!(
+            read.read_exactly(&b"12345"[..], 5).unwrap().as_deref(),
+            Some(&b"12345"[..])
+        );
+        assert_eq!(read.read_exactly(&b"123456789"[..], 5).unwrap(), None);
+        assert_eq!(read.read_exactly(&b"1234"[..], 5).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_replaced_after_its_read_is_left_to_a_read_of_the_current_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pending.jsonl");
+        let replacement = directory.path().join("replacement.jsonl");
+        std::fs::write(&path, "first").unwrap();
+        let read = reusing(Duration::ZERO, PAGE_BUDGET);
+        let replaced = read
+            .kept(read.file_bytes.as_deref(), &path, |bytes| {
+                std::fs::write(&replacement, "other").unwrap();
+                std::fs::rename(&replacement, &path).unwrap();
+                Ok(Arc::new(bytes))
+            })
+            .unwrap();
+        assert!(
+            replaced.is_none(),
+            "the old file's bytes never stand in for the file now at the path"
+        );
+        assert_eq!(**read.kept_file_bytes(&path).unwrap().unwrap(), *b"other");
     }
 
     #[cfg(unix)]
