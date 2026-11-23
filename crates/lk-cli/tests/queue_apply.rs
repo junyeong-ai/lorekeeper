@@ -3086,11 +3086,12 @@ fn regeneration_replaces_pending_attempts_without_admitting_a_matching_ancestor_
 }
 
 #[test]
-fn regeneration_of_answered_synthesis_still_checks_current_source_revisions() {
+fn regeneration_of_answered_synthesis_still_checks_current_sources_and_citations() {
     use lk_queue::TaskRequest;
-    for changed in [false, true] {
+    for case in ["unchanged", "revised", "cited"] {
         let ws = Workspace::new();
-        let source = "---\ntype: document\n---\nOriginal evidence.\n";
+        let source =
+            "---\ntype: document\n---\nOriginal evidence. See [Example](../concepts/example.md).\n";
         ws.write("wiki/documents/source.md", source);
         let citation = lk_core::concept::Citation::new(
             Path::new("wiki/documents/source.md"),
@@ -3118,25 +3119,29 @@ fn regeneration_of_answered_synthesis_still_checks_current_source_revisions() {
             "---\ntype: concept\nllm_inputs:\n  synthesis: \"{hash}\"\n  synthesis_done: \"{hash}\"\n---\n## Synthesis\nPreserve authored knowledge.\n\n## Related\n\n"
         );
         ws.write("wiki/concepts/example.md", &page);
-        if changed {
-            ws.write(
+        match case {
+            "revised" => ws.write(
                 "wiki/documents/source.md",
                 &source.replace("Original", "Changed"),
-            );
+            ),
+            "cited" => ws.write(
+                "wiki/documents/other.md",
+                "---\ntype: document\n---\nAlso about [Example](../concepts/example.md).\n",
+            ),
+            _ => {}
         }
         let result = ws.run(&["queue", "regenerate", "--task-id", "retained-synthesis"]);
-        assert_eq!(
-            result.status.success(),
-            !changed,
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.success(), case == "unchanged", "{stderr}");
         assert!(
             ws.read("wiki/concepts/example.md")
                 .contains("Preserve authored knowledge.")
         );
-        if changed {
+        if case != "unchanged" {
             assert_eq!(ws.read("wiki/concepts/example.md"), page);
+        }
+        if case == "cited" {
+            assert!(stderr.contains("concept citations changed"), "{stderr}");
         }
     }
 }

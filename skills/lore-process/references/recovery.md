@@ -95,9 +95,11 @@ Use `lore queue regenerate --task-id <retained-task-id> --dry-run` to preview, t
 omit `--dry-run` to request that one task again under the current generation policy.
 The task must exist exactly once in pending or processed queue files. Its complete
 original typed input, input hash, current page input marker, target kind and headings
-must still agree; synthesis source revisions must remain current. Missing retained
-input is a refusal, not permission to remotely re-fetch an expired source or
-reconstruct raw events from refined prose.
+must still agree; synthesis source revisions must remain current, and the concept's
+current citations must still be the requested set, which needs the vault's
+configuration rather than `--root`. Missing retained input is a refusal, not
+permission to remotely re-fetch an expired source or reconstruct raw events from
+refined prose.
 
 The command preserves authored bodies, clears only completion/provenance for that
 section, and publishes a replacement through the mutation journal. A selected pending

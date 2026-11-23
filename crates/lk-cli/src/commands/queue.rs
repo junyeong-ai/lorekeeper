@@ -266,17 +266,31 @@ fn resolve_vault_root(
     opts: &super::GlobalOptions,
     root: Option<PathBuf>,
 ) -> miette::Result<(PathBuf, super::ConfigurationPin)> {
-    let (root, pin) = match root {
+    resolve_vault(opts, root).map(|(root, pin, _)| (root, pin))
+}
+
+/// The vault a queue command acts on, with the configuration that selected it; a `--root`
+/// override selects no configuration.
+fn resolve_vault(
+    opts: &super::GlobalOptions,
+    root: Option<PathBuf>,
+) -> miette::Result<(
+    PathBuf,
+    super::ConfigurationPin,
+    Option<lk_core::config::Config>,
+)> {
+    let (root, pin, config) = match root {
         Some(root) => (
             super::resolve_root_override(root)?,
             super::ConfigurationPin::Absent,
+            None,
         ),
         None => {
             let (config, pin) = super::load_pinned_config(opts)?;
-            (config.vault.root_path(), pin)
+            (config.vault.root_path(), pin, Some(config))
         }
     };
-    Ok((super::workflow::bind_root(root)?, pin))
+    Ok((super::workflow::bind_root(root)?, pin, config))
 }
 
 pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTask> {

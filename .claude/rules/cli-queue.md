@@ -147,8 +147,12 @@ paths:
   in: preparation defers it without a call, staging treats it as changed scope, and
   apply holds its result under a rejection whose scope carries those citations. The
   result publishes if they return, and retires with the request once reconciliation
-  records the current set. Like other graph-derived publication this detects drift up
-  to that capture inside the writer session, not external edits afterwards.
+  records the current set. Regeneration refuses to request that set again. The set is
+  compared at the capture inside the writer session: a cited page edited, retracted or
+  removed afterwards still refuses at the journal through its exact source guard, while
+  a page that starts citing the concept afterwards lets the answered set publish, the
+  same state as a citation added just after publication, which the next reconciliation
+  supersedes. Do not rescan the vault at the journal to close that window.
 - Optional synthesis recovery registers only closed periods starting on/after its
   explicit activation date. Persist per-kind cursors and fair turns in the existing
   intent store; bound examined slots, including existing requests. Disabled modes

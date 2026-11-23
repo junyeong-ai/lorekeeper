@@ -1095,6 +1095,18 @@ pub(super) fn audit_controlled(
     audit_candidate_controlled(root, config, &candidate, read)
 }
 
+/// Digest of a concept's current graph citations: the set a synthesis request for it must
+/// answer (`lk_core::concept::citation_digest`, as backlinks records it).
+pub(in crate::commands) fn graph_citation_digest(
+    root: &Path,
+    config: &Config,
+    concept: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<String> {
+    let candidate = load_audit_candidate_controlled(root, config, concept, read)?;
+    Ok(lk_core::concept::citation_digest(&candidate.evidence))
+}
+
 fn load_audit_candidate_controlled(
     root: &Path,
     config: &Config,

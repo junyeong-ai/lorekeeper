@@ -26,6 +26,7 @@ pub(crate) mod state;
 pub(super) mod workload;
 
 pub(super) use publication::publication_scope_controlled;
+pub(super) use resources::graph_citation_digest;
 #[cfg(unix)]
 pub(super) use selection::ScreeningDecision;
 pub(super) use selection::ScreeningRejection;

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     Artifact, TaskStatus, claim_writer, classify_against_page, read_source_revision,
-    resolve_target_path, resolve_vault_root,
+    resolve_target_path, resolve_vault,
 };
 
 pub(super) fn run(
@@ -11,7 +11,7 @@ pub(super) fn run(
     task_id: String,
     dry_run: bool,
 ) -> miette::Result<()> {
-    let (root, pin) = resolve_vault_root(opts, root)?;
+    let (root, pin, config) = resolve_vault(opts, root)?;
     let session = (!dry_run)
         .then(|| crate::commands::publication::acquire_mutation_now(&root, &pin))
         .transpose()
@@ -97,6 +97,24 @@ pub(super) fn run(
         ));
     }
     if task.kind == lk_queue::TaskKind::SynthesizeConcept {
+        // A synthesis request answers one citation set. Requesting it again after the graph
+        // moved would clear completion for a request every preparation then refuses.
+        let config = config.as_ref().ok_or_else(|| {
+            miette::miette!(
+                "synthesis regeneration compares the concept's current citations, which needs the vault's configuration; run it without --root"
+            )
+        })?;
+        let current = crate::commands::work::graph_citation_digest(
+            &root,
+            config,
+            &task.target.vault_path,
+            &lk_vault::ReadControl::default(),
+        )?;
+        if current != task.cache_hash {
+            return Err(miette::miette!(
+                "concept citations changed since this synthesis was requested; `lore graph backlinks-sync` records the current set and requests its synthesis"
+            ));
+        }
         let citations: Vec<lk_core::concept::Citation> = serde_json::from_value(
             task.input
                 .get("citations")
