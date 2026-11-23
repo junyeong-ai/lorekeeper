@@ -605,6 +605,12 @@ fn active_proposals_controlled(
     Ok(inventory.groups)
 }
 
+/// The task identities staged results answer; an unreadable result refuses, since its task
+/// is unknown.
+pub(super) fn staged_identities(root: &Path) -> miette::Result<BTreeSet<(String, String)>> {
+    Ok(active_proposals(root)?.into_keys().collect())
+}
+
 pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {
     load_proposals_controlled(root, &lk_vault::ReadControl::default())
 }
@@ -1099,14 +1105,19 @@ mod tests {
             })
             .unwrap(),
         );
-        let summary = super::super::prune_queue(
-            &root,
-            &ConfigurationPin::Absent,
-            &root.join(".lorekeeper/queue"),
-            false,
-        )
-        .unwrap();
-        assert_eq!(summary.pruned_missing_target, 1);
+        let prune_queue = || {
+            super::super::prune_queue(
+                &root,
+                &ConfigurationPin::Absent,
+                &root.join(".lorekeeper/queue"),
+                false,
+            )
+            .unwrap()
+        };
+        let summary = prune_queue();
+        assert_eq!(summary.kept_staged, 1);
+        assert_eq!(summary.pruned_missing_target, 0);
+        assert_eq!(prune(&root, None).unwrap(), 0);
         assert_eq!(
             std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
             raw
@@ -1117,13 +1128,13 @@ mod tests {
             "no matching pending task",
         )
         .unwrap();
-        assert_eq!(prune(&root, None).unwrap(), 1);
         assert_eq!(
             std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
             raw
         );
-        let session = lk_vault::MutationSession::acquire(&root).unwrap();
-        assert_eq!(prune(&root, Some(&session)).unwrap(), 1);
+        let summary = prune_queue();
+        assert_eq!(summary.kept_staged, 0);
+        assert_eq!(summary.pruned_missing_target, 1);
         assert!(!root.join(receipt_path).exists());
     }
 

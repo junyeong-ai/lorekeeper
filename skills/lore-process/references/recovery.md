@@ -85,9 +85,9 @@ Preview `lore queue apply --dry-run --json` while that pending identity still ex
 A matching `dropped` group permits normal guarded apply to retire the proposal and
 receipt; prune the stale request afterward. These commands inspect all staged work
 or pending tasks, so verify the complete preview. Dropped groups can have no identity;
-associate them through their exact proposal paths and revisions. Pruning first leaves
-an orphan proposal: apply preserves it under `results/orphaned/` but stops nonzero,
-requiring explicit inspection before resumption. Retirement is not synthesis completion.
+associate them through their exact proposal paths and revisions. Prune keeps a request
+that a staged result still answers, so apply retires the proposal and receipt before a
+later prune removes the request. Retirement is not synthesis completion.
 
 ## Exact retained-input regeneration
 

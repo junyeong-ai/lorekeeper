@@ -1752,6 +1752,9 @@ struct PruneSummary {
     /// acted on them, and counting one under `kept_current` or `pruned_stale` would say prune
     /// decided something it did not.
     kept_blocked: usize,
+    /// Stale, missing-target or done tasks a staged result still answers. Apply publishes or
+    /// retires that result first; a later prune then retires the task.
+    kept_staged: usize,
     retired_done: usize,
     files_rewritten: usize,
     files_deleted: usize,
@@ -1855,6 +1858,7 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
                 "kept_unreadable": summary.kept_unreadable,
                 "kept_unparseable": summary.kept_unparseable,
                 "kept_blocked": summary.kept_blocked,
+                "kept_staged": summary.kept_staged,
                 "retired_done": summary.retired_done,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
@@ -1870,14 +1874,15 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
         };
         eprintln!(
             "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable \
-             + {} unparseable + {} blocked, {} already done; {} file(s) rewritten, {} archived, \
-             {} deleted",
+             + {} unparseable + {} blocked + {} answered by a staged result, {} already done; \
+             {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
             summary.kept_unreadable,
             summary.kept_unparseable,
             summary.kept_blocked,
+            summary.kept_staged,
             summary.retired_done,
             summary.files_rewritten,
             summary.files_archived,
@@ -3381,6 +3386,7 @@ mod tests {
                 kept_unreadable: 0,
                 kept_unparseable: 0,
                 kept_blocked: 0,
+                kept_staged: 0,
                 retired_done: 0,
                 files_rewritten: 1,
                 files_deleted: 0,

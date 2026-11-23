@@ -106,6 +106,8 @@ paths:
   of supersession. Absent/null markers retain their existing absence meaning.
 - Queue counts describe current work, not raw lines. Prune only eligible dead work,
   remove empty files, archive all-done files, preserve unreadable/unparseable data.
+  A task a staged result still answers stays pending whatever its classification:
+  apply publishes or retires that result first, so pruning never orphans it.
   A file with unparseable lines is not rewritable. Use the shared queue reader and
   atomic writer; do not add another UTF-8/JSONL interpretation.
 - Extraction result application may ignore a prior done marker while retaining exact

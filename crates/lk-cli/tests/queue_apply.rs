@@ -1846,7 +1846,12 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
 
 #[test]
 fn a_synthesis_for_a_moved_citation_set_is_held_until_its_citations_settle() {
-    for order in ["applied first", "restored", "reconciled first"] {
+    for order in [
+        "applied first",
+        "restored",
+        "reconciled first",
+        "pruned before apply",
+    ] {
         let ws = Workspace::new();
         let source = "---\ntype: document\n---\nTimeout is 30 seconds. See [Timeout](../concepts/timeout.md).\n";
         ws.write("wiki/documents/spec.md", source);
@@ -1923,10 +1928,16 @@ fn a_synthesis_for_a_moved_citation_set_is_held_until_its_citations_settle() {
             "{}",
             String::from_utf8_lossy(&synced.stderr)
         );
+        if order == "pruned before apply" {
+            let pruned = work_json(&ws, &["queue", "prune", "--json"]);
+            assert_eq!(pruned["data"]["kept_staged"], 1, "{pruned}");
+            assert_eq!(pruned["data"]["pruned_stale"], 0, "{pruned}");
+        }
         let output = ws.run(&["queue", "apply", "--json"]);
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert!(report["fatal"].is_null(), "{report}");
         assert_eq!(report["dropped"], 1, "{report}");
+        assert_eq!(report["quarantined"], 0, "{report}");
         let page = ws.read("wiki/concepts/timeout.md");
         assert!(page.contains("Old synthesis."), "{page}");
         assert!(!page.contains("synthesis_done:"), "{page}");
@@ -1940,6 +1951,11 @@ fn a_synthesis_for_a_moved_citation_set_is_held_until_its_citations_settle() {
             .collect::<Vec<_>>();
         assert_eq!(current.len(), 1, "{status}");
         assert_ne!(current[0]["task_id"], "syn-1", "{status}");
+        if order == "pruned before apply" {
+            let pruned = work_json(&ws, &["queue", "prune", "--json"]);
+            assert_eq!(pruned["data"]["kept_staged"], 0, "{pruned}");
+            assert_eq!(pruned["data"]["pruned_stale"], 1, "{pruned}");
+        }
     }
 }
 

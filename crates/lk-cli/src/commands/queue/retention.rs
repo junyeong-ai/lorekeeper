@@ -80,6 +80,10 @@ fn prepare_with_classifier(
     let mut archives = BTreeSet::new();
     let mut pages = BTreeMap::new();
     let mut complete = true;
+    // A task a staged result still answers stays pending whatever its classification: apply
+    // publishes that result or retires it through its verified path, and only then may a
+    // later prune retire the task. Dropping the row first orphans the result.
+    let staged = super::rejections::staged_identities(root)?;
     for file in super::pending_queue_files(queue)? {
         let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
         let full = match lk_vault::page_path(root, &relative) {
@@ -127,6 +131,15 @@ fn prepare_with_classifier(
             let classification = classify(&task, &mut revisions)?;
             let status = classification.status();
             let captured_pages = classification.into_pages();
+            if status != TaskStatus::Current
+                && status != TaskStatus::Unreadable
+                && staged.contains(&(task.task_id.clone(), task.cache_hash.clone()))
+            {
+                work_left += 1;
+                summary.kept_staged += 1;
+                tasks.push(task);
+                continue;
+            }
             match status {
                 TaskStatus::Current => {
                     work_left += 1;
