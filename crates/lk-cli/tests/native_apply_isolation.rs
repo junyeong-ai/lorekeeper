@@ -778,9 +778,16 @@ fn superseded_rejection_after_independent_publication_does_not_halt_queue_planni
         assert_eq!(report["cancelled"], false, "{report}");
         assert_eq!(report["budget_exhausted"], true, "{report}");
         assert_eq!(report["queue_application"]["applied"], 1, "{report}");
-        assert_eq!(report["queue_application"]["dropped"], 1, "{report}");
-        assert!(report["queue_application"]["rejected"].as_u64().unwrap() > 0);
+        assert_eq!(report["queue_application"]["dropped"], 0, "{report}");
+        assert_eq!(report["queue_application"]["rejected"], 0, "{report}");
+        assert_eq!(report["queue_application"]["superseded"], 1, "{report}");
         assert!(!proposal.exists());
+        assert!(
+            fixture
+                .vault()
+                .join(".lorekeeper/queue/results/superseded/000-rejected.synthesis.json")
+                .exists()
+        );
         assert_eq!(fixture.calls().len(), 1);
         assert_eq!(fixture.calls()[0]["task_id"], independent.task_id);
         let status = fixture.json(&["queue", "status", "--json"]);

@@ -37,10 +37,13 @@ one agreed value before retrying; adding a third draft does not resolve the conf
 
 `lore queue apply --json` emits a typed report even when application fails. `ok`
 matches the exit verdict. Counts and `groups` distinguish applied, dropped, retained
-rejected and orphaned proposals; each known group carries its task/cache/target owner
+rejected, orphaned and superseded proposals; each known group carries its task/cache/target owner
 and exact proposal file revisions. An orphaned group's exact task id and cache hash
 match no pending task, usually because its request was retired while it was drafted;
-it is moved to `results/orphaned/` with a reason file and independent groups continue. Rejected groups include their current validation
+it is moved to `results/orphaned/` with a reason file and independent groups continue.
+A superseded synthesis group answers a read scope or target its pending request no longer has; it
+is moved to `results/superseded/` with a reason file and the request stays pending to be
+drafted again from its current context. Rejected groups include their current validation
 scope and receipt. `fatal` reports a failure whose ownership or safety could not be
 established; partial publications remain real.
 
@@ -54,7 +57,8 @@ The native job stays incomplete/nonzero while work remains. Corrupt records,
 storage failures and unknown state (`fatal`) stop further work; orphaned and rejected
 groups do not. A standalone session reads the same report: on `fatal` it stops and
 reports; `orphaned` groups are already quarantined and need no retry, so it inspects
-them in `results/orphaned/` and continues with remaining tasks; `rejected` groups are
+them in `results/orphaned/` and continues with remaining tasks; a `superseded` group's
+request is drafted again from its current context; `rejected` groups are
 reported with their task IDs and retained for review.
 
 ## Queue task schema

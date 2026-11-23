@@ -200,6 +200,12 @@ pub(in crate::commands) enum Outcome {
     Orphaned {
         reason: String,
     },
+    /// The result answers a read scope or target its still-pending request no longer has. The
+    /// result is kept under `results/superseded/` and the request is drafted again.
+    Superseded {
+        kind: RejectionKind,
+        detail: String,
+    },
     Rejected {
         kind: RejectionKind,
         detail: String,
@@ -235,6 +241,12 @@ impl<'de> Deserialize<'de> for Group {
                 proposals: Vec<Proposal>,
                 reason: String,
             },
+            Superseded {
+                identity: Option<TaskIdentity>,
+                proposals: Vec<Proposal>,
+                kind: RejectionKind,
+                detail: String,
+            },
             Rejected {
                 identity: Option<TaskIdentity>,
                 proposals: Vec<Proposal>,
@@ -259,6 +271,12 @@ impl<'de> Deserialize<'de> for Group {
                 proposals,
                 reason,
             } => (identity, proposals, Outcome::Orphaned { reason }),
+            Wire::Superseded {
+                identity,
+                proposals,
+                kind,
+                detail,
+            } => (identity, proposals, Outcome::Superseded { kind, detail }),
             Wire::Rejected {
                 identity,
                 proposals,
@@ -301,6 +319,9 @@ pub(in crate::commands) struct Report {
     pub rejected: usize,
     /// Groups quarantined because their request was retired; independent work continues.
     pub orphaned: usize,
+    /// Groups set aside because their pending request's read scope changed; it is redrafted
+    /// and independent work continues.
+    pub superseded: usize,
     pub quarantined: usize,
     pub unreadable: usize,
     pub groups: Vec<Group>,
@@ -316,6 +337,7 @@ impl Default for Report {
             dropped: 0,
             rejected: 0,
             orphaned: 0,
+            superseded: 0,
             quarantined: 0,
             unreadable: 0,
             groups: Vec::new(),
@@ -362,7 +384,13 @@ impl Report {
                     .iter()
                     .filter(|group| matches!(group.outcome, Outcome::Orphaned { .. }))
                     .count()
-            && self.ok == (self.rejected == 0 && self.orphaned == 0)
+            && self.superseded
+                == self
+                    .groups
+                    .iter()
+                    .filter(|group| matches!(group.outcome, Outcome::Superseded { .. }))
+                    .count()
+            && self.ok == (self.rejected == 0 && self.orphaned == 0 && self.superseded == 0)
             && self.groups.iter().all(|group| match &group.outcome {
                 Outcome::Rejected { receipt, scope, .. } => {
                     group.identity.as_ref().is_some_and(TaskIdentity::is_valid)
@@ -400,6 +428,7 @@ impl Report {
             dropped,
             rejected,
             orphaned,
+            superseded,
             quarantined,
             unreadable,
             groups,
@@ -410,6 +439,7 @@ impl Report {
         self.dropped += dropped;
         self.rejected += rejected;
         self.orphaned += orphaned;
+        self.superseded += superseded;
         self.quarantined += quarantined;
         self.unreadable += unreadable;
         self.groups.extend(groups);
@@ -429,6 +459,10 @@ impl Report {
             Outcome::Dropped { .. } => self.dropped += 1,
             Outcome::Orphaned { .. } => {
                 self.orphaned += 1;
+                self.ok = false;
+            }
+            Outcome::Superseded { .. } => {
+                self.superseded += 1;
                 self.ok = false;
             }
             Outcome::Rejected { .. } => {
@@ -484,6 +518,32 @@ pub(super) fn reject_group(
         return Err(miette::miette!("{error}"));
     };
     let identity = TaskIdentity::capture(root, task)?;
+    if task.kind == lk_queue::TaskKind::SynthesizeConcept
+        && matches!(
+            rejection.kind,
+            RejectionKind::SemanticContextChanged | RejectionKind::TargetChanged
+        )
+    {
+        let mut plan = lk_vault::MutationPlan::default();
+        super::rejections::remove_matching(root, task, &mut plan)?;
+        quarantine_group(
+            root,
+            ResultStore::Superseded,
+            snapshots,
+            &format!("{}\n{SUPERSEDED}", rejection.detail),
+            plan,
+            session,
+        )?;
+        report.outcome(
+            Some(identity),
+            snapshots,
+            Outcome::Superseded {
+                kind: rejection.kind,
+                detail: rejection.detail.clone(),
+            },
+        );
+        return Ok(());
+    }
     let (receipt, scope) = if let Some(session) = session {
         let (receipt, scope) = super::rejections::record(
             session,
@@ -510,6 +570,71 @@ pub(super) fn reject_group(
             receipt,
         },
     );
+    Ok(())
+}
+
+/// Why a synthesis result whose request's read scope changed is set aside.
+const SUPERSEDED: &str = "the result answers a read scope or target its pending request no longer has; it is kept under results/superseded and the request is drafted again from its current scope";
+
+/// A results subdirectory that keeps what apply will not publish, beside each reason.
+#[derive(Clone, Copy)]
+pub(super) enum ResultStore {
+    /// The result's exact request is no longer pending.
+    Orphaned,
+    /// The result answers a read scope or target its pending request no longer has.
+    Superseded,
+}
+
+impl ResultStore {
+    fn directory(self) -> &'static str {
+        match self {
+            Self::Orphaned => "orphaned",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+/// Move a group's results into `store` beside `reason`, together with `plan`'s steps, as one
+/// guarded plan. Each move expects the bytes the group was judged from, and a preview
+/// validates the same plan an apply journals, so neither follows a linked or replaced store.
+pub(super) fn quarantine_group(
+    root: &Path,
+    store: ResultStore,
+    snapshots: &[ProposalSnapshot],
+    reason: &str,
+    mut plan: lk_vault::MutationPlan,
+    session: Option<&lk_vault::MutationSession>,
+) -> miette::Result<()> {
+    let relative = Path::new(".lorekeeper/queue")
+        .join(lk_queue::RESULTS_SUBDIR)
+        .join(store.directory());
+    super::quarantine_store(root, &relative)?;
+    let directory = root.join(&relative);
+    let mut taken = std::collections::BTreeSet::new();
+    let mut moves = Vec::new();
+    for snapshot in snapshots {
+        let source = Path::new(&snapshot.proposal.path);
+        let (destination, reason_path) = super::quarantine_names(&directory, source, &mut taken);
+        let name = |path: &Path| relative.join(path.file_name().unwrap_or_default());
+        plan.rename(source, name(&destination), snapshot.raw.clone());
+        plan.create(name(&reason_path), format!("{reason}\n"));
+        moves.push((source.to_path_buf(), destination));
+    }
+    match session {
+        None => plan.validate_addresses(root),
+        Some(session) => session.apply(plan),
+    }
+    .map_err(|error| {
+        miette::miette!(
+            "cannot keep results under results/{}: {error}",
+            store.directory()
+        )
+    })?;
+    if session.is_some() {
+        for (source, destination) in moves {
+            eprintln!("  kept {} → {}", source.display(), destination.display());
+        }
+    }
     Ok(())
 }
 

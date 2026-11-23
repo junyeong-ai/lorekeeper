@@ -803,11 +803,12 @@ async fn apply(
         );
     }
     eprintln!(
-        "queue apply: {} applied, {} dropped, {} failed, {} orphaned{}",
+        "queue apply: {} applied, {} dropped, {} failed, {} orphaned, {} superseded{}",
         report.applied,
         report.dropped,
         report.rejected + usize::from(report.fatal.is_some()),
         report.orphaned,
+        report.superseded,
         if dry_run { " (dry-run)" } else { "" }
     );
     if report.ok {
@@ -884,8 +885,14 @@ async fn apply_into(
         if pending.tasks.contains_key(identity) {
             continue;
         }
-        if let Err(error) = synthesis::quarantine_orphans(&vault_root, proposals, mutation.as_ref())
-        {
+        if let Err(error) = application::quarantine_group(
+            &vault_root,
+            application::ResultStore::Orphaned,
+            proposals,
+            synthesis::ORPHANED,
+            lk_vault::MutationPlan::default(),
+            mutation.as_ref(),
+        ) {
             report.fail(error);
             return Ok(());
         }
@@ -1000,9 +1007,14 @@ async fn apply_into(
                 report.fail(reason);
                 return Ok(());
             }
-            if let Err(error) =
-                synthesis::quarantine_orphans(&vault_root, &snapshots, mutation.as_ref())
-            {
+            if let Err(error) = application::quarantine_group(
+                &vault_root,
+                application::ResultStore::Orphaned,
+                &snapshots,
+                synthesis::ORPHANED,
+                lk_vault::MutationPlan::default(),
+                mutation.as_ref(),
+            ) {
                 report.fail(error);
                 return Ok(());
             }

@@ -161,7 +161,14 @@ pub(super) fn apply(
                 .tasks
                 .contains_key(&(result.task_id.clone(), result.cache_hash.clone()))
         {
-            let quarantined = quarantine_orphans(root, &snapshots, session);
+            let quarantined = super::application::quarantine_group(
+                root,
+                super::application::ResultStore::Orphaned,
+                &snapshots,
+                ORPHANED,
+                lk_vault::MutationPlan::default(),
+                session,
+            );
             if let Err(error) = quarantined {
                 report.report.fail(error);
                 return Ok(report);
@@ -448,47 +455,6 @@ fn guard_citations(
 
 /// Why a staged result whose exact identity matches no pending task is quarantined.
 pub(super) const ORPHANED: &str = "no matching pending task for this result's exact task id and cache hash: its request was retired or the identity is invalid; the result is quarantined under results/orphaned and independent work continues";
-
-/// Quarantine an orphaned group's results with their reason as one guarded plan. Each move
-/// carries the bytes the group was judged from, and the preview validates the same plan the
-/// apply journals, so neither follows a linked or replaced store.
-pub(super) fn quarantine_orphans(
-    root: &Path,
-    snapshots: &[super::application::ProposalSnapshot],
-    session: Option<&lk_vault::MutationSession>,
-) -> miette::Result<()> {
-    let store = Path::new(".lorekeeper/queue")
-        .join(lk_queue::RESULTS_SUBDIR)
-        .join("orphaned");
-    let dir = root.join(&store);
-    super::quarantine_store(root, &store)?;
-    let mut plan = lk_vault::MutationPlan::default();
-    let mut taken = std::collections::BTreeSet::new();
-    let mut moves = Vec::new();
-    for snapshot in snapshots {
-        let source = Path::new(&snapshot.proposal.path);
-        let (destination, reason) = super::quarantine_names(&dir, source, &mut taken);
-        let name = |path: &Path| store.join(path.file_name().unwrap_or_default());
-        plan.rename(source, name(&destination), snapshot.raw.clone());
-        plan.create(name(&reason), format!("{ORPHANED}\n"));
-        moves.push((source.to_path_buf(), destination));
-    }
-    match session {
-        None => plan.validate_addresses(root),
-        Some(session) => session.apply(plan),
-    }
-    .map_err(|error| miette::miette!("cannot quarantine orphaned results: {error}"))?;
-    if session.is_some() {
-        for (source, destination) in moves {
-            eprintln!(
-                "  quarantined {} → {}: {ORPHANED}",
-                source.display(),
-                destination.display()
-            );
-        }
-    }
-    Ok(())
-}
 
 /// The shared parser ignores external URLs, images, code and local anchors. Every
 /// page reference introduced by a staged section must already have a destination.

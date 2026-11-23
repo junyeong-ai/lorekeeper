@@ -120,7 +120,9 @@ schema generation replaces that file wholesale.
    `fatal` stops the drain; inspect status, remaining results, quarantine and alias
    warnings. `orphaned` results match no pending request, usually because it was
    retired while they were drafted; they are already quarantined, so note them and
-   continue. Report `rejected` task IDs and errors; retain their queue files.
+   continue. A `superseded` synthesis was drafted for a read scope or target that
+   has since changed; draft its pending request again from its current context. Report `rejected`
+   task IDs and errors; retain their queue files.
    Do not assume rollback or blindly retry. On any other task failure, stop that
    file and report it. Retrying reclassifies completed work instead of rewriting it.
 
@@ -134,7 +136,7 @@ After each file, recheck status and use `lore queue prune --json`. Prune preserv
 current, unreadable and unparseable work; a blocked file is not completed.
 
 If any task was processed, run these publication stages. Apply's report must have no
-`fatal` or `rejected` group (an `orphaned` group is noted, as above); backlinks
+`fatal` or `rejected` group (`orphaned` and `superseded` groups are handled as above); backlinks
 reconciliation requires exit 0:
 
 ```bash

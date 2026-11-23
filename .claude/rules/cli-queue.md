@@ -146,8 +146,17 @@ paths:
   never published or judged, and input readiness ignores it. Quarantine is one guarded
   plan per group: each move expects the bytes the group was judged from and carries its
   reason file; the preview validates that plan and the apply journals it. A quarantine
-  store (`orphaned/`, `corrupt/`) whose path below the vault root holds a link or file
+  store (`orphaned/`, `superseded/`, `corrupt/`) whose path below the vault root holds a link or file
   refuses in both modes, and no quarantine replaces an earlier file or reason.
+  A synthesis result refused because its still-current request's read scope or target
+  changed (`semantic-context-changed`, `target-changed`) is `superseded`: the same guarded
+  plan keeps it under `results/superseded/` with its reason and removes its rejection
+  receipt, the run reports not ok, and the request is drafted again from its current
+  scope (a native run spends that target's one finalization replan, and a selected task
+  superseded this way replans rather than failing completion). Holding it would block the
+  request until the scope returned byte for byte. Citation changes stay held, because
+  reconciliation retires their request; incomplete or unsealed Work
+  (`evidence-scope-changed`) stays held for its Work to finish.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.

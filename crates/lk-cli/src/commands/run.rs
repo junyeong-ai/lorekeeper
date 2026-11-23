@@ -528,6 +528,7 @@ mod native {
         dropped: usize,
         rejected: usize,
         orphaned: usize,
+        superseded: usize,
         latest: Option<crate::commands::queue::application::Report>,
     }
 
@@ -1200,12 +1201,26 @@ mod native {
             self.result.queue_application.dropped += report.dropped;
             self.result.queue_application.rejected += report.rejected;
             self.result.queue_application.orphaned += report.orphaned;
+            self.result.queue_application.superseded += report.superseded;
+            for group in &report.groups {
+                if let (
+                    crate::commands::queue::application::Outcome::Superseded { .. },
+                    Some(identity),
+                ) = (&group.outcome, &group.identity)
+                    && !self
+                        .finalization_replans
+                        .try_spend(&identity.target.vault_path, FINALIZATION_CHANGED_AGAIN)
+                {
+                    self.deferred("finalization inputs unstable", &identity.target.vault_path);
+                }
+            }
             let detail = format!(
-                "{} applied, {} dropped, {} rejected, {} orphaned; {}",
+                "{} applied, {} dropped, {} rejected, {} orphaned, {} superseded; {}",
                 report.applied,
                 report.dropped,
                 report.rejected,
                 report.orphaned,
+                report.superseded,
                 if can_continue {
                     "independent work may continue"
                 } else {
@@ -5411,8 +5426,24 @@ mod native {
                                     return self.failure("selected queue rejection", error);
                                 }
                             };
+                        let superseded = self
+                            .result
+                            .queue_application
+                            .latest
+                            .iter()
+                            .flat_map(|report| &report.groups)
+                            .filter(|group| {
+                                matches!(
+                                    group.outcome,
+                                    crate::commands::queue::application::Outcome::Superseded { .. }
+                                )
+                            })
+                            .filter_map(|group| group.identity.as_ref())
+                            .map(|identity| (identity.task_id.clone(), identity.cache_hash.clone()))
+                            .collect::<std::collections::BTreeSet<_>>();
                         if unfinished.iter().all(|task| {
-                            rejected.contains_key(&(task.task_id.clone(), task.cache_hash.clone()))
+                            let key = (task.task_id.clone(), task.cache_hash.clone());
+                            rejected.contains_key(&key) || superseded.contains(&key)
                         }) {
                             continue 'planning;
                         }

@@ -1607,20 +1607,13 @@ fn sealed_synthesis_requires_exact_read_source_bytes_even_when_authored_revision
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("semantic read scope changed"));
     assert_eq!(ws.read(target), body);
-    assert!(!json_files(&results_dir(&ws)).is_empty());
-    ws.write(source_path, &source);
-    let applied = ws.run(&["queue", "apply"]);
-    assert!(
-        applied.status.success(),
-        "{}",
-        String::from_utf8_lossy(&applied.stderr)
-    );
-    assert!(
-        ws.read(target)
-            .contains("The retained source supports the scoped claim.")
-    );
-    assert!(ws.read(target).contains("synthesis_done:"));
     assert!(json_files(&results_dir(&ws)).is_empty());
+    assert_eq!(json_files(&results_dir(&ws).join("superseded")).len(), 1);
+    assert_eq!(
+        work_json(&ws, &["queue", "count"]).as_u64(),
+        Some(1),
+        "the request is drafted again"
+    );
 }
 
 /// `queue prune`'s `--json` envelope carries the same verdict as its exit code.
@@ -2324,6 +2317,26 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
             }
             if should_apply {
                 assert!(ws.read(target).contains("synthesis_done:"));
+            } else {
+                let kept = json_files(&results_dir(&ws).join("superseded"));
+                assert_eq!(kept.len(), 1, "bounded={bounded}, scenario={scenario}");
+                assert!(
+                    std::fs::read_to_string(&kept[0])
+                        .unwrap()
+                        .contains("The source declares retention")
+                );
+                let mut reason = kept[0].clone().into_os_string();
+                reason.push(".reason.txt");
+                assert!(
+                    std::fs::read_to_string(reason)
+                        .unwrap()
+                        .contains("drafted again from its current scope")
+                );
+                assert!(json_files(&ws.vault().join(".lorekeeper/queue/rejections")).is_empty());
+                assert!(
+                    ws.read(".lorekeeper/queue/scope.jsonl")
+                        .contains("\"task_id\":\"scope\"")
+                );
             }
         }
     }
