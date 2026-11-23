@@ -93,7 +93,8 @@ pub(super) fn apply(
                     path.display()
                 ));
                 let moved = super::quarantine(
-                    &dir.join(lk_queue::CORRUPT_SUBDIR),
+                    root,
+                    &super::corrupt_store(),
                     &[(path.clone(), error.to_string())],
                     dry_run,
                 );
@@ -160,13 +161,7 @@ pub(super) fn apply(
                 .tasks
                 .contains_key(&(result.task_id.clone(), result.cache_hash.clone()))
         {
-            let quarantined = if dry_run {
-                quarantine_ready(queue)
-            } else {
-                group
-                    .iter()
-                    .try_for_each(|(path, _)| quarantine_orphan(queue, path, ORPHANED))
-            };
+            let quarantined = quarantine_orphans(root, &snapshots, session);
             if let Err(error) = quarantined {
                 report.report.fail(error);
                 return Ok(report);
@@ -454,41 +449,44 @@ fn guard_citations(
 /// Why a staged result whose exact identity matches no pending task is quarantined.
 pub(super) const ORPHANED: &str = "no matching pending task for this result's exact task id and cache hash: its request was retired or the identity is invalid; the result is quarantined under results/orphaned and independent work continues";
 
-/// Refuse a preview that could not quarantine: the orphan store must be absent or a directory.
-pub(super) fn quarantine_ready(queue: &Path) -> miette::Result<()> {
-    let dir = queue.join(lk_queue::RESULTS_SUBDIR).join("orphaned");
-    match std::fs::symlink_metadata(&dir) {
-        Ok(metadata) if !metadata.is_dir() => Err(miette::miette!(
-            "cannot quarantine orphaned results: {} is not a directory",
-            dir.display()
-        )),
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(miette::miette!("inspect {}: {error}", dir.display())),
+/// Quarantine an orphaned group's results with their reason as one guarded plan. Each move
+/// carries the bytes the group was judged from, and the preview validates the same plan the
+/// apply journals, so neither follows a linked or replaced store.
+pub(super) fn quarantine_orphans(
+    root: &Path,
+    snapshots: &[super::application::ProposalSnapshot],
+    session: Option<&lk_vault::MutationSession>,
+) -> miette::Result<()> {
+    let store = Path::new(".lorekeeper/queue")
+        .join(lk_queue::RESULTS_SUBDIR)
+        .join("orphaned");
+    let dir = root.join(&store);
+    super::quarantine_store(root, &store)?;
+    let mut plan = lk_vault::MutationPlan::default();
+    let mut taken = std::collections::BTreeSet::new();
+    let mut moves = Vec::new();
+    for snapshot in snapshots {
+        let source = Path::new(&snapshot.proposal.path);
+        let (destination, reason) = super::quarantine_names(&dir, source, &mut taken);
+        let name = |path: &Path| store.join(path.file_name().unwrap_or_default());
+        plan.rename(source, name(&destination), snapshot.raw.clone());
+        plan.create(name(&reason), format!("{ORPHANED}\n"));
+        moves.push((source.to_path_buf(), destination));
     }
-}
-
-/// Preserve the rejected answer and a durable reason outside the retry path.
-pub(super) fn quarantine_orphan(queue: &Path, path: &Path, reason: &str) -> miette::Result<()> {
-    let dir = queue.join(lk_queue::RESULTS_SUBDIR).join("orphaned");
-    std::fs::create_dir_all(&dir).map_err(|e| miette::miette!("{e}"))?;
-    let destination = super::free_path(&dir, path);
-    let reason_path = destination.with_file_name(format!(
-        "{}.reason.txt",
-        destination
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-    ));
-    lk_core::fs::write_atomic(&reason_path, format!("{reason}\n").as_bytes(), None)
-        .map_err(|e| miette::miette!("cannot preserve quarantine reason: {e}"))?;
-    std::fs::rename(path, &destination)
-        .map_err(|e| miette::miette!("cannot quarantine {}: {e}", path.display()))?;
-    eprintln!(
-        "  quarantined {} → {}: {reason}",
-        path.display(),
-        destination.display()
-    );
+    match session {
+        None => plan.validate_addresses(root),
+        Some(session) => session.apply(plan),
+    }
+    .map_err(|error| miette::miette!("cannot quarantine orphaned results: {error}"))?;
+    if session.is_some() {
+        for (source, destination) in moves {
+            eprintln!(
+                "  quarantined {} → {}: {ORPHANED}",
+                source.display(),
+                destination.display()
+            );
+        }
+    }
     Ok(())
 }
 

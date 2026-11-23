@@ -1235,6 +1235,58 @@ fn extraction_cannot_retarget_a_pending_task_or_apply_without_one() {
 }
 
 #[test]
+#[cfg(unix)]
+fn orphan_quarantine_refuses_a_linked_store_in_preview_and_apply() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    std::fs::remove_file(ws.vault().join(".lorekeeper/queue/ext-1.jsonl")).unwrap();
+    let elsewhere = ws.vault().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, results_dir(&ws).join("orphaned")).unwrap();
+    let result = ws.read(".lorekeeper/queue/results/ext-1.json");
+    for args in [
+        &["queue", "apply", "--dry-run"][..],
+        &["queue", "apply"][..],
+    ] {
+        let output = ws.run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("is not a directory"),
+            "{args:?}"
+        );
+        assert_eq!(ws.read(".lorekeeper/queue/results/ext-1.json"), result);
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn orphan_quarantine_keeps_earlier_quarantined_files_and_reasons() {
+    let ws = Workspace::new();
+    ws.write(PAGE, &daily_page("h"));
+    ws.drop_result("ext-1", PAGE, "h", "Concept A");
+    std::fs::remove_file(ws.vault().join(".lorekeeper/queue/ext-1.jsonl")).unwrap();
+    ws.write(
+        ".lorekeeper/queue/results/orphaned/ext-1.json.reason.txt",
+        "earlier\n",
+    );
+    let result = ws.read(".lorekeeper/queue/results/ext-1.json");
+    assert!(!ws.run(&["queue", "apply"]).status.success());
+    assert_eq!(
+        ws.read(".lorekeeper/queue/results/orphaned/ext-1.json.reason.txt"),
+        "earlier\n"
+    );
+    assert_eq!(
+        ws.read(".lorekeeper/queue/results/orphaned/ext-1.1.json"),
+        result
+    );
+    assert!(
+        ws.read(".lorekeeper/queue/results/orphaned/ext-1.1.json.reason.txt")
+            .starts_with("no matching pending task")
+    );
+}
+
+#[test]
 fn a_result_whose_page_moved_on_is_dropped() {
     let ws = Workspace::new();
     ws.write(PAGE, &daily_page("newer-hash"));

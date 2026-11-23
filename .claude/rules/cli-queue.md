@@ -138,12 +138,16 @@ paths:
   stale and missing-target tasks receive no new host admission; deterministic apply
   still owns reapplication or retirement. Unreadable, ambiguous and corrupt state
   remains fatal. A readable result whose exact request is absent from a fully parsed
-  queue is an `orphaned` group: its request was retired (by prune or regeneration)
-  while a standalone session drafted it, which no lock spans. Apply quarantines it
+  queue is an `orphaned` group, usually because its request was retired (by prune or
+  regeneration) while a standalone session drafted it, which no lock spans; an invalid
+  identity takes the same path. Apply quarantines it
   under `results/orphaned/` with its reason before any format or publication check,
   reports the run not ok (`orphaned`), and continues with independent groups; it is
-  never published or judged, and input readiness ignores it. A preview refuses when the
-  quarantine store could not be written.
+  never published or judged, and input readiness ignores it. Quarantine is one guarded
+  plan per group: each move expects the bytes the group was judged from and carries its
+  reason file; the preview validates that plan and the apply journals it. A quarantine
+  store (`orphaned/`, `corrupt/`) whose path below the vault root holds a link or file
+  refuses in both modes, and no quarantine replaces an earlier file or reason.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.

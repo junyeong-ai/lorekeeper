@@ -1134,10 +1134,10 @@ mod tests {
             std::fs::read_to_string(root.join(&receipt_path)).unwrap(),
             raw
         );
-        super::super::synthesis::quarantine_orphan(
-            &root.join(".lorekeeper/queue"),
-            &root.join(result_path),
-            "no matching pending task",
+        std::fs::create_dir(root.join(".lorekeeper/queue/results/orphaned")).unwrap();
+        std::fs::rename(
+            root.join(result_path),
+            root.join(".lorekeeper/queue/results/orphaned/proposal.section.json"),
         )
         .unwrap();
         assert_eq!(

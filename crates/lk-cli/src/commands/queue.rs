@@ -860,13 +860,8 @@ async fn apply_into(
     let staged = rejections::load_proposals(&vault_root)?;
     if !staged.unreadable.is_empty() {
         report.unreadable += staged.unreadable.len();
-        report.quarantined += quarantine(
-            &queue_dir
-                .join(lk_queue::RESULTS_SUBDIR)
-                .join(lk_queue::CORRUPT_SUBDIR),
-            &staged.unreadable,
-            dry_run,
-        );
+        report.quarantined +=
+            quarantine(&vault_root, &corrupt_store(), &staged.unreadable, dry_run);
         report.fail("unreadable staged result payloads have unknown task identities");
         return Ok(());
     }
@@ -876,13 +871,7 @@ async fn apply_into(
 
     if !batch.unreadable.is_empty() {
         report.unreadable += batch.unreadable.len();
-        report.quarantined += quarantine(
-            &queue_dir
-                .join(lk_queue::RESULTS_SUBDIR)
-                .join(lk_queue::CORRUPT_SUBDIR),
-            &batch.unreadable,
-            dry_run,
-        );
+        report.quarantined += quarantine(&vault_root, &corrupt_store(), &batch.unreadable, dry_run);
         report.fail("unreadable extraction result payloads have unknown targets");
         return Ok(());
     }
@@ -895,18 +884,8 @@ async fn apply_into(
         if pending.tasks.contains_key(identity) {
             continue;
         }
-        let quarantined = if dry_run {
-            synthesis::quarantine_ready(&queue_dir)
-        } else {
-            proposals.iter().try_for_each(|proposal| {
-                synthesis::quarantine_orphan(
-                    &queue_dir,
-                    &vault_root.join(&proposal.proposal.path),
-                    synthesis::ORPHANED,
-                )
-            })
-        };
-        if let Err(error) = quarantined {
+        if let Err(error) = synthesis::quarantine_orphans(&vault_root, proposals, mutation.as_ref())
+        {
             report.fail(error);
             return Ok(());
         }
@@ -1021,14 +1000,9 @@ async fn apply_into(
                 report.fail(reason);
                 return Ok(());
             }
-            let quarantined = if dry_run {
-                synthesis::quarantine_ready(&queue_dir)
-            } else {
-                paths.iter().try_for_each(|path| {
-                    synthesis::quarantine_orphan(&queue_dir, path, synthesis::ORPHANED)
-                })
-            };
-            if let Err(error) = quarantined {
+            if let Err(error) =
+                synthesis::quarantine_orphans(&vault_root, &snapshots, mutation.as_ref())
+            {
                 report.fail(error);
                 return Ok(());
             }
@@ -1528,14 +1502,83 @@ fn stamp_policy(
 /// behind an unwritable directory, which is the same "one bad file blocks the batch" shape
 /// this quarantine exists to remove, reached through I/O instead of through parsing. A file
 /// that cannot be moved stays put and is retried.
-fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: bool) -> usize {
+/// A quarantine store under the vault root is absent or a real directory reached through
+/// real directories; a link or file on that path would move results elsewhere, so preview
+/// and apply refuse it alike.
+/// Where unreadable staged results are kept, relative to the vault root.
+fn corrupt_store() -> PathBuf {
+    Path::new(".lorekeeper/queue")
+        .join(lk_queue::RESULTS_SUBDIR)
+        .join(lk_queue::CORRUPT_SUBDIR)
+}
+
+fn quarantine_store(root: &Path, store: &Path) -> miette::Result<()> {
+    let mut path = root.to_path_buf();
+    for component in store.components() {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(miette::miette!(
+                    "cannot quarantine results: {} is not a directory",
+                    path.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(miette::miette!("inspect {}: {error}", path.display())),
+        }
+    }
+    Ok(())
+}
+
+/// A free name in `dir` for `source` and its reason file. A name counts as taken while any
+/// entry, including a dangling link, holds it, so neither an earlier quarantined result nor
+/// its reason is ever replaced.
+fn quarantine_names(
+    dir: &Path,
+    source: &Path,
+    taken: &mut std::collections::BTreeSet<PathBuf>,
+) -> (PathBuf, PathBuf) {
+    let name = source.file_name().unwrap_or(source.as_os_str());
+    let stem = source.file_stem().unwrap_or(name).to_string_lossy();
+    let ext = source
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let occupied = |path: &PathBuf, taken: &std::collections::BTreeSet<PathBuf>| {
+        taken.contains(path) || std::fs::symlink_metadata(path).is_ok()
+    };
+    let (destination, reason) = std::iter::once(dir.join(name))
+        .chain((1u32..).map(|n| dir.join(format!("{stem}.{n}{ext}"))))
+        .map(|destination| {
+            let mut reason = destination.file_name().unwrap_or_default().to_os_string();
+            reason.push(".reason.txt");
+            let reason = destination.with_file_name(reason);
+            (destination, reason)
+        })
+        .find(|(destination, reason)| !occupied(destination, taken) && !occupied(reason, taken))
+        .expect("an unused suffix always exists");
+    taken.insert(destination.clone());
+    taken.insert(reason.clone());
+    (destination, reason)
+}
+
+fn quarantine(root: &Path, store: &Path, unreadable: &[(PathBuf, String)], dry_run: bool) -> usize {
+    if let Err(error) = quarantine_store(root, store) {
+        eprintln!(
+            "  ✗ {error}; {} unreadable file(s) stay put",
+            unreadable.len()
+        );
+        return 0;
+    }
     if dry_run {
         for (path, reason) in unreadable {
             eprintln!("  [dry-run] would quarantine {}: {reason}", path.display());
         }
         return 0;
     }
-    if let Err(e) = std::fs::create_dir_all(corrupt_dir) {
+    let corrupt_dir = root.join(store);
+    if let Err(e) = std::fs::create_dir_all(&corrupt_dir) {
         eprintln!(
             "  ✗ cannot create {}: {e}; {} unreadable file(s) stay put and will be retried",
             corrupt_dir.display(),
@@ -1544,12 +1587,9 @@ fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: boo
         return 0;
     }
     let mut moved = 0;
+    let mut taken = std::collections::BTreeSet::new();
     for (path, reason) in unreadable {
-        let dest = free_path(corrupt_dir, path);
-        let reason_path = dest.with_file_name(format!(
-            "{}.reason.txt",
-            dest.file_name().unwrap_or_default().to_string_lossy()
-        ));
+        let (dest, reason_path) = quarantine_names(&corrupt_dir, path, &mut taken);
         if let Err(error) =
             lk_core::fs::write_atomic(&reason_path, format!("{reason}\n").as_bytes(), None)
         {
@@ -1580,13 +1620,7 @@ fn quarantine(corrupt_dir: &Path, unreadable: &[(PathBuf, String)], dry_run: boo
 }
 
 /// A path in `dir` for `source`'s file name that is not already taken, keeping its
-/// extension. Every mover in this file preserves a file rather than replacing one — a
-/// quarantined result is evidence, an archived run is a record — so neither may overwrite
-/// an earlier file that happens to share a name.
-fn free_path(dir: &Path, source: &Path) -> PathBuf {
-    free_path_avoiding(dir, source, &Default::default())
-}
-
+/// extension: an archived record never overwrites an earlier one that shares its name.
 fn free_path_avoiding(
     dir: &Path,
     source: &Path,
@@ -2723,7 +2757,10 @@ mod tests {
         std::fs::write(&stuck, "{trunc").unwrap();
 
         let unreadable = vec![(stuck.clone(), "parse error".to_string())];
-        assert_eq!(quarantine(&corrupt, &unreadable, false), 0);
+        assert_eq!(
+            quarantine(dir.path(), Path::new("corrupt"), &unreadable, false),
+            0
+        );
         assert!(stuck.exists(), "the file must stay put for the next run");
 
         assert_eq!(std::fs::read_to_string(&stuck).unwrap(), "{trunc");
@@ -2731,6 +2768,27 @@ mod tests {
             std::fs::read_to_string(&corrupt).unwrap(),
             "not a directory"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_quarantine_refuses_a_linked_ancestor_in_preview_and_apply() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join(".lorekeeper/queue")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join(".lorekeeper/queue/results"))
+            .unwrap();
+        let stuck = outside.path().join("ext-1.json");
+        std::fs::write(&stuck, "{trunc").unwrap();
+        for dry_run in [true, false] {
+            let unreadable = [(stuck.clone(), "parse error".to_string())];
+            assert_eq!(
+                quarantine(dir.path(), &corrupt_store(), &unreadable, dry_run),
+                0
+            );
+            assert!(quarantine_store(dir.path(), &corrupt_store()).is_err());
+            assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 1);
+        }
     }
 
     #[test]
@@ -2744,7 +2802,8 @@ mod tests {
         let vanished = dir.path().join("ext-2.json"); // never created — its rename fails
 
         let moved = quarantine(
-            &corrupt,
+            dir.path(),
+            Path::new("corrupt"),
             &[
                 (real.clone(), "parse error".into()),
                 (vanished, "parse error".into()),
@@ -2772,7 +2831,12 @@ mod tests {
         std::fs::write(&file, "{trunc").unwrap();
 
         assert_eq!(
-            quarantine(&corrupt, &[(file.clone(), "parse error".into())], true),
+            quarantine(
+                dir.path(),
+                Path::new("corrupt"),
+                &[(file.clone(), "parse error".into())],
+                true
+            ),
             0
         );
         assert!(file.exists());
@@ -2782,27 +2846,39 @@ mod tests {
     }
 
     #[test]
-    fn quarantine_never_overwrites_an_earlier_file() {
+    fn quarantine_never_overwrites_an_earlier_file_or_reason() {
         // Moving rather than deleting exists to keep the bytes for a human; an overwrite
         // would destroy exactly the evidence being preserved.
         let dir = TempDir::new().unwrap();
         let corrupt = dir.path().join("corrupt");
         std::fs::create_dir_all(&corrupt).unwrap();
         let source = dir.path().join("ext-1.json");
+        let mut taken = std::collections::BTreeSet::new();
 
-        let first = free_path(&corrupt, &source);
+        let (first, reason) = quarantine_names(&corrupt, &source, &mut taken);
         assert_eq!(first, corrupt.join("ext-1.json"));
-        std::fs::write(&first, "one").unwrap();
+        assert_eq!(reason, corrupt.join("ext-1.json.reason.txt"));
+        let (second, _) = quarantine_names(&corrupt, &source, &mut taken);
+        assert_eq!(
+            second,
+            corrupt.join("ext-1.1.json"),
+            "a reserved name is not reused"
+        );
 
-        let second = free_path(&corrupt, &source);
-        assert_ne!(second, first, "a taken name must not be reused");
-        std::fs::write(&second, "two").unwrap();
-
-        let third = free_path(&corrupt, &source);
-        assert!(![first.clone(), second.clone()].contains(&third));
-        // The earlier files are still there with their own contents.
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), "one");
-        assert_eq!(std::fs::read_to_string(&second).unwrap(), "two");
+        std::fs::write(corrupt.join("ext-1.2.json.reason.txt"), "earlier").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", corrupt.join("ext-1.3.json")).unwrap();
+        let (next, next_reason) = quarantine_names(&corrupt, &source, &mut Default::default());
+        assert_eq!(next, corrupt.join("ext-1.json"));
+        assert_eq!(next_reason, corrupt.join("ext-1.json.reason.txt"));
+        let mut held = std::collections::BTreeSet::from([first, second]);
+        let (later, _) = quarantine_names(&corrupt, &source, &mut held);
+        #[cfg(unix)]
+        assert_eq!(
+            later,
+            corrupt.join("ext-1.4.json"),
+            "an orphan reason or dangling link holds its name"
+        );
     }
 
     #[test]
