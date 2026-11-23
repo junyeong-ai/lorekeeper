@@ -290,7 +290,11 @@ new durable subjects with direct support and a useful future retrieval purpose. 
 disabled policy never produces an extraction task. This policy participates in the
 input hash and is enforced by the native applier, not inferred from source type.
 
-Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
+A standalone session writes one file per task to
+`<vault>/.lorekeeper/queue/results/{task_id}.json`, as below. A native request returns
+only the semantic values its instructions name: reuse admission is the supplied
+`owner_ref`, and Rust assembles this envelope, its revisions, discovery and selection
+from the prepared context, so a native reply never copies them:
 
 Before drafting, a standalone session chooses retrieval recipes through
 [extraction discovery](discovery.md) and requires `lore work context --task-id TASK` to
@@ -342,9 +346,9 @@ For example, property-contract evidence can support `Lease — property contract
 an existing distributed-coordination `Lease`. Explain the distinction in its synthesis
 and omit the already-owned bare homonym from aliases. Uncertain scope does not justify
 inventing a new subject. Consolidate one intended new subject before submission; after another result
-publishes an owner, rediscover and redraft explicit reuse. Use
+publishes an owner, rediscover and redraft explicit reuse. A standalone result uses
 `{"decision":"reuse","owner":{"path":"<exact concept path>","revision":"<full file revision read>"}}`
-to select an existing owner explicitly, including a matching homonym whose scope you
+(a native reply, its supplied `owner_ref`) to select an existing owner explicitly, including a matching homonym whose scope you
 verified. The owner must occur among the captured discovery resources at that exact
 full file revision and, in progressive mode, have an `inspect` decision and full read.
 Add an appropriate query and recapture scope before drafting if
