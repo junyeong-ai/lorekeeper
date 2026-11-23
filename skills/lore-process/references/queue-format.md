@@ -51,8 +51,11 @@ explicitly replacing an active proposal with a newly reviewed result; never rela
 guards. Unreadable payloads, an unparseable queue and a failed quarantine remain fatal.
 
 The native job stays incomplete/nonzero while work remains. Corrupt records,
-unmatched result identities, storage failures and unknown state stop further work.
-Standalone processing still stops to inspect a nonzero application result.
+storage failures and unknown state (`fatal`) stop further work; orphaned and rejected
+groups do not. A standalone session reads the same report: on `fatal` it stops and
+reports; `orphaned` groups are already quarantined and need no retry, so it inspects
+them in `results/orphaned/` and continues with remaining tasks; `rejected` groups are
+reported with their task IDs and retained for review.
 
 ## Queue task schema
 

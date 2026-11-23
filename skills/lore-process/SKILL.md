@@ -104,7 +104,7 @@ schema generation replaces that file wholesale.
    Keep drafts under `.lorekeeper/drafts/`; never round-trip guard fields through shell
    variables or intermediate Markdown.
 
-4. **Apply and verify.** Run `lore queue apply` before reading another task on the
+4. **Apply and verify.** Run `lore queue apply --json` before reading another task on the
    same target. A changed target or evidence scope requires rereading and regenerating,
    never replacing guards on an old draft. Recheck status after publication.
 
@@ -116,8 +116,11 @@ schema generation replaces that file wholesale.
    work, follow [coordination](references/parallel.md); one coordinator applies.
 
    Apply is not all-or-nothing: valid results may publish while others fail. On a
-   nonzero exit, stop and inspect status, remaining results, quarantine and alias
-   warnings. Report the failed task IDs and errors; retain their queue files.
+   nonzero exit, read that run's report; rerunning apply does not reproduce it.
+   `fatal` stops the drain; inspect status, remaining results, quarantine and alias
+   warnings. `orphaned` results match no pending request, usually because it was
+   retired while they were drafted; they are already quarantined, so note them and
+   continue. Report `rejected` task IDs and errors; retain their queue files.
    Do not assume rollback or blindly retry. On any other task failure, stop that
    file and report it. Retrying reclassifies completed work instead of rewriting it.
 
@@ -130,10 +133,12 @@ work or claim the controller's checks already passed.
 After each file, recheck status and use `lore queue prune --json`. Prune preserves
 current, unreadable and unparseable work; a blocked file is not completed.
 
-If any task was processed, run these publication stages and require exit 0:
+If any task was processed, run these publication stages. Apply's report must have no
+`fatal` or `rejected` group (an `orphaned` group is noted, as above); backlinks
+reconciliation requires exit 0:
 
 ```bash
-lore queue apply
+lore queue apply --json
 lore graph backlinks-sync
 ```
 
