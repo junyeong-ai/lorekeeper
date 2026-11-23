@@ -142,6 +142,9 @@ pub(in crate::commands) fn publication_scope_controlled(
             };
             let mut owners = prepared.pages.keys().cloned().collect::<BTreeSet<_>>();
             let mut pages = prepared.pages.clone();
+            // A synthesis publishes only for the citation set it answers, and an alias can move
+            // that set without changing any captured byte, so the scope carries the set too.
+            let graph_citations = prepared.graph_citations.clone();
             let recorded_revision = match &recorded {
                 Some(queries) if *queries != supplied => {
                     let current = resources::task_with_discovery_controlled(
@@ -158,7 +161,13 @@ pub(in crate::commands) fn publication_scope_controlled(
                 prepared,
                 owners,
                 pages,
-                phase: json!({"recorded_context_revision":recorded_revision}),
+                phase: match graph_citations {
+                    Some(citations) => json!({
+                        "recorded_context_revision": recorded_revision,
+                        "graph_citations": citations,
+                    }),
+                    None => json!({"recorded_context_revision": recorded_revision}),
+                },
             }
         }
     };

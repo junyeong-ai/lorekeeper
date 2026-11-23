@@ -63,7 +63,7 @@ pub(super) struct Prepared {
     /// needs it; reading the evidence does not, so it is absent from a plain refresh.
     pub(super) roster: Option<super::selection::RosterBinding>,
     /// Digest of a synthesis target's graph citations when this context was captured.
-    graph_citations: Option<String>,
+    pub(super) graph_citations: Option<String>,
 }
 
 /// The discovery recipes and screening proof Rust writes into an extraction result.
