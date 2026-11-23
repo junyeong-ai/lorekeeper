@@ -283,6 +283,15 @@ pub async fn run(
     let queue_dir = vault_root.join(".lorekeeper").join("queue");
     let processed_dir = queue_dir.join(lk_queue::PROCESSED_SUBDIR);
     if processed_dir.exists() {
+        // Retention deletes only history this vault holds: a linked directory or entry may
+        // lead anywhere, so it is refused or skipped rather than followed.
+        let directory = std::fs::symlink_metadata(&processed_dir)
+            .map_err(|e| miette::miette!("inspect queue/processed: {e}"))?;
+        if !directory.is_dir() {
+            return Err(miette::miette!(
+                "queue/processed must be a directory inside the vault, not a link"
+            ));
+        }
         let _claim = super::queue::claim_writer(&queue_dir, dry_run)?;
         let mut entries = tokio::fs::read_dir(&processed_dir)
             .await
@@ -294,7 +303,13 @@ pub async fn run(
             .map_err(|e| miette::miette!("queue entry: {e}"))?
         {
             let path = entry.path();
-            if path.extension().is_none_or(|ext| ext != "jsonl") {
+            if path.extension().is_none_or(|ext| ext != "jsonl")
+                || !entry
+                    .file_type()
+                    .await
+                    .map_err(|e| miette::miette!("queue entry: {e}"))?
+                    .is_file()
+            {
                 continue;
             }
             let metadata = entry

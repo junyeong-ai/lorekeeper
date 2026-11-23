@@ -238,6 +238,33 @@ fn maintenance_retires_unconfigured_intent_only_under_the_configuration_it_read(
     assert!(!snapshot.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn maintenance_never_prunes_processed_history_through_a_link() {
+    let dir = fixture();
+    let vault = dir.path().join("vault");
+    let outside = tempfile::tempdir().unwrap();
+    let archived = outside.path().join("old.jsonl");
+    std::fs::write(&archived, "{}\n").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(400 * 86_400);
+    std::fs::File::options()
+        .write(true)
+        .open(&archived)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    std::fs::create_dir_all(vault.join(".lorekeeper/queue")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), vault.join(".lorekeeper/queue/processed")).unwrap();
+    let out = run(dir.path(), &["maintenance"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not a link"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(archived.exists());
+}
+
 #[test]
 fn review_check_preserves_open_and_historical_judgments_but_refuses_stale_or_invalid() {
     let dir = fixture();

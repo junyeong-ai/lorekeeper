@@ -25,9 +25,10 @@ paths:
   by the exact bytes read, so the session's configuration/root precondition checks the
   selection they were derived under immediately before anything is written. Other
   deletions outside the journal run that precondition immediately before each deletion
-  (once per pass for the disposable projection cache and the retired selection store); a
-  source restored or a retention changed meanwhile refuses instead of applying the
-  superseded policy.
+  (per draft, since a draft is removed whole; once per pass for the disposable projection
+  cache and the retired selection store); a source restored or a retention changed
+  meanwhile refuses instead of applying the superseded policy. Processed queue history is
+  deleted only as regular files in a real `queue/processed` directory, never through a link.
   Bounded-work retention captures pending requests, staged results and transitive
   reuse references under workflow→mutation→queue claims. Unrelated valid pending
   work does not block expired published work; unknown references refuse cleanup.
