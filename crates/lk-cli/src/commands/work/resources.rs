@@ -1048,7 +1048,7 @@ fn capture_task_with_audit_controlled(
             Some(candidate) => candidate,
             None => {
                 loaded =
-                    load_audit_candidate_controlled(root, config, &task.target.vault_path, read)?;
+                    load_synthesis_input_controlled(root, config, &task.target.vault_path, read)?;
                 &loaded
             }
         };
@@ -1103,8 +1103,28 @@ pub(in crate::commands) fn graph_citation_digest(
     concept: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<String> {
-    let candidate = load_audit_candidate_controlled(root, config, concept, read)?;
+    let candidate = load_synthesis_input_controlled(root, config, concept, read)?;
     Ok(lk_core::concept::citation_digest(&candidate.evidence))
+}
+
+fn load_synthesis_input_controlled(
+    root: &Path,
+    config: &Config,
+    concept: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<lk_graph::audit::AuditCandidate> {
+    let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
+        .into_diagnostic()?;
+    lk_graph::audit::load_synthesis_inputs_controlled(
+        root,
+        &config.vault.dirs,
+        &pages,
+        &[concept.to_owned()],
+        read,
+    )
+    .into_diagnostic()?
+    .pop()
+    .ok_or_else(|| miette::miette!("synthesis concept not found: {concept}"))
 }
 
 fn load_audit_candidate_controlled(
@@ -1134,15 +1154,37 @@ fn load_audit_candidate_controlled(
     Ok(candidate)
 }
 
+/// A synthesis reads its citations and direct links in full, and of its discovery matches
+/// only the ranked roster extraction uses: each query's best `max_query_candidates` pages
+/// in search order plus every identity match.
 fn knowledge_candidate_controlled(
     root: &Path,
     config: &Config,
     candidate: &lk_graph::audit::AuditCandidate,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let mut related = candidate.related_pages.clone();
+    let mut related = candidate.linked_pages.clone();
     if let Some(discovery) = &candidate.discovery {
-        related.extend(discovery.matches.iter().cloned());
+        let limit = config
+            .execution
+            .effective_work()
+            .into_diagnostic()?
+            .max_query_candidates
+            .get();
+        let ranked = discovery.ranked.as_ref().ok_or_else(|| {
+            miette::miette!("synthesis discovery was loaded without its ranked roster")
+        })?;
+        for (_, matches) in ranked {
+            let mut places = limit;
+            for matched in matches {
+                if matched.identity {
+                    related.push(matched.citation.clone());
+                } else if places > 0 {
+                    places -= 1;
+                    related.push(matched.citation.clone());
+                }
+            }
+        }
     }
     related.sort();
     related.dedup();
@@ -1870,7 +1912,7 @@ mod tests {
             ),
         );
         let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
-        let candidates = lk_graph::audit::load_selected_inputs(
+        let candidates = lk_graph::audit::load_synthesis_inputs_controlled(
             &root,
             &config.vault.dirs,
             &pages,
@@ -1878,6 +1920,7 @@ mod tests {
                 .iter()
                 .map(|task| task.target.vault_path.clone())
                 .collect::<Vec<_>>(),
+            &lk_vault::ReadControl::default(),
         )
         .unwrap();
         (directory, config, tasks, candidates)
@@ -2006,7 +2049,58 @@ mod tests {
         );
     }
     #[test]
-    fn synthesis_keeps_full_context_without_waiting_for_audit_candidate_decisions() {
+    fn synthesis_reads_only_the_ranked_roster_of_its_discovery_matches() {
+        let (directory, _, tasks, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let config_path = root.join("config.yaml");
+        let mut yaml = std::fs::read_to_string(&config_path).unwrap();
+        yaml.push_str("execution:\n  work: {max_query_candidates: 1}\n");
+        std::fs::write(&config_path, yaml).unwrap();
+        let config = Config::load(&config_path).unwrap();
+        let task = &tasks[0];
+        let path = task.target.vault_path.as_str();
+        let discovered = ["wiki/documents/first.md", "wiki/documents/second.md"];
+        for (index, address) in discovered.iter().enumerate() {
+            write(
+                &root,
+                address,
+                &format!(
+                    "---\ntype: document\ntitle: Match {index}\n---\nScreen candidate {index}.\n"
+                ),
+            );
+        }
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let raw = std::fs::read_to_string(root.join(path)).unwrap();
+        lk_graph::audit::record_discovery(
+            &lk_vault::MutationSession::acquire(&root).unwrap(),
+            &config.vault.dirs,
+            &pages,
+            lk_graph::audit::AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(&raw),
+                queries: vec![lk_core::discovery::DiscoveryQuery {
+                    query: "screen candidate".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let prepared = task_with_audit(&root, &config, &task.task_id, None).unwrap();
+        let read = discovered
+            .iter()
+            .filter(|address| {
+                prepared
+                    .resources
+                    .iter()
+                    .any(|resource| resource.address == **address)
+            })
+            .count();
+        assert_eq!(read, 1, "one ranked place, no identity match");
+    }
+
+    #[test]
+    fn synthesis_reads_discovery_context_without_audit_screening_state() {
         let (directory, config, tasks, _) = synthesis_batch_fixture();
         let root = directory.path().canonicalize().unwrap();
         let task = &tasks[0];
@@ -2021,6 +2115,17 @@ mod tests {
                 &config.vault.dirs,
                 &pages(),
                 &[path.into()],
+            )
+            .unwrap()
+            .remove(0)
+        };
+        let synthesis_input = || {
+            lk_graph::audit::load_synthesis_inputs_controlled(
+                &root,
+                &config.vault.dirs,
+                &pages(),
+                &[path.into()],
+                &lk_vault::ReadControl::default(),
             )
             .unwrap()
             .remove(0)
@@ -2063,7 +2168,8 @@ mod tests {
             !readiness.check(&pending).unwrap(),
             "the synthesis prerequisite blocks audit"
         );
-        let before = task_with_audit(&root, &config, &task.task_id, Some(&pending)).unwrap();
+        let before =
+            task_with_audit(&root, &config, &task.task_id, Some(&synthesis_input())).unwrap();
         assert_same_prepared(
             &before,
             &task_with_audit(&root, &config, &task.task_id, None).unwrap(),
@@ -2131,8 +2237,26 @@ mod tests {
         );
         assert_same_prepared(
             &before,
-            &task_with_audit(&root, &config, &task.task_id, Some(&ready)).unwrap(),
+            &task_with_audit(&root, &config, &task.task_id, Some(&synthesis_input())).unwrap(),
         );
+        let state = root.join(lk_graph::audit::selection::DIRECTORY);
+        let parked = root.join("parked-audit-selection");
+        std::fs::rename(&state, &parked).unwrap();
+        assert!(
+            lk_graph::audit::load_selected_inputs(
+                &root,
+                &config.vault.dirs,
+                &pages(),
+                &[path.into()]
+            )
+            .is_err(),
+            "missing screening state stays the audit's error"
+        );
+        assert_same_prepared(
+            &before,
+            &task_with_audit(&root, &config, &task.task_id, None).unwrap(),
+        );
+        std::fs::rename(&parked, &state).unwrap();
         write(
             &root,
             discovered,

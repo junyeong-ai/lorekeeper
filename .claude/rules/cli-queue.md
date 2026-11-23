@@ -151,6 +151,11 @@ paths:
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.
+- A synthesis reads its citations and direct links in full, and of its recorded audit
+  discovery matches only the ranked roster extraction uses: `max_query_candidates` per
+  query in search order, plus identity matches, taken from the same discovery traversal
+  that found the matches. It never waits for audit screening decisions. The bound is not
+  part of the Work purpose: a synthesis whose read pages are unchanged keeps its Work.
 - A synthesis request answers the citation set it was made for. Drafting, preparation
   and publication refuse it (`citations-changed`) once the concept's graph citations
   captured with its context differ, whatever order reconciliation and application run

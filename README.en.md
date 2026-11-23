@@ -157,7 +157,8 @@ These are not token, billing or quality guarantees. See [execution profiles](ski
 Large inputs are read in bounded pieces, and each completed call's result is saved as it returns,
 so a run that stops at its budget resumes without repeating finished calls; see [bounded work](skills/lore-process/references/bounded-work.md).
 Concept extraction compares each source with at most `execution.work.max_query_candidates` (default 50) best-ranked
-existing pages per query, plus every exact title or alias match; see [discovery](skills/lore-process/references/discovery.md).
+existing pages per query, plus every exact title or alias match. Concept synthesis reads every citing page and
+directly linked concept, and its discovery matches under the same bound; see [discovery](skills/lore-process/references/discovery.md).
 
 Automatic audits plan only the kinds in `graph.audit.subjects` (concepts by default). They alternate between changed and
 never-assessed subjects and take each group in order of scoped review obligations, a recorded follow-up, citing pages and

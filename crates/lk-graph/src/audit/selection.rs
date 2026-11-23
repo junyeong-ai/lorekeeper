@@ -1141,6 +1141,7 @@ pub fn record(
         dirs,
         pages,
         &receipts,
+        super::InputUse::Audit,
         &super::Scope::Selection(BTreeSet::from([path.as_str()])),
         read,
     )?;

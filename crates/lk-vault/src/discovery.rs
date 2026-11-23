@@ -987,7 +987,32 @@ pub fn discover_queries(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveryQueryMatches {
     pub matches: BTreeMap<DiscoveryQuery, Vec<Citation>>,
+    /// The same matches per query in the shared search order a ranked roster uses.
+    pub ranked: BTreeMap<DiscoveryQuery, Vec<RankedMatch>>,
     pub query_revisions: BTreeMap<DiscoveryQuery, String>,
+}
+
+/// One query match in search order. `identity` means the query names the page itself, which a
+/// ranked roster keeps whatever its place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RankedMatch {
+    pub citation: Citation,
+    pub identity: bool,
+}
+
+type Ranked = BTreeMap<DiscoveryQuery, Vec<(search::SearchRank, RankedMatch)>>;
+
+fn in_search_order(ranked: Ranked) -> BTreeMap<DiscoveryQuery, Vec<RankedMatch>> {
+    ranked
+        .into_iter()
+        .map(|(query, mut matches)| {
+            matches.sort_by(|left, right| left.0.cmp(&right.0));
+            (
+                query,
+                matches.into_iter().map(|(_, matched)| matched).collect(),
+            )
+        })
+        .collect()
 }
 
 fn query_revision(
@@ -1026,6 +1051,7 @@ pub fn discover_query_matches_controlled(
     if queries.is_empty() {
         return Ok(DiscoveryQueryMatches {
             matches: BTreeMap::new(),
+            ranked: BTreeMap::new(),
             query_revisions: BTreeMap::new(),
         });
     }
@@ -1051,6 +1077,11 @@ pub fn discover_query_matches_controlled(
             .iter()
             .map(|(query, ..)| ((*query).clone(), Vec::new())),
     );
+    let mut ranked = Ranked::from_iter(
+        plans
+            .iter()
+            .map(|(query, ..)| ((*query).clone(), Vec::new())),
+    );
     // Every page is matched against every query, so pages are matched in parallel. A batch
     // bounds the pages held at once; matches are sorted below, so evaluation order is free.
     const BATCH_PAGES: usize = 256;
@@ -1060,7 +1091,14 @@ pub fn discover_query_matches_controlled(
             .into_par_iter()
             .map(|page| live_page_matches(page, &plans, read))
             .collect::<Result<Vec<_>, VaultError>>()?;
-        for (index, citation) in matched.into_iter().flatten() {
+        for (index, rank, identity, citation) in matched.into_iter().flatten() {
+            ranked.entry(plans[index].0.clone()).or_default().push((
+                rank,
+                RankedMatch {
+                    citation: citation.clone(),
+                    identity,
+                },
+            ));
             result
                 .get_mut(plans[index].0)
                 .expect("selected query")
@@ -1091,18 +1129,20 @@ pub fn discover_query_matches_controlled(
         .collect::<Result<_, VaultError>>()?;
     Ok(DiscoveryQueryMatches {
         matches: result,
+        ranked: in_search_order(ranked),
         query_revisions,
     })
 }
 
 type LivePlan<'a> = (&'a DiscoveryQuery, Option<String>, Vec<String>, Vec<String>);
 
-/// The queries one page matches, by plan index, with the page's citation at its revision.
+/// The queries one page matches, by plan index, with its search rank, whether the query names
+/// it by identity, and the page's citation at its revision.
 fn live_page_matches(
     mut page: search::Page,
     plans: &[LivePlan<'_>],
     read: &crate::ReadControl,
-) -> Result<Vec<(usize, Citation)>, VaultError> {
+) -> Result<Vec<(usize, search::SearchRank, bool, Citation)>, VaultError> {
     page.projection = Some(page.match_projection().into_owned());
     let matcher = search::PageMatcher::from_page(&page);
     let mut revision = None;
@@ -1116,13 +1156,14 @@ fn live_page_matches(
             knowledge_status: None,
             ..Default::default()
         };
-        if matcher
-            .match_query(&options, spellings, terms, identity.as_deref())
-            .is_some()
+        if let Some((field, phrase, spacing)) =
+            matcher.match_query(&options, spellings, terms, identity.as_deref())
         {
             let revision = revision.get_or_insert_with(|| source_revision(&page.page));
             matched.push((
                 index,
+                search::SearchRank::build(&page, &options, field, phrase, spacing),
+                field == search::MatchField::Identity,
                 Citation::at_revision(&page.rel_path, revision.clone()),
             ));
         }
@@ -1197,6 +1238,7 @@ fn indexed_queries(
     }
     let mut result =
         BTreeMap::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
+    let mut ranked = Ranked::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
     let mut unchanged = true;
     search::visit_pages_controlled(root, dirs, false, None, read, |page, _| {
         unchanged &= captured.remove(&page.rel_path).as_deref() == Some(&page.file_revision);
@@ -1217,20 +1259,25 @@ fn indexed_queries(
                     knowledge_status: None,
                     ..Default::default()
                 };
-                if matcher
-                    .match_query(
-                        &options,
-                        &plan.spellings,
-                        &plan.terms,
-                        plan.identity.as_deref(),
-                    )
-                    .is_some()
-                {
+                if let Some((field, phrase, spacing)) = matcher.match_query(
+                    &options,
+                    &plan.spellings,
+                    &plan.terms,
+                    plan.identity.as_deref(),
+                ) {
                     let revision = revision.get_or_insert_with(|| source_revision(&page.page));
+                    let citation = Citation::at_revision(&page.rel_path, revision.clone());
+                    ranked.entry((*query).clone()).or_default().push((
+                        search::SearchRank::build(&page, &options, field, phrase, spacing),
+                        RankedMatch {
+                            citation: citation.clone(),
+                            identity: field == search::MatchField::Identity,
+                        },
+                    ));
                     result
                         .get_mut(query)
                         .expect("selected query")
-                        .push(Citation::at_revision(&page.rel_path, revision.clone()));
+                        .push(citation);
                 }
             }
         }
@@ -1263,6 +1310,7 @@ fn indexed_queries(
         .collect::<Result<_, VaultError>>()?;
     Ok(Some(DiscoveryQueryMatches {
         matches: result,
+        ranked: in_search_order(ranked),
         query_revisions,
     }))
 }

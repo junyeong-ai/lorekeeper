@@ -4872,7 +4872,7 @@ mod native {
                         self.supervisor.read_control(),
                     )
                     .map_err(|error| miette::miette!("{error}"))?;
-                    lk_graph::audit::load_selected_inputs_controlled(
+                    lk_graph::audit::load_synthesis_inputs_controlled(
                         session.root(),
                         &self.config.vault.dirs,
                         &pages,
