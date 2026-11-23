@@ -74,6 +74,13 @@ pub(super) fn run(
     }
     let (retained_path, retained_raw, retained_index, mut task) =
         matches.pop().expect("one retained task");
+    if super::rejections::staged_identities(&root)?
+        .contains(&(task.task_id.clone(), task.cache_hash.clone()))
+    {
+        return Err(miette::miette!(
+            "a staged result answers task {task_id}; run `lore queue apply` to publish or retire it before regenerating"
+        ));
+    }
     task.validate_retained_input()
         .map_err(|e| miette::miette!("{e}"))?;
     // The retained policy is historical provenance, not the requested output policy.

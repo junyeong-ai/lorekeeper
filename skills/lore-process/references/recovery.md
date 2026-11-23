@@ -97,7 +97,8 @@ The task must exist exactly once in pending or processed queue files. Its comple
 original typed input, input hash, current page input marker, target kind and headings
 must still agree; synthesis source revisions must remain current, and the concept's
 current citations must still be the requested set, which needs the vault's
-configuration rather than `--root`. Missing retained input is a refusal, not
+configuration rather than `--root`. A task a staged result still answers is refused
+until `lore queue apply` publishes or retires that result. Missing retained input is a refusal, not
 permission to remotely re-fetch an expired source or reconstruct raw events from
 refined prose.
 

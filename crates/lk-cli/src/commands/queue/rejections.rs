@@ -605,10 +605,22 @@ fn active_proposals_controlled(
     Ok(inventory.groups)
 }
 
-/// The task identities staged results answer; an unreadable result refuses, since its task
-/// is unknown.
+/// The task identities staged results answer. An unreadable result refuses by path, since
+/// its task is unknown; `queue apply` quarantines it.
 pub(super) fn staged_identities(root: &Path) -> miette::Result<BTreeSet<(String, String)>> {
-    Ok(active_proposals(root)?.into_keys().collect())
+    let inventory = load_proposals(root)?;
+    if !inventory.unreadable.is_empty() {
+        let paths = inventory
+            .unreadable
+            .iter()
+            .map(|(path, _)| path.display().to_string())
+            .collect::<Vec<_>>();
+        return Err(miette::miette!(
+            "unreadable staged results have unknown task identities: {}; `lore queue apply` quarantines them",
+            paths.join(", ")
+        ));
+    }
+    Ok(inventory.groups.into_keys().collect())
 }
 
 pub(super) fn load_proposals(root: &Path) -> miette::Result<ProposalInventory> {

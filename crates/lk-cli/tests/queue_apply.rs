@@ -3088,7 +3088,7 @@ fn regeneration_replaces_pending_attempts_without_admitting_a_matching_ancestor_
 #[test]
 fn regeneration_of_answered_synthesis_still_checks_current_sources_and_citations() {
     use lk_queue::TaskRequest;
-    for case in ["unchanged", "revised", "cited"] {
+    for case in ["unchanged", "revised", "cited", "staged"] {
         let ws = Workspace::new();
         let source =
             "---\ntype: document\n---\nOriginal evidence. See [Example](../concepts/example.md).\n";
@@ -3128,6 +3128,10 @@ fn regeneration_of_answered_synthesis_still_checks_current_sources_and_citations
                 "wiki/documents/other.md",
                 "---\ntype: document\n---\nAlso about [Example](../concepts/example.md).\n",
             ),
+            "staged" => ws.write(
+                ".lorekeeper/queue/results/retained-synthesis.synthesis.json",
+                &serde_json::json!({"task_id":"retained-synthesis","cache_hash":hash,"context_revision":"captured","target_revision":"captured","synthesis":"Staged.","related":"A sourced relationship."}).to_string(),
+            ),
             _ => {}
         }
         let result = ws.run(&["queue", "regenerate", "--task-id", "retained-synthesis"]);
@@ -3142,6 +3146,9 @@ fn regeneration_of_answered_synthesis_still_checks_current_sources_and_citations
         }
         if case == "cited" {
             assert!(stderr.contains("concept citations changed"), "{stderr}");
+        }
+        if case == "staged" {
+            assert!(stderr.contains("a staged result answers"), "{stderr}");
         }
     }
 }
