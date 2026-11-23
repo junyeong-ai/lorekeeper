@@ -987,8 +987,9 @@ pub fn discover_queries(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscoveryQueryMatches {
     pub matches: BTreeMap<DiscoveryQuery, Vec<Citation>>,
-    /// The same matches per query in the shared search order a ranked roster uses.
-    pub ranked: BTreeMap<DiscoveryQuery, Vec<RankedMatch>>,
+    /// The same matches per query in the shared search order, when the caller asked for it
+    /// (`discover_ranked_query_matches_controlled`).
+    pub ranked: Option<BTreeMap<DiscoveryQuery, Vec<RankedMatch>>>,
     pub query_revisions: BTreeMap<DiscoveryQuery, String>,
 }
 
@@ -1044,6 +1045,26 @@ pub fn discover_query_matches_controlled(
     queries: &[DiscoveryQuery],
     read: &crate::ReadControl,
 ) -> Result<DiscoveryQueryMatches, VaultError> {
+    discover_matches(root, dirs, queries, false, read)
+}
+
+/// Complete matches as `discover_query_matches_controlled`, also in search order per query.
+pub fn discover_ranked_query_matches_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    read: &crate::ReadControl,
+) -> Result<DiscoveryQueryMatches, VaultError> {
+    discover_matches(root, dirs, queries, true, read)
+}
+
+fn discover_matches(
+    root: &Path,
+    dirs: &VaultDirs,
+    queries: &[DiscoveryQuery],
+    rank: bool,
+    read: &crate::ReadControl,
+) -> Result<DiscoveryQueryMatches, VaultError> {
     read.check()?;
     for query in queries {
         query.validate().map_err(std::io::Error::other)?;
@@ -1051,11 +1072,11 @@ pub fn discover_query_matches_controlled(
     if queries.is_empty() {
         return Ok(DiscoveryQueryMatches {
             matches: BTreeMap::new(),
-            ranked: BTreeMap::new(),
+            ranked: rank.then(BTreeMap::new),
             query_revisions: BTreeMap::new(),
         });
     }
-    if let Some(matches) = indexed_queries(root, dirs, queries, read)? {
+    if let Some(matches) = indexed_queries(root, dirs, queries, rank, read)? {
         read.check()?;
         return Ok(matches);
     }
@@ -1077,11 +1098,13 @@ pub fn discover_query_matches_controlled(
             .iter()
             .map(|(query, ..)| ((*query).clone(), Vec::new())),
     );
-    let mut ranked = Ranked::from_iter(
-        plans
-            .iter()
-            .map(|(query, ..)| ((*query).clone(), Vec::new())),
-    );
+    let mut ranked = rank.then(|| {
+        Ranked::from_iter(
+            plans
+                .iter()
+                .map(|(query, ..)| ((*query).clone(), Vec::new())),
+        )
+    });
     // Every page is matched against every query, so pages are matched in parallel. A batch
     // bounds the pages held at once; matches are sorted below, so evaluation order is free.
     const BATCH_PAGES: usize = 256;
@@ -1089,16 +1112,18 @@ pub fn discover_query_matches_controlled(
     let mut record = |batch: &mut Vec<search::Page>| -> Result<(), VaultError> {
         let matched = std::mem::take(batch)
             .into_par_iter()
-            .map(|page| live_page_matches(page, &plans, read))
+            .map(|page| live_page_matches(page, &plans, rank, read))
             .collect::<Result<Vec<_>, VaultError>>()?;
-        for (index, rank, identity, citation) in matched.into_iter().flatten() {
-            ranked.entry(plans[index].0.clone()).or_default().push((
-                rank,
-                RankedMatch {
-                    citation: citation.clone(),
-                    identity,
-                },
-            ));
+        for (index, order, citation) in matched.into_iter().flatten() {
+            if let (Some(ranked), Some((order, identity))) = (ranked.as_mut(), order) {
+                ranked.entry(plans[index].0.clone()).or_default().push((
+                    order,
+                    RankedMatch {
+                        citation: citation.clone(),
+                        identity,
+                    },
+                ));
+            }
             result
                 .get_mut(plans[index].0)
                 .expect("selected query")
@@ -1129,20 +1154,24 @@ pub fn discover_query_matches_controlled(
         .collect::<Result<_, VaultError>>()?;
     Ok(DiscoveryQueryMatches {
         matches: result,
-        ranked: in_search_order(ranked),
+        ranked: ranked.map(in_search_order),
         query_revisions,
     })
 }
 
 type LivePlan<'a> = (&'a DiscoveryQuery, Option<String>, Vec<String>, Vec<String>);
 
-/// The queries one page matches, by plan index, with its search rank, whether the query names
-/// it by identity, and the page's citation at its revision.
+/// A match's search rank and whether its query names the page by identity.
+type MatchOrder = Option<(search::SearchRank, bool)>;
+
+/// The queries one page matches, by plan index, with the page's citation at its revision and,
+/// when `rank` is set, its order.
 fn live_page_matches(
     mut page: search::Page,
     plans: &[LivePlan<'_>],
+    rank: bool,
     read: &crate::ReadControl,
-) -> Result<Vec<(usize, search::SearchRank, bool, Citation)>, VaultError> {
+) -> Result<Vec<(usize, MatchOrder, Citation)>, VaultError> {
     page.projection = Some(page.match_projection().into_owned());
     let matcher = search::PageMatcher::from_page(&page);
     let mut revision = None;
@@ -1162,8 +1191,12 @@ fn live_page_matches(
             let revision = revision.get_or_insert_with(|| source_revision(&page.page));
             matched.push((
                 index,
-                search::SearchRank::build(&page, &options, field, phrase, spacing),
-                field == search::MatchField::Identity,
+                rank.then(|| {
+                    (
+                        search::SearchRank::build(&page, &options, field, phrase, spacing),
+                        field == search::MatchField::Identity,
+                    )
+                }),
                 Citation::at_revision(&page.rel_path, revision.clone()),
             ));
         }
@@ -1175,6 +1208,7 @@ fn indexed_queries(
     root: &Path,
     dirs: &VaultDirs,
     queries: &[DiscoveryQuery],
+    rank: bool,
     read: &crate::ReadControl,
 ) -> Result<Option<DiscoveryQueryMatches>, VaultError> {
     read.check()?;
@@ -1238,7 +1272,8 @@ fn indexed_queries(
     }
     let mut result =
         BTreeMap::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
-    let mut ranked = Ranked::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new())));
+    let mut ranked =
+        rank.then(|| Ranked::from_iter(queries.iter().map(|query| ((*query).clone(), Vec::new()))));
     let mut unchanged = true;
     search::visit_pages_controlled(root, dirs, false, None, read, |page, _| {
         unchanged &= captured.remove(&page.rel_path).as_deref() == Some(&page.file_revision);
@@ -1267,13 +1302,15 @@ fn indexed_queries(
                 ) {
                     let revision = revision.get_or_insert_with(|| source_revision(&page.page));
                     let citation = Citation::at_revision(&page.rel_path, revision.clone());
-                    ranked.entry((*query).clone()).or_default().push((
-                        search::SearchRank::build(&page, &options, field, phrase, spacing),
-                        RankedMatch {
-                            citation: citation.clone(),
-                            identity: field == search::MatchField::Identity,
-                        },
-                    ));
+                    if let Some(ranked) = ranked.as_mut() {
+                        ranked.entry((*query).clone()).or_default().push((
+                            search::SearchRank::build(&page, &options, field, phrase, spacing),
+                            RankedMatch {
+                                citation: citation.clone(),
+                                identity: field == search::MatchField::Identity,
+                            },
+                        ));
+                    }
                     result
                         .get_mut(query)
                         .expect("selected query")
@@ -1310,7 +1347,7 @@ fn indexed_queries(
         .collect::<Result<_, VaultError>>()?;
     Ok(Some(DiscoveryQueryMatches {
         matches: result,
-        ranked: in_search_order(ranked),
+        ranked: ranked.map(in_search_order),
         query_revisions,
     }))
 }
@@ -2134,7 +2171,7 @@ mod tests {
             spacing,
         });
         let live = discover_queries(root.path(), &dirs, &queries).unwrap();
-        let live_capture = discover_query_matches_controlled(
+        let live_capture = discover_ranked_query_matches_controlled(
             root.path(),
             &dirs,
             &queries,
@@ -2154,7 +2191,7 @@ mod tests {
             std::sync::atomic::AtomicBool::new(true),
         ));
         assert!(matches!(
-            indexed_queries(root.path(), &dirs, &queries, &cancelled),
+            indexed_queries(root.path(), &dirs, &queries, false, &cancelled),
             Err(VaultError::Cancelled)
         ));
         assert!(
@@ -2166,20 +2203,31 @@ mod tests {
         crate::prepare_search(&session, &dirs).unwrap();
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
-        let indexed_capture =
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .unwrap();
+        let indexed_capture = indexed_queries(
+            root.path(),
+            &dirs,
+            &queries,
+            true,
+            &crate::ReadControl::default(),
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(indexed_capture, live_capture);
 
         assert!(matches!(
-            indexed_queries(root.path(), &dirs, &queries, &cancelled),
+            indexed_queries(root.path(), &dirs, &queries, false, &cancelled),
             Err(VaultError::Cancelled)
         ));
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .map(|capture| capture.matches),
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .map(|capture| capture.matches),
             Some(live.clone())
         );
         assert_eq!(
@@ -2214,6 +2262,7 @@ mod tests {
                 root.path(),
                 &dirs,
                 std::slice::from_ref(&query),
+                false,
                 &crate::ReadControl::default()
             )
             .is_err()
@@ -2228,6 +2277,7 @@ mod tests {
                 root.path(),
                 &dirs,
                 std::slice::from_ref(&query),
+                false,
                 &crate::ReadControl::default()
             )
             .unwrap()
@@ -2290,9 +2340,15 @@ mod tests {
         let database = root.path().join(crate::search_index::INDEX_PATH);
         let before = std::fs::read(&database).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .map(|capture| capture.matches),
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .map(|capture| capture.matches),
             Some(live.clone())
         );
         assert_eq!(
@@ -2317,27 +2373,45 @@ mod tests {
             .set_modified(modified)
             .unwrap();
         assert!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .is_none(),
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .is_none(),
             "same-size, same-mtime changes invalidate capture reuse"
         );
         let changed = discover_queries(root.path(), &dirs, &queries).unwrap();
         assert_ne!(changed[&queries[1]], live[&queries[1]]);
         crate::prepare_search(&session, &dirs).unwrap();
         assert_eq!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .map(|capture| capture.matches),
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .map(|capture| capture.matches),
             Some(changed)
         );
 
         let added = "wiki/documents/new.md";
         write(root.path(), added, body);
         assert!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .is_none()
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .is_none()
         );
         let expanded = discover_queries(root.path(), &dirs, &queries).unwrap();
         assert!(
@@ -2348,9 +2422,15 @@ mod tests {
         crate::prepare_search(&session, &dirs).unwrap();
         std::fs::remove_file(root.path().join(added)).unwrap();
         assert!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .is_none()
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .is_none()
         );
         assert!(
             !discover_queries(root.path(), &dirs, &queries).unwrap()[&queries[1]]
@@ -2364,9 +2444,15 @@ mod tests {
             "---\ntype: concept\ntitle: Retention policy\naliases: [A different name]\n---\nA production order retention policy.\n",
         );
         assert!(
-            indexed_queries(root.path(), &dirs, &queries, &crate::ReadControl::default())
-                .unwrap()
-                .is_none()
+            indexed_queries(
+                root.path(),
+                &dirs,
+                &queries,
+                false,
+                &crate::ReadControl::default()
+            )
+            .unwrap()
+            .is_none()
         );
         let renamed = discover_queries(root.path(), &dirs, &queries).unwrap();
         assert!(

@@ -1115,16 +1115,24 @@ fn load_synthesis_input_controlled(
 ) -> miette::Result<lk_graph::audit::AuditCandidate> {
     let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
         .into_diagnostic()?;
-    lk_graph::audit::load_synthesis_inputs_controlled(
+    let mut inputs = lk_graph::audit::load_synthesis_inputs_controlled(
         root,
         &config.vault.dirs,
         &pages,
         &[concept.to_owned()],
         read,
     )
-    .into_diagnostic()?
-    .pop()
-    .ok_or_else(|| miette::miette!("synthesis concept not found: {concept}"))
+    .into_diagnostic()?;
+    if let Some(reason) = inputs.unavailable.remove(concept) {
+        return Err(miette::Report::new(super::super::queue::SynthesisHeld {
+            concept: concept.to_owned(),
+            reason,
+        }));
+    }
+    inputs
+        .candidates
+        .pop()
+        .ok_or_else(|| miette::miette!("synthesis concept not found: {concept}"))
 }
 
 fn load_audit_candidate_controlled(
@@ -1155,8 +1163,7 @@ fn load_audit_candidate_controlled(
 }
 
 /// A synthesis reads its citations and direct links in full, and of its discovery matches
-/// only the ranked roster extraction uses: each query's best `max_query_candidates` pages
-/// in search order plus every identity match.
+/// the ranked roster `lk_graph::audit::SYNTHESIS_CANDIDATES_PER_QUERY` bounds.
 fn knowledge_candidate_controlled(
     root: &Path,
     config: &Config,
@@ -1165,26 +1172,15 @@ fn knowledge_candidate_controlled(
 ) -> miette::Result<Prepared> {
     let mut related = candidate.linked_pages.clone();
     if let Some(discovery) = &candidate.discovery {
-        let limit = config
-            .execution
-            .effective_work()
-            .into_diagnostic()?
-            .max_query_candidates
-            .get();
         let ranked = discovery.ranked.as_ref().ok_or_else(|| {
             miette::miette!("synthesis discovery was loaded without its ranked roster")
         })?;
-        for (_, matches) in ranked {
-            let mut places = limit;
-            for matched in matches {
-                if matched.identity {
-                    related.push(matched.citation.clone());
-                } else if places > 0 {
-                    places -= 1;
-                    related.push(matched.citation.clone());
-                }
-            }
-        }
+        related.extend(
+            ranked
+                .iter()
+                .flat_map(|(_, roster)| roster)
+                .map(|matched| matched.citation.clone()),
+        );
     }
     related.sort();
     related.dedup();
@@ -1922,7 +1918,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             &lk_vault::ReadControl::default(),
         )
-        .unwrap();
+        .unwrap()
+        .candidates;
         (directory, config, tasks, candidates)
     }
 
@@ -2049,17 +2046,15 @@ mod tests {
         );
     }
     #[test]
-    fn synthesis_reads_only_the_ranked_roster_of_its_discovery_matches() {
-        let (directory, _, tasks, _) = synthesis_batch_fixture();
+    fn synthesis_reads_a_fixed_ranked_roster_and_only_its_own_audit_records() {
+        let (directory, config, tasks, _) = synthesis_batch_fixture();
         let root = directory.path().canonicalize().unwrap();
-        let config_path = root.join("config.yaml");
-        let mut yaml = std::fs::read_to_string(&config_path).unwrap();
-        yaml.push_str("execution:\n  work: {max_query_candidates: 1}\n");
-        std::fs::write(&config_path, yaml).unwrap();
-        let config = Config::load(&config_path).unwrap();
         let task = &tasks[0];
         let path = task.target.vault_path.as_str();
-        let discovered = ["wiki/documents/first.md", "wiki/documents/second.md"];
+        let limit = lk_graph::audit::SYNTHESIS_CANDIDATES_PER_QUERY;
+        let discovered = (0..limit + 2)
+            .map(|index| format!("wiki/documents/match-{index:03}.md"))
+            .collect::<Vec<_>>();
         for (index, address) in discovered.iter().enumerate() {
             write(
                 &root,
@@ -2093,10 +2088,105 @@ mod tests {
                 prepared
                     .resources
                     .iter()
-                    .any(|resource| resource.address == **address)
+                    .any(|resource| &resource.address == *address)
             })
-            .count();
-        assert_eq!(read, 1, "one ranked place, no identity match");
+            .collect::<Vec<_>>();
+        assert_eq!(read, discovered[..limit].iter().collect::<Vec<_>>());
+
+        let config_path = root.join("config.yaml");
+        let yaml = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(
+            &config_path,
+            format!("{yaml}execution:\n  work: {{max_query_candidates: 1}}\n"),
+        )
+        .unwrap();
+        let paced = Config::load(&config_path).unwrap();
+        assert_same_prepared(
+            &prepared,
+            &task_with_audit(&root, &paced, &task.task_id, None).unwrap(),
+        );
+
+        let store = root.join(".lorekeeper/knowledge-audit.json");
+        let mut audit: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        audit["entries"]["wiki/concepts/unrelated.md"] = json!({"unreadable": true});
+        std::fs::write(&store, audit.to_string()).unwrap();
+        assert!(
+            lk_graph::audit::load_selected_inputs(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                &[path.into()]
+            )
+            .is_err(),
+            "the audit still reports its unreadable record"
+        );
+        assert_same_prepared(
+            &prepared,
+            &task_with_audit(&root, &config, &task.task_id, None).unwrap(),
+        );
+
+        let recipe = audit["discovery"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        recipe["queries"] = json!([]);
+        std::fs::write(&store, audit.to_string()).unwrap();
+        let inputs = lk_graph::audit::load_synthesis_inputs_controlled(
+            &root,
+            &config.vault.dirs,
+            &pages,
+            &[path.to_owned()],
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(inputs.candidates.is_empty());
+        assert!(inputs.unavailable[path].contains("discovery recipe"));
+        assert!(
+            graph_citation_digest(&root, &config, path, &lk_vault::ReadControl::default())
+                .unwrap_err()
+                .downcast_ref::<super::super::super::queue::SynthesisHeld>()
+                .is_some()
+        );
+
+        let recipe = audit["discovery"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
+            .next()
+            .unwrap();
+        recipe["subject_revision"] = json!("an earlier revision");
+        recipe["queries"] = json!("unreadable");
+        std::fs::write(&store, audit.to_string()).unwrap();
+        let inputs = lk_graph::audit::load_synthesis_inputs_controlled(
+            &root,
+            &config.vault.dirs,
+            &pages,
+            &[path.to_owned()],
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(
+            inputs.unavailable.is_empty(),
+            "a recipe for an earlier revision is not read"
+        );
+        assert_eq!(inputs.candidates.len(), 1);
+
+        let raw = std::fs::read_to_string(&store).unwrap();
+        std::fs::write(&store, raw.replacen("{", "{\"pending\":[],", 1)).unwrap();
+        assert!(
+            lk_graph::audit::load_synthesis_inputs_controlled(
+                &root,
+                &config.vault.dirs,
+                &pages,
+                &[path.to_owned()],
+                &lk_vault::ReadControl::default(),
+            )
+            .is_err(),
+            "a duplicate field leaves the store ambiguous"
+        );
     }
 
     #[test]
@@ -2128,6 +2218,7 @@ mod tests {
                 &lk_vault::ReadControl::default(),
             )
             .unwrap()
+            .candidates
             .remove(0)
         };
         let raw = std::fs::read_to_string(root.join(path)).unwrap();

@@ -2960,6 +2960,9 @@ fn fresh_validation_failure(error: &miette::Report) -> miette::Report {
     if let Some(gone) = error.downcast_ref::<super::queue::TaskNotCurrent>() {
         return miette::Report::new(gone.clone());
     }
+    if let Some(held) = error.downcast_ref::<super::queue::SynthesisHeld>() {
+        return miette::Report::new(held.clone());
+    }
     miette::miette!("fresh work validation failed: {error:#}")
 }
 

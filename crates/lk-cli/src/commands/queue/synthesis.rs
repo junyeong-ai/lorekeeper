@@ -326,6 +326,7 @@ pub(super) fn apply(
                 );
             }
             Err(error) => {
+                let held = report.report.held;
                 report.failed += 1;
                 eprintln!("  ✗ {}: {error}", path.display());
                 let task = pending
@@ -344,6 +345,9 @@ pub(super) fn apply(
                     ) {
                         report.report.fail(fatal);
                         return Ok(report);
+                    }
+                    if report.report.held > held {
+                        report.failed -= 1;
                     }
                 } else {
                     report.report.fail(error);

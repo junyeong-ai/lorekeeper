@@ -306,6 +306,27 @@ impl std::fmt::Display for TaskNotCurrent {
 impl std::error::Error for TaskNotCurrent {}
 impl miette::Diagnostic for TaskNotCurrent {}
 
+/// A synthesis whose concept's own audit records cannot be read. Only that target waits for
+/// their repair: planning defers it and apply leaves its result staged.
+#[derive(Debug, Clone)]
+pub(in crate::commands) struct SynthesisHeld {
+    pub concept: String,
+    pub reason: String,
+}
+
+impl std::fmt::Display for SynthesisHeld {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "synthesis of {} is held: {}",
+            self.concept, self.reason
+        )
+    }
+}
+
+impl std::error::Error for SynthesisHeld {}
+impl miette::Diagnostic for SynthesisHeld {}
+
 pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTask> {
     select_task(root, task_id, TaskSelection::Current)
 }
@@ -803,12 +824,13 @@ async fn apply(
         );
     }
     eprintln!(
-        "queue apply: {} applied, {} dropped, {} failed, {} orphaned, {} superseded{}",
+        "queue apply: {} applied, {} dropped, {} failed, {} orphaned, {} superseded, {} held{}",
         report.applied,
         report.dropped,
         report.rejected + usize::from(report.fatal.is_some()),
         report.orphaned,
         report.superseded,
+        report.held,
         if dry_run { " (dry-run)" } else { "" }
     );
     if report.ok {

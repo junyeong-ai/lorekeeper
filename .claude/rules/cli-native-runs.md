@@ -9,8 +9,9 @@ paths:
 ## Native runs (`commands/run.rs`, `execution.rs`)
 
 - Audit captures require current candidate decisions. Synthesis loads its inputs through
-  `lk_graph::audit::load_synthesis_inputs_controlled`, which never reads the audit
-  selection store, so a missing or invalid screening file stays the audit's error; audit readiness cannot block its
+  `lk_graph::audit::load_synthesis_inputs_controlled`, which reads only each concept's own
+  assessment and discovery recipe and never the selection store: a defect there holds that
+  target with its reason, and any other audit record stays the audit's error; audit readiness cannot block its
   prerequisite queue tasks. Existing Work compares fresh subject/input
   identity before ready-only audit capture so valid scope drift remains a typed replan.
   Deferral counts track encountered subject paths independently of bounded details.

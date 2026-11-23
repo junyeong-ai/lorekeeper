@@ -1138,17 +1138,27 @@ fn load_controlled(
     root: &Path,
     read: &lk_vault::ReadControl,
 ) -> Result<(Option<String>, Receipts), GraphError> {
-    read.check().map_err(GraphError::from)?;
-    let path = lk_vault::page_path(root, Path::new(STATE)).map_err(error)?;
-    match read.read_to_string(&path) {
-        Ok(raw) => {
+    match load_controlled_raw(root, read)? {
+        Some(raw) => {
             let state = serde_json::from_str(&raw).map_err(error)?;
             Ok((Some(raw), state))
         }
+        None => Ok((None, Receipts::default())),
+    }
+}
+
+fn load_controlled_raw(
+    root: &Path,
+    read: &lk_vault::ReadControl,
+) -> Result<Option<String>, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    let path = lk_vault::page_path(root, Path::new(STATE)).map_err(error)?;
+    match read.read_to_string(&path) {
+        Ok(raw) => Ok(Some(raw)),
         Err(lk_vault::VaultError::Io(failure))
             if failure.kind() == std::io::ErrorKind::NotFound =>
         {
-            Ok((None, Receipts::default()))
+            Ok(None)
         }
         Err(failure) => Err(GraphError::from(failure)),
     }
@@ -1898,6 +1908,89 @@ fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, A
         .collect()
 }
 
+/// Discovery matches a synthesis reads per query besides its identity matches. A fixed
+/// semantic policy, so every run and profile reconstructs the same read scope for a result.
+pub const SYNTHESIS_CANDIDATES_PER_QUERY: usize = 50;
+
+/// Each query's roster for a synthesis: every identity match and the first
+/// `SYNTHESIS_CANDIDATES_PER_QUERY` other pages in search order, one per verified owner and never
+/// the subject. A page reached through several spellings is read through its own address when
+/// any query matched that spelling, otherwise through its preferred rostered one.
+/// `owners` caches owner resolution across the concepts of one load.
+fn synthesis_roster(
+    root: &Path,
+    subject: &Path,
+    queries: &[lk_vault::DiscoveryQuery],
+    ranked: &BTreeMap<lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>>,
+    owners: &mut BTreeMap<String, PathBuf>,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<(lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>)>, GraphError> {
+    let mut rosters = Vec::new();
+    for query in queries {
+        let mut seen = BTreeSet::new();
+        let mut places = SYNTHESIS_CANDIDATES_PER_QUERY;
+        let mut roster = Vec::new();
+        for matched in &ranked[query] {
+            read.check().map_err(GraphError::from)?;
+            if !matched.identity && places == 0 {
+                continue;
+            }
+            let owner = match owners.get(&matched.citation.path) {
+                Some(owner) => owner.clone(),
+                None => {
+                    let owner =
+                        lk_vault::resolve_page_owner(root, Path::new(&matched.citation.path))
+                            .map_err(error)?;
+                    owners.insert(matched.citation.path.clone(), owner.clone());
+                    owner
+                }
+            };
+            if owner == subject || !seen.insert(owner.clone()) {
+                continue;
+            }
+            if !matched.identity {
+                places -= 1;
+            }
+            roster.push((owner, matched));
+        }
+        rosters.push((query.clone(), roster));
+    }
+    let direct = queries
+        .iter()
+        .flat_map(|query| &ranked[query])
+        .map(|matched| (matched.citation.path.as_str(), &matched.citation))
+        .collect::<BTreeMap<_, _>>();
+    let mut preferred = BTreeMap::<&PathBuf, &Citation>::new();
+    for (owner, matched) in rosters.iter().flat_map(|(_, roster)| roster) {
+        let citation = direct
+            .get(page_address(owner).as_str())
+            .copied()
+            .unwrap_or(&matched.citation);
+        let kept = preferred.entry(owner).or_insert(citation);
+        if lk_vault::DiscoveryCandidate::preferred_path(
+            &page_address(owner),
+            &citation.path,
+            &kept.path,
+        ) == citation.path
+        {
+            *kept = citation;
+        }
+    }
+    Ok(rosters
+        .iter()
+        .map(|(query, roster)| {
+            let roster = roster
+                .iter()
+                .map(|(owner, matched)| lk_vault::RankedMatch {
+                    citation: preferred[owner].clone(),
+                    identity: matched.identity,
+                })
+                .collect();
+            (query.clone(), roster)
+        })
+        .collect())
+}
+
 /// Who reads the inputs. Screening state belongs to the audit; a synthesis shares the
 /// citations, direct links and discovery matches without loading or validating it.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1982,8 +2075,14 @@ fn inputs_from_evidence(
         }
         queries.extend(plan.queries.clone());
     }
-    let discovered = lk_vault::discover_query_matches_controlled(root, dirs, &queries, read)
-        .map_err(GraphError::from)?;
+    let discovered = match input_use {
+        InputUse::Audit => lk_vault::discover_query_matches_controlled(root, dirs, &queries, read),
+        InputUse::Synthesis => {
+            lk_vault::discover_ranked_query_matches_controlled(root, dirs, &queries, read)
+        }
+    }
+    .map_err(GraphError::from)?;
+    let mut owners = BTreeMap::new();
     let mut result = Vec::new();
     for page in pages.iter().filter(|page| selected(&page.path)) {
         let kind = kinds[&page.path];
@@ -2050,15 +2149,14 @@ fn inputs_from_evidence(
                 .flat_map(|query| discovered.matches[query].clone())
                 .filter(|citation| citation.path != page_address(&page.path))
                 .collect::<Vec<_>>();
-            let mut owners = BTreeMap::new();
-            if selection_plan.is_some() || input_use == InputUse::Synthesis {
+            if selection_plan.is_some() {
                 let owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
                 let mut distinct = Vec::new();
                 for citation in matches {
-                    let matched = lk_vault::resolve_page_owner(root, Path::new(&citation.path))
-                        .map_err(error)?;
-                    if matched != owner {
-                        owners.insert(citation.clone(), matched);
+                    if lk_vault::resolve_page_owner(root, Path::new(&citation.path))
+                        .map_err(error)?
+                        != owner
+                    {
                         distinct.push(citation);
                     }
                 }
@@ -2066,42 +2164,17 @@ fn inputs_from_evidence(
             }
             matches.sort();
             matches.dedup();
-            let ranked = (input_use == InputUse::Synthesis).then(|| {
-                let mut preferred = BTreeMap::<&PathBuf, &Citation>::new();
-                for (citation, owner) in &owners {
-                    let address = page_address(owner);
-                    preferred
-                        .entry(owner)
-                        .and_modify(|kept| {
-                            if lk_vault::DiscoveryCandidate::preferred_path(
-                                &address,
-                                &citation.path,
-                                &kept.path,
-                            ) == citation.path
-                            {
-                                *kept = citation;
-                            }
-                        })
-                        .or_insert(citation);
-                }
-                plan.queries
-                    .iter()
-                    .map(|query| {
-                        let mut seen = BTreeSet::new();
-                        let ranked = discovered.ranked[query]
-                            .iter()
-                            .filter_map(|matched| {
-                                let owner = owners.get(&matched.citation)?;
-                                seen.insert(owner).then(|| lk_vault::RankedMatch {
-                                    citation: preferred[owner].clone(),
-                                    identity: matched.identity,
-                                })
-                            })
-                            .collect();
-                        (query.clone(), ranked)
-                    })
-                    .collect()
-            });
+            let ranked = match &discovered.ranked {
+                Some(ranked) => Some(synthesis_roster(
+                    root,
+                    &lk_vault::resolve_page_owner(root, &page.path).map_err(error)?,
+                    &plan.queries,
+                    ranked,
+                    &mut owners,
+                    read,
+                )?),
+                None => None,
+            };
             let selection = selection_plan
                 .map(|selection| {
                     selection::project(
@@ -2226,23 +2299,161 @@ pub fn load_selected_inputs_controlled(
     selection: &[String],
     read: &lk_vault::ReadControl,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
-    let selected = load_inputs(root, dirs, pages, selection, InputUse::Audit, read)?;
+    read.check().map_err(GraphError::from)?;
+    let (_, receipts) = load_controlled(root, read)?;
+    let selected = load_inputs(
+        root,
+        dirs,
+        pages,
+        selection,
+        InputUse::Audit,
+        &receipts,
+        read,
+    )?;
     measure_inputs_controlled(root, &selected, u64::MAX, read)?;
     Ok(selected)
 }
 
+/// Inputs for synthesizing exact concepts, and the concepts whose own audit records could not be
+/// read, each with why; a synthesis of those is held while the others continue.
+pub struct SynthesisInputs {
+    pub candidates: Vec<AuditCandidate>,
+    pub unavailable: BTreeMap<String, String>,
+}
+
 /// Synthesis inputs for exact concepts: citations, direct links and current discovery with
-/// its ranked matches, without the audit's screening state.
+/// its ranked roster, without the audit's screening state or unrelated audit records.
 pub fn load_synthesis_inputs_controlled(
     root: &Path,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     concepts: &[String],
     read: &lk_vault::ReadControl,
-) -> Result<Vec<AuditCandidate>, GraphError> {
-    let selected = load_inputs(root, dirs, pages, concepts, InputUse::Synthesis, read)?;
-    measure_inputs_controlled(root, &selected, u64::MAX, read)?;
-    Ok(selected)
+) -> Result<SynthesisInputs, GraphError> {
+    let (receipts, unavailable) = load_synthesis_receipts(root, pages, concepts, read)?;
+    let available = concepts
+        .iter()
+        .filter(|concept| !unavailable.contains_key(*concept))
+        .cloned()
+        .collect::<Vec<_>>();
+    let candidates = load_inputs(
+        root,
+        dirs,
+        pages,
+        &available,
+        InputUse::Synthesis,
+        &receipts,
+        read,
+    )?;
+    measure_inputs_controlled(root, &candidates, u64::MAX, read)?;
+    Ok(SynthesisInputs {
+        candidates,
+        unavailable,
+    })
+}
+
+/// The audit records a synthesis of `concepts` reads: each concept's latest assessment and its
+/// discovery recipe for the current page revision, decoded one by one. The store's shape is
+/// checked as a whole; every other record, a recipe for an earlier revision and the audit-only
+/// screening state inside a recipe stay the audit's to validate.
+fn load_synthesis_receipts(
+    root: &Path,
+    pages: &[ScannedPage],
+    concepts: &[String],
+    read: &lk_vault::ReadControl,
+) -> Result<(Receipts, BTreeMap<String, String>), GraphError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Store {
+        entries: serde_json::Map<String, serde_json::Value>,
+        #[serde(rename = "pending")]
+        _pending: Vec<serde::de::IgnoredAny>,
+        #[serde(rename = "next_class")]
+        _next_class: AuditClass,
+        #[serde(default)]
+        discovery: serde_json::Map<String, serde_json::Value>,
+        #[serde(default, rename = "last_merges")]
+        _last_merges: Option<serde::de::IgnoredAny>,
+        #[serde(default, rename = "selection_assessments")]
+        _selection_assessments: Option<serde::de::IgnoredAny>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Recipe {
+        subject_revision: String,
+        queries: Vec<lk_vault::DiscoveryQuery>,
+        #[serde(default, rename = "selection")]
+        _selection: Option<serde::de::IgnoredAny>,
+    }
+    let mut receipts = Receipts::default();
+    let mut unavailable = BTreeMap::new();
+    let Some(raw) = load_controlled_raw(root, read)? else {
+        return Ok((receipts, unavailable));
+    };
+    let store = lk_core::json::decode_object(raw.as_bytes())
+        .and_then(serde_json::from_value::<Store>)
+        .map_err(error)?;
+    let revisions = pages
+        .iter()
+        .map(|page| (page_address(&page.path), page.revision.as_deref()))
+        .collect::<BTreeMap<_, _>>();
+    for concept in concepts {
+        read.check().map_err(GraphError::from)?;
+        let address = page_address(Path::new(concept));
+        let entry = store
+            .entries
+            .get(&address)
+            .map(|value| serde_json::from_value::<AuditAssessment>(value.clone()))
+            .transpose()
+            .map_err(|failure| format!("assessment record: {failure}"));
+        let current = revisions.get(&address).copied().flatten();
+        let recipe = store
+            .discovery
+            .get(&address)
+            .filter(|value| {
+                value
+                    .get("subject_revision")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|revision| Some(revision) == current)
+            })
+            .map(|value| serde_json::from_value::<Recipe>(value.clone()))
+            .transpose()
+            .map_err(|failure| format!("discovery recipe: {failure}"))
+            .and_then(|recipe| match recipe {
+                Some(recipe)
+                    if recipe.queries.is_empty()
+                        || recipe.queries.len() > 16
+                        || recipe.queries.iter().any(|query| query.validate().is_err()) =>
+                {
+                    Err("discovery recipe: requires 1..16 valid queries".to_owned())
+                }
+                recipe => Ok(recipe),
+            });
+        match (entry, recipe) {
+            (Ok(entry), Ok(recipe)) => {
+                if let Some(entry) = entry {
+                    receipts.entries.insert(address.clone(), entry);
+                }
+                if let Some(recipe) = recipe {
+                    receipts.discovery.insert(
+                        address,
+                        DiscoveryPlan {
+                            subject_revision: recipe.subject_revision,
+                            queries: recipe.queries,
+                            selection: None,
+                        },
+                    );
+                }
+            }
+            (Err(failure), _) | (_, Err(failure)) => {
+                unavailable.insert(
+                    concept.clone(),
+                    format!("unreadable audit {failure}; repair {STATE}"),
+                );
+            }
+        }
+    }
+    Ok((receipts, unavailable))
 }
 
 fn load_inputs(
@@ -2251,6 +2462,7 @@ fn load_inputs(
     pages: &[ScannedPage],
     selection: &[String],
     input_use: InputUse,
+    receipts: &Receipts,
     read: &lk_vault::ReadControl,
 ) -> Result<Vec<AuditCandidate>, GraphError> {
     read.check().map_err(GraphError::from)?;
@@ -2264,13 +2476,11 @@ fn load_inputs(
     if selection.is_empty() {
         return Ok(Vec::new());
     }
-    read.check().map_err(GraphError::from)?;
-    let (_, receipts) = load_controlled(root, read)?;
     let candidates = inputs_controlled(
         root,
         dirs,
         pages,
-        &receipts,
+        receipts,
         input_use,
         &Scope::Selection(unique),
         read,

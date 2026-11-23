@@ -121,10 +121,13 @@ schema generation replaces that file wholesale.
    warnings. `orphaned` results match no pending request, usually because it was
    retired while they were drafted; they are already quarantined, so note them and
    continue. A `superseded` synthesis was drafted for a read scope or target that
-   has since changed; draft its pending request again from its current context. Report `rejected`
+   has since changed; draft its pending request again from its current context. A `held`
+   synthesis stays staged because its concept's own audit record is unreadable; report
+   it with its reason for repair and do not redraft it. Report `rejected`
    task IDs and errors; retain their queue files.
-   Do not assume rollback or blindly retry. On any other task failure, stop that
-   file and report it. Retrying reclassifies completed work instead of rewriting it.
+   Do not assume rollback or blindly retry. When `work context` or `work plan` reports
+   `synthesis of … is held`, only that request waits: report it and continue with the
+   file's other requests. On any other task failure, stop that file and report it. Retrying reclassifies completed work instead of rewriting it.
 
 **A selected call stops here.** Report the exact selection's result and any
 unfinished bounded work. Do not prune, reconcile global backlinks, drain newly queued
@@ -136,7 +139,7 @@ After each file, recheck status and use `lore queue prune --json`. Prune preserv
 current, unreadable and unparseable work; a blocked file is not completed.
 
 If any task was processed, run these publication stages. Apply's report must have no
-`fatal` or `rejected` group (`orphaned` and `superseded` groups are handled as above); backlinks
+`fatal` or `rejected` group (`orphaned`, `superseded` and `held` groups are handled as above); backlinks
 reconciliation requires exit 0:
 
 ```bash

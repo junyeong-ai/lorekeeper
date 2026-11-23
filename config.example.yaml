@@ -566,7 +566,7 @@ execution:
     max_parallel: 1               # concurrent evidence observers / distinct-target screening; bounded by remaining calls
     max_consecutive_calls: 4      # positive per-target phase quantum; uses the same total call budget
     # max_screening_batches: 8    # optional limit on the packets undecided candidate cards need; exceeding it defers, never clips
-    max_query_candidates: 50      # ranked candidates each extraction/synthesis discovery query adds besides identity matches
+    max_query_candidates: 50      # ranked candidates each extraction discovery query adds besides its identity matches
   profiles:
     primary:
       engine: claude-code

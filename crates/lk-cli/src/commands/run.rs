@@ -529,6 +529,7 @@ mod native {
         rejected: usize,
         orphaned: usize,
         superseded: usize,
+        held: usize,
         latest: Option<crate::commands::queue::application::Report>,
     }
 
@@ -1202,6 +1203,7 @@ mod native {
             self.result.queue_application.rejected += report.rejected;
             self.result.queue_application.orphaned += report.orphaned;
             self.result.queue_application.superseded += report.superseded;
+            self.result.queue_application.held += report.held;
             for group in &report.groups {
                 if let (
                     crate::commands::queue::application::Outcome::Superseded { .. },
@@ -1215,12 +1217,13 @@ mod native {
                 }
             }
             let detail = format!(
-                "{} applied, {} dropped, {} rejected, {} orphaned, {} superseded; {}",
+                "{} applied, {} dropped, {} rejected, {} orphaned, {} superseded, {} held; {}",
                 report.applied,
                 report.dropped,
                 report.rejected,
                 report.orphaned,
                 report.superseded,
+                report.held,
                 if can_continue {
                     "independent work may continue"
                 } else {
@@ -3712,6 +3715,12 @@ mod native {
                             self.record_work_step(metrics);
                             return WorkStep::Deferred(reason);
                         }
+                        if let Some(held) =
+                            error.downcast_ref::<crate::commands::queue::SynthesisHeld>()
+                        {
+                            self.record_work_step(metrics);
+                            return WorkStep::Deferred(held.to_string());
+                        }
                         self.record_work_step(metrics);
                         self.failure("bounded work completion", error);
                         return WorkStep::Failed;
@@ -4887,17 +4896,24 @@ mod native {
                         self.supervisor.read_control(),
                     )
                     .map_err(|error| miette::miette!("{error}"))?;
-                    lk_graph::audit::load_synthesis_inputs_controlled(
+                    let inputs = lk_graph::audit::load_synthesis_inputs_controlled(
                         session.root(),
                         &self.config.vault.dirs,
                         &pages,
                         &synthesis_paths,
                         self.supervisor.read_control(),
                     )
-                    .map_err(|error| miette::miette!("{error}"))?
-                    .into_iter()
-                    .map(|candidate| (candidate.path.clone(), candidate))
-                    .collect()
+                    .map_err(|error| miette::miette!("{error}"))?;
+                    for (target, reason) in inputs.unavailable {
+                        keys.remove(&target);
+                        materialize.retain(|task| task.target.vault_path != target);
+                        deferred.insert(target, vec![reason]);
+                    }
+                    inputs
+                        .candidates
+                        .into_iter()
+                        .map(|candidate| (candidate.path.clone(), candidate))
+                        .collect()
                 };
                 self.result.queue_planning.prepared_targets += materialize.len();
                 let (prepared, captures) = crate::commands::work::prepare_tasks_with_audit(
@@ -5426,7 +5442,7 @@ mod native {
                                     return self.failure("selected queue rejection", error);
                                 }
                             };
-                        let superseded = self
+                        let set_aside = self
                             .result
                             .queue_application
                             .latest
@@ -5436,6 +5452,7 @@ mod native {
                                 matches!(
                                     group.outcome,
                                     crate::commands::queue::application::Outcome::Superseded { .. }
+                                        | crate::commands::queue::application::Outcome::Held { .. }
                                 )
                             })
                             .filter_map(|group| group.identity.as_ref())
@@ -5443,7 +5460,7 @@ mod native {
                             .collect::<std::collections::BTreeSet<_>>();
                         if unfinished.iter().all(|task| {
                             let key = (task.task_id.clone(), task.cache_hash.clone());
-                            rejected.contains_key(&key) || superseded.contains(&key)
+                            rejected.contains_key(&key) || set_aside.contains(&key)
                         }) {
                             continue 'planning;
                         }

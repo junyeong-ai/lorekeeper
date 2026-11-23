@@ -2342,6 +2342,84 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
     }
 }
 
+/// A synthesis whose own audit recipe is unreadable is held with its result staged, also when
+/// another refusal (here an empty body) meets the hold while recording its scope, while an
+/// independent synthesis publishes; repairing the recipe lets the held result apply.
+#[test]
+fn a_synthesis_with_an_unreadable_own_audit_recipe_is_held_while_others_publish() {
+    let ws = Workspace::new();
+    let mut staged = Vec::new();
+    for name in ["alpha", "beta", "gamma"] {
+        let source_path = format!("wiki/documents/{name}-source.md");
+        let source = format!("---\ntype: document\n---\nSee [{name}](../concepts/{name}.md).\n");
+        ws.write(&source_path, &source);
+        let citation = lk_core::concept::Citation::new(
+            Path::new(&source_path),
+            &lk_core::frontmatter::parse_page(&source).unwrap(),
+        );
+        let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+        let target = format!("wiki/concepts/{name}.md");
+        ws.write(
+            &target,
+            &format!("---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nPrior.\n\n## Related\n"),
+        );
+        let task = serde_json::json!({"task_id":name, "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+            "input":{"locale":"en","citations":[citation],"related_anchor":"## Related"}, "target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
+        ws.write(
+            &format!(".lorekeeper/queue/{name}.jsonl"),
+            &task.to_string(),
+        );
+        let context = work_json(&ws, &["work", "context", "--task-id", name]);
+        let result = serde_json::json!({"task_id":name,"cache_hash":hash,
+            "target_revision":context["subject"]["target_revision"],"context_revision":context["context_revision"],
+            "synthesis":if name == "gamma" { String::new() } else { format!("The {name} source states its scope.") },"related":""});
+        let path = format!(".lorekeeper/queue/results/{name}.synthesis.json");
+        ws.write(&path, &result.to_string());
+        staged.push((target, path, result.to_string()));
+    }
+    let store = |recipe: serde_json::Value| {
+        serde_json::json!({"entries":{},"pending":[],"next_class":"changed","discovery":recipe})
+            .to_string()
+    };
+    ws.write(
+        ".lorekeeper/knowledge-audit.json",
+        &store(serde_json::json!({
+            "wiki/concepts/alpha.md":{"queries":"unreadable"},
+            "wiki/concepts/gamma.md":{"queries":"unreadable"},
+        })),
+    );
+    let output = ws.run(&["queue", "apply", "--json"]);
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["held"], 2);
+    assert_eq!(report["applied"], 1);
+    assert!(report["fatal"].is_null());
+    let (alpha_target, alpha_result, alpha_raw) = &staged[0];
+    assert_eq!(ws.read(alpha_result), *alpha_raw);
+    assert!(ws.read(alpha_target).contains("Prior."));
+    assert!(
+        ws.read(&staged[1].0)
+            .contains("The beta source states its scope.")
+    );
+
+    assert_eq!(ws.read(&staged[2].1), staged[2].2);
+    std::fs::remove_file(ws.vault().join(&staged[2].1)).unwrap();
+    ws.write(
+        ".lorekeeper/knowledge-audit.json",
+        &store(serde_json::json!({})),
+    );
+    let output = ws.run(&["queue", "apply"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        ws.read(alpha_target)
+            .contains("The alpha source states its scope.")
+    );
+}
+
 #[test]
 fn orphan_synthesis_is_preserved_with_a_reason_and_does_not_fail_forever() {
     let ws = Workspace::new();

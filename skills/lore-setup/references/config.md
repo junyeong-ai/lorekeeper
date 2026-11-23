@@ -223,8 +223,7 @@ work. Use `lore work cost --task-id ID` to inspect counts/JSON bytes without wri
 Positive `max_query_candidates` defaults to 50. Each extraction discovery query
 contributes the pages it names by identity plus that many best other matches in search
 order; `lore work cost` reports per query how many pages matched and how many are
-rostered. Unrostered matches are not examined. Concept synthesis reads its discovery
-matches under the same ranked bound. Audit discovery keeps every match.
+rostered. Unrostered matches are not examined. Audit discovery keeps every match.
 The same scope limit covers fresh audit discovery; `lore wiki audit-candidates SUBJECT`
 reports its current packet, progress and admission without writes. Existing legacy
 audit recipes retain full-context reading, and completed screening needs no new calls.

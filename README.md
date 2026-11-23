@@ -158,7 +158,7 @@ DOCX·XLSX·PDF·이미지는 [전처리 설정](skills/lore-setup/references/co
 그래서 예산에 걸려 멈춘 실행도 이미 끝난 호출을 반복하지 않고 이어서 진행합니다. [대용량 작업](skills/lore-process/references/bounded-work.md)을 참고하세요.
 개념 추출은 소스마다 질의별로 검색 순위가 높은 기존 페이지 최대 `execution.work.max_query_candidates`개(기본 50개)와
 이름·별칭이 정확히 일치하는 페이지를 비교합니다. 개념 합성은 인용 페이지와 직접 링크한 개념을 모두 읽고,
-탐색 일치 페이지는 같은 상한으로 읽습니다. [탐색 안내](skills/lore-process/references/discovery.md)를 참고하세요.
+탐색 일치 페이지는 질의별 상위 50개와 이름 일치 페이지만 읽습니다. [탐색 안내](skills/lore-process/references/discovery.md)를 참고하세요.
 
 자동 감사는 `graph.audit.subjects`에 지정한 유형(기본값은 개념)만 계획합니다. 변경된 주제와 아직 평가하지 않은 주제를 번갈아 고르고,
 각 묶음 안에서는 검토 의무, 후속 조치 기록, 인용 페이지 수, 이미 시작한 탐색 순으로 진행합니다. `lore status`의 audit 행은

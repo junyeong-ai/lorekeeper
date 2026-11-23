@@ -574,7 +574,11 @@ pub(in crate::commands) fn finish_selected_controlled(
                 &mut guards,
                 prepared.read_control(),
             ) {
-                if crate::commands::queue::application::is_citations_changed(&error) {
+                if crate::commands::queue::application::is_citations_changed(&error)
+                    || error
+                        .downcast_ref::<crate::commands::queue::SynthesisHeld>()
+                        .is_some()
+                {
                     return Ok(SelectedFinish::ScopeChanged);
                 }
                 let Some(refusal) = error

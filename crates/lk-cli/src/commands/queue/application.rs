@@ -45,15 +45,17 @@ pub(in crate::commands) fn rejection(
     })
 }
 
-/// Whether a fresh guard refused because semantic inputs changed after they were captured.
+/// Whether a fresh guard refused because semantic inputs changed after they were captured,
+/// including a synthesis whose own audit records became unreadable: replanning holds it.
 pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -> bool {
-    matches!(
-        error.downcast_ref::<PublicationRejection>(),
-        Some(rejection) if matches!(
-            rejection.kind,
-            RejectionKind::SemanticContextChanged | RejectionKind::CitationsChanged
+    error.downcast_ref::<super::SynthesisHeld>().is_some()
+        || matches!(
+            error.downcast_ref::<PublicationRejection>(),
+            Some(rejection) if matches!(
+                rejection.kind,
+                RejectionKind::SemanticContextChanged | RejectionKind::CitationsChanged
+            )
         )
-    )
 }
 
 /// Whether a fresh validation found a Work's inputs moved on since its request was prepared:
@@ -206,6 +208,11 @@ pub(in crate::commands) enum Outcome {
         kind: RejectionKind,
         detail: String,
     },
+    /// The target's own inputs cannot be read, so the result can be neither judged nor
+    /// published. It stays staged and applies once they are repaired.
+    Held {
+        detail: String,
+    },
     Rejected {
         kind: RejectionKind,
         detail: String,
@@ -247,6 +254,11 @@ impl<'de> Deserialize<'de> for Group {
                 kind: RejectionKind,
                 detail: String,
             },
+            Held {
+                identity: Option<TaskIdentity>,
+                proposals: Vec<Proposal>,
+                detail: String,
+            },
             Rejected {
                 identity: Option<TaskIdentity>,
                 proposals: Vec<Proposal>,
@@ -277,6 +289,11 @@ impl<'de> Deserialize<'de> for Group {
                 kind,
                 detail,
             } => (identity, proposals, Outcome::Superseded { kind, detail }),
+            Wire::Held {
+                identity,
+                proposals,
+                detail,
+            } => (identity, proposals, Outcome::Held { detail }),
             Wire::Rejected {
                 identity,
                 proposals,
@@ -322,6 +339,8 @@ pub(in crate::commands) struct Report {
     /// Groups set aside because their pending request's read scope changed; it is redrafted
     /// and independent work continues.
     pub superseded: usize,
+    /// Groups left staged because their target's own inputs cannot be read.
+    pub held: usize,
     pub quarantined: usize,
     pub unreadable: usize,
     pub groups: Vec<Group>,
@@ -338,6 +357,7 @@ impl Default for Report {
             rejected: 0,
             orphaned: 0,
             superseded: 0,
+            held: 0,
             quarantined: 0,
             unreadable: 0,
             groups: Vec::new(),
@@ -390,7 +410,17 @@ impl Report {
                     .iter()
                     .filter(|group| matches!(group.outcome, Outcome::Superseded { .. }))
                     .count()
-            && self.ok == (self.rejected == 0 && self.orphaned == 0 && self.superseded == 0)
+            && self.held
+                == self
+                    .groups
+                    .iter()
+                    .filter(|group| matches!(group.outcome, Outcome::Held { .. }))
+                    .count()
+            && self.ok
+                == (self.rejected == 0
+                    && self.orphaned == 0
+                    && self.superseded == 0
+                    && self.held == 0)
             && self.groups.iter().all(|group| match &group.outcome {
                 Outcome::Rejected { receipt, scope, .. } => {
                     group.identity.as_ref().is_some_and(TaskIdentity::is_valid)
@@ -429,6 +459,7 @@ impl Report {
             rejected,
             orphaned,
             superseded,
+            held,
             quarantined,
             unreadable,
             groups,
@@ -440,6 +471,7 @@ impl Report {
         self.rejected += rejected;
         self.orphaned += orphaned;
         self.superseded += superseded;
+        self.held += held;
         self.quarantined += quarantined;
         self.unreadable += unreadable;
         self.groups.extend(groups);
@@ -463,6 +495,10 @@ impl Report {
             }
             Outcome::Superseded { .. } => {
                 self.superseded += 1;
+                self.ok = false;
+            }
+            Outcome::Held { .. } => {
+                self.held += 1;
                 self.ok = false;
             }
             Outcome::Rejected { .. } => {
@@ -514,6 +550,9 @@ pub(super) fn reject_group(
     error: &miette::Report,
     session: Option<&lk_vault::MutationSession>,
 ) -> miette::Result<()> {
+    if let Some(held) = error.downcast_ref::<super::SynthesisHeld>() {
+        return hold_group(report, root, task, snapshots, held);
+    }
     let Some(rejection) = error.downcast_ref::<PublicationRejection>() else {
         return Err(miette::miette!("{error}"));
     };
@@ -544,21 +583,20 @@ pub(super) fn reject_group(
         );
         return Ok(());
     }
-    let (receipt, scope) = if let Some(session) = session {
-        let (receipt, scope) = super::rejections::record(
-            session,
-            config,
-            config_revision,
-            task,
-            snapshots,
-            rejection,
-        )?;
-        (Some(receipt), scope)
-    } else {
-        (
-            None,
-            super::rejections::observe_scope(root, config, config_revision, task, snapshots)?.0,
-        )
+    let recorded = match session {
+        Some(session) => {
+            super::rejections::record(session, config, config_revision, task, snapshots, rejection)
+                .map(|(receipt, scope)| (Some(receipt), scope))
+        }
+        None => super::rejections::observe_scope(root, config, config_revision, task, snapshots)
+            .map(|(scope, _)| (None, scope)),
+    };
+    let (receipt, scope) = match recorded {
+        Ok(recorded) => recorded,
+        Err(error) => match error.downcast_ref::<super::SynthesisHeld>() {
+            Some(held) => return hold_group(report, root, task, snapshots, held),
+            None => return Err(error),
+        },
     };
     report.outcome(
         Some(identity),
@@ -568,6 +606,24 @@ pub(super) fn reject_group(
             detail: rejection.detail.clone(),
             scope,
             receipt,
+        },
+    );
+    Ok(())
+}
+
+/// A group whose target's own inputs cannot be read stays staged, judged once they are repaired.
+fn hold_group(
+    report: &mut Report,
+    root: &Path,
+    task: &lk_queue::QueueTask,
+    snapshots: &[ProposalSnapshot],
+    held: &super::SynthesisHeld,
+) -> miette::Result<()> {
+    report.outcome(
+        Some(TaskIdentity::capture(root, task)?),
+        snapshots,
+        Outcome::Held {
+            detail: held.to_string(),
         },
     );
     Ok(())

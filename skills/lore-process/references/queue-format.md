@@ -37,13 +37,15 @@ one agreed value before retrying; adding a third draft does not resolve the conf
 
 `lore queue apply --json` emits a typed report even when application fails. `ok`
 matches the exit verdict. Counts and `groups` distinguish applied, dropped, retained
-rejected, orphaned and superseded proposals; each known group carries its task/cache/target owner
+rejected, orphaned, superseded and held proposals; each known group carries its task/cache/target owner
 and exact proposal file revisions. An orphaned group's exact task id and cache hash
 match no pending task, usually because its request was retired while it was drafted;
 it is moved to `results/orphaned/` with a reason file and independent groups continue.
 A superseded synthesis group answers a read scope or target its pending request no longer has; it
 is moved to `results/superseded/` with a reason file and the request stays pending to be
-drafted again from its current context. Rejected groups include their current validation
+drafted again from its current context. A held synthesis group stays staged because its
+concept's own audit assessment or discovery recipe cannot be read; once that record is
+repaired it is validated again, and a changed recipe supersedes it. Rejected groups include their current validation
 scope and receipt. `fatal` reports a failure whose ownership or safety could not be
 established; partial publications remain real.
 
@@ -58,7 +60,8 @@ storage failures and unknown state (`fatal`) stop further work; orphaned and rej
 groups do not. A standalone session reads the same report: on `fatal` it stops and
 reports; `orphaned` groups are already quarantined and need no retry, so it inspects
 them in `results/orphaned/` and continues with remaining tasks; a `superseded` group's
-request is drafted again from its current context; `rejected` groups are
+request is drafted again from its current context; a `held` group is reported with its
+reason and left staged; `rejected` groups are
 reported with their task IDs and retained for review.
 
 ## Queue task schema

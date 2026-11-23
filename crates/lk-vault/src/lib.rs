@@ -62,6 +62,7 @@ pub use self::discovery::{
     capture_discovery_batch, capture_discovery_batch_controlled, capture_discovery_batch_measured,
     capture_discovery_batch_with_inventory, capture_discovery_with_reviews, discover_queries,
     discover_queries_controlled, discover_query_matches_controlled,
+    discover_ranked_query_matches_controlled,
 };
 pub use self::document::{
     DocumentContent, DocumentOptions, DocumentSection, DocumentView, inspect_document,

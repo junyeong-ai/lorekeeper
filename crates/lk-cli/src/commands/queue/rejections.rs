@@ -556,8 +556,24 @@ pub(in crate::commands) fn blocked_tasks_controlled(
         let current = TaskIdentity::capture(&root, task);
         read.check().into_diagnostic()?;
         let current = current?;
-        let (scope, _) =
-            observe_scope_controlled(&root, config, config_revision, task, snapshots, read)?;
+        let scope =
+            match observe_scope_controlled(&root, config, config_revision, task, snapshots, read) {
+                Ok((scope, _)) => scope,
+                Err(error) => match error.downcast_ref::<super::SynthesisHeld>() {
+                    Some(held) => {
+                        blocked.insert(
+                            key,
+                            BlockedTask {
+                                owner: current.owner,
+                                reason: held.to_string(),
+                                needs_revalidation: false,
+                            },
+                        );
+                        continue;
+                    }
+                    None => return Err(error),
+                },
+            };
         let proposals = snapshots
             .iter()
             .map(|snapshot| snapshot.proposal.clone())

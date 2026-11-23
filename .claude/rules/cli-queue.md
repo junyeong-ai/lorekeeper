@@ -157,14 +157,25 @@ paths:
   request until the scope returned byte for byte. Citation changes stay held, because
   reconciliation retires their request; incomplete or unsealed Work
   (`evidence-scope-changed`) stays held for its Work to finish.
+  A synthesis whose concept's own audit assessment or current-revision discovery recipe
+  cannot be read is `held`: apply leaves its result staged without a rejection receipt,
+  reports the run not ok and continues with independent groups, including when the hold
+  surfaces while recording another rejection; planning defers that target, a retained
+  rejection of it blocks host admission, native staging and a selected-task completion
+  check defer it, and `work context`/`plan` refuse only that request. A repaired record
+  makes the result eligible for validation again; a changed recipe still supersedes it.
+  A malformed audit store as a whole stays fatal.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.
 - A synthesis reads its citations and direct links in full, and of its recorded audit
-  discovery matches only the ranked roster extraction uses: `max_query_candidates` per
-  query in search order, plus identity matches, taken from the same discovery traversal
-  that found the matches. It never waits for audit screening decisions. The bound is not
-  part of the Work purpose: a synthesis whose read pages are unchanged keeps its Work.
+  discovery matches a ranked roster: per query, every identity match and the best
+  `lk_graph::audit::SYNTHESIS_CANDIDATES_PER_QUERY` other owners in search order, from the
+  same traversal that found the matches. The bound is a fixed semantic policy, not
+  `max_query_candidates`, so the roster does not depend on the execution profile; byte
+  limits and the other configuration still shape the request and its Work. A page matched
+  through several spellings is read through its own address when a query matched it.
+  It never waits for audit screening decisions.
 - A synthesis request answers the citation set it was made for. Drafting, preparation
   and publication refuse it (`citations-changed`) once the concept's graph citations
   captured with its context differ, whatever order reconciliation and application run
