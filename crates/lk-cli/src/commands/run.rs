@@ -97,7 +97,7 @@ mod native {
     use super::*;
     use super::{automation, scheduler};
     use crate::commands::audit::{DeferredAudit, InputAvailability};
-    use crate::commands::queue::application::is_semantic_context_changed;
+    use crate::commands::queue::application::{is_semantic_context_changed, is_work_input_changed};
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
     };
@@ -307,6 +307,8 @@ mod native {
     }
 
     struct ObservationTurn {
+        /// The queue target this Work answers; audit Work replans through subject allowances.
+        target: Option<String>,
         work_id: String,
         node_id: String,
         completed: usize,
@@ -1999,7 +2001,7 @@ mod native {
                     self.deferred(stage, &reason);
                     ObservationStep::Deferred(reason)
                 }
-                Err(error) if is_semantic_context_changed(&error) => {
+                Err(error) if is_work_input_changed(&error) => {
                     ObservationStep::InputsChanged(error)
                 }
                 Err(error) => {
@@ -2342,6 +2344,7 @@ mod native {
                         .len(),
                 );
                 turns.push(ObservationTurn {
+                    target: None,
                     work_id: id.clone(),
                     node_id,
                     completed: work.completed,
@@ -2618,7 +2621,18 @@ mod native {
                                 &mut turn.metrics,
                             );
                             if let ObservationStep::InputsChanged(error) = step {
-                                self.deferred("bounded work context", error);
+                                self.record(
+                                    "bounded work context",
+                                    StageState::Skipped,
+                                    Some(error.to_string()),
+                                );
+                                if let Some(target) = &turn.target
+                                    && !self
+                                        .finalization_replans
+                                        .try_spend(target, FINALIZATION_CHANGED_AGAIN)
+                                {
+                                    self.deferred("finalization inputs unstable", target);
+                                }
                                 self.queue_replan = QueueReplan::Invalidate;
                                 self.queue_admitted.clear();
                                 replanned = true;
@@ -3985,7 +3999,11 @@ mod native {
                             return true;
                         }
                         Err(error) if is_semantic_context_changed(&error) => {
-                            self.deferred("bounded work context", error);
+                            self.record(
+                                "bounded work context",
+                                StageState::Skipped,
+                                Some(error.to_string()),
+                            );
                             self.queue_replan = QueueReplan::Invalidate;
                             self.queue_admitted.clear();
                             return true;
@@ -4076,6 +4094,7 @@ mod native {
                         });
                         metrics.preparation_duration_ms = preparation_duration_ms.take();
                         QueueReadTurn::Evidence(ObservationTurn {
+                            target: Some(target.clone()),
                             work_id: id.clone(),
                             node_id,
                             completed: work.completed,

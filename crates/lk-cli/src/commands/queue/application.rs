@@ -56,6 +56,18 @@ pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -
     )
 }
 
+/// Whether a fresh validation found a Work's inputs moved on since its request was prepared:
+/// changed semantic context or citations, a changed evidence scope, or a task that is no
+/// longer current. A reply prepared from the old inputs is discarded, not a fault.
+pub(in crate::commands) fn is_work_input_changed(error: &miette::Report) -> bool {
+    is_semantic_context_changed(error)
+        || error.downcast_ref::<super::TaskNotCurrent>().is_some()
+        || matches!(
+            error.downcast_ref::<PublicationRejection>(),
+            Some(rejection) if rejection.kind == RejectionKind::EvidenceScopeChanged
+        )
+}
+
 /// Whether a synthesis request was refused because its concept's citations have since changed.
 pub(in crate::commands) fn is_citations_changed(error: &miette::Report) -> bool {
     matches!(

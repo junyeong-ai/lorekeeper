@@ -293,6 +293,19 @@ fn resolve_vault(
     Ok((super::workflow::bind_root(root)?, pin, config))
 }
 
+/// A selected task that is no longer current pending work: superseded, answered or gone.
+#[derive(Debug, Clone)]
+pub(in crate::commands) struct TaskNotCurrent(pub String);
+
+impl std::fmt::Display for TaskNotCurrent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for TaskNotCurrent {}
+impl miette::Diagnostic for TaskNotCurrent {}
+
 pub(super) fn current_task(root: &Path, task_id: &str) -> miette::Result<QueueTask> {
     select_task(root, task_id, TaskSelection::Current)
 }
@@ -490,7 +503,9 @@ impl PendingTasks {
         let mut selected = self.tasks.values().filter(|task| task.task_id == task_id);
         let task = selected
             .next()
-            .ok_or_else(|| miette::miette!("current task not found: {task_id}"))?
+            .ok_or_else(|| {
+                miette::Report::new(TaskNotCurrent(format!("current task not found: {task_id}")))
+            })?
             .clone();
         if selected.next().is_some() {
             return Err(miette::miette!("ambiguous pending task id: {task_id}"));
@@ -522,10 +537,10 @@ impl PendingTasks {
             )? == TaskStatus::Current;
         }
         if !allowed {
-            return Err(miette::miette!(
+            return Err(miette::Report::new(TaskNotCurrent(format!(
                 "task {task_id} is {}, not current",
                 status.as_str()
-            ));
+            ))));
         }
         task.validate_retained_input()
             .map_err(|e| miette::miette!("{e}"))?;
