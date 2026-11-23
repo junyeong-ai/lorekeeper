@@ -2454,7 +2454,7 @@ fn classify_parsed_page(
         if anchors.iter().all(|anchor| {
             anchor
                 .strip_prefix("## ")
-                .is_some_and(|heading| lk_vault::section_body(&page.body, heading).is_some())
+                .is_some_and(|heading| lk_vault::section_in_body(&page.body, heading).is_some())
         }) {
             TaskStatus::Current
         } else {

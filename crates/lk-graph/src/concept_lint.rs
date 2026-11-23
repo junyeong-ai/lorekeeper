@@ -178,11 +178,11 @@ pub fn find_missing_sections(pages: &[ConceptPage], locale: Locale) -> Vec<Missi
         .filter_map(|page| {
             let body = page.body.as_deref()?;
             let mut headings = Vec::new();
-            if lk_vault::resolve_section(body, |s| s.concept_sources).is_none() {
+            if lk_vault::resolve_section_in_body(body, |s| s.concept_sources).is_none() {
                 headings.push(format!("## {}", strings.concept_sources));
             }
             if page.source_count.is_some_and(|count| count > 0)
-                && lk_vault::resolve_section(body, |s| s.concept_synthesis).is_none()
+                && lk_vault::resolve_section_in_body(body, |s| s.concept_synthesis).is_none()
             {
                 headings.push(format!("## {}", strings.concept_synthesis));
             }
@@ -1297,6 +1297,10 @@ mod tests {
             (
                 "korean",
                 "---\ntype: concept\nsource_count: 1\n---\n## 핵심\n\n## 출처\n",
+            ),
+            (
+                "ruled",
+                "---\ntype: concept\nsource_count: 1\n---\n---\n\n## Synthesis\n\n---\n\n## Sources\n",
             ),
             ("broken", "---\ntype: concept\nno closing delimiter\n"),
             (

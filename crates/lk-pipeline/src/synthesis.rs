@@ -49,21 +49,22 @@ pub fn completed_input(page: &VaultPage, kind: TargetKind) -> Option<&str> {
 /// The section `kind` answers into, under any locale's spelling. A daily page's refined items sit
 /// under its source type's heading, events or messages.
 pub fn owned_section(page: &VaultPage, kind: TargetKind) -> Option<lk_vault::PageSection<'_>> {
-    let section = lk_vault::resolve_section(&page.body, move |s: &'static Strings| match kind {
-        TargetKind::DailySummary | TargetKind::DocumentSummary => s.summary,
-        TargetKind::DailyConcepts | TargetKind::DocumentConcepts => s.related_concepts,
-        TargetKind::DailyRefineEvents => s.key_events,
-        TargetKind::WeeklySynthesisThemes => s.key_themes_this_week,
-        TargetKind::WeeklyReviewNarrative
-        | TargetKind::MonthlyReviewNarrative
-        | TargetKind::QuarterlyReviewNarrative => s.key_summary,
-        TargetKind::AnnualReviewNarrative => s.overall_summary,
-        TargetKind::WorkLogSynthesis => s.topic_summary,
-        TargetKind::ConceptSynthesis => s.concept_synthesis,
-    });
+    let section =
+        lk_vault::resolve_section_in_body(&page.body, move |s: &'static Strings| match kind {
+            TargetKind::DailySummary | TargetKind::DocumentSummary => s.summary,
+            TargetKind::DailyConcepts | TargetKind::DocumentConcepts => s.related_concepts,
+            TargetKind::DailyRefineEvents => s.key_events,
+            TargetKind::WeeklySynthesisThemes => s.key_themes_this_week,
+            TargetKind::WeeklyReviewNarrative
+            | TargetKind::MonthlyReviewNarrative
+            | TargetKind::QuarterlyReviewNarrative => s.key_summary,
+            TargetKind::AnnualReviewNarrative => s.overall_summary,
+            TargetKind::WorkLogSynthesis => s.topic_summary,
+            TargetKind::ConceptSynthesis => s.concept_synthesis,
+        });
     match kind {
         TargetKind::DailyRefineEvents => section.or_else(|| {
-            lk_vault::resolve_section(&page.body, |s: &'static Strings| s.key_messages)
+            lk_vault::resolve_section_in_body(&page.body, |s: &'static Strings| s.key_messages)
         }),
         _ => section,
     }
@@ -866,7 +867,7 @@ impl Synthesizer {
 /// queue-pending child) returns empty and the caller drops it, rather than leaking the
 /// child's raw body into the parent.
 fn child_narrative(page: &VaultPage) -> &str {
-    lk_vault::resolve_section(&page.body, |s| s.key_summary).map_or("", |s| s.body.trim())
+    lk_vault::resolve_section_in_body(&page.body, |s| s.key_summary).map_or("", |s| s.body.trim())
 }
 
 fn iso_year_week(date: jiff::civil::Date) -> (i16, u8) {

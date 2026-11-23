@@ -526,11 +526,11 @@ fn concept_has_authored_body(root: &Path, path: &Path) -> Result<bool, GraphErro
         .collect::<std::collections::BTreeSet<_>>();
     let mut body = parsed.body;
     for heading in lk_vault::section_headings(|strings| strings.concept_sources) {
-        if let Some(sources) = lk_vault::section_body(&body, heading)
+        if let Some(sources) = lk_vault::section_in_body(&body, heading)
             && lk_core::concept_sources::classify(sources, path)
                 != lk_core::concept_sources::SourcesBody::Authored
         {
-            body = lk_vault::replace_section(&body, heading, "");
+            body = lk_vault::replace_section_in_body(&body, heading, "");
         }
     }
     let mut seen = std::collections::BTreeSet::new();

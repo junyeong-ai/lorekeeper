@@ -31,7 +31,7 @@
 
 use lk_core::frontmatter::{VaultPage, field};
 use lk_queue::TargetKind;
-use lk_vault::{SectionKey, resolve_section};
+use lk_vault::{SectionKey, resolve_section_in_body};
 
 /// Per-section cache decision. The pipeline computes one of these for every LLM
 /// task it could enqueue.
@@ -93,7 +93,7 @@ pub fn lookup(
     hash: String,
 ) -> SectionDecision {
     let existing_body =
-        existing.and_then(|page| resolve_section(&page.body, heading).map(|s| s.body));
+        existing.and_then(|page| resolve_section_in_body(&page.body, heading).map(|s| s.body));
     let input_key = kind.llm_inputs_key();
     let completion_key = kind.completion_key();
     let compatible = existing.is_some_and(|page| {

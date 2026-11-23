@@ -937,7 +937,7 @@ fn capture_llm_inputs(page: &lk_core::frontmatter::VaultPage) -> BTreeMap<String
 /// carries nothing under that section — an empty one has nothing to preserve, and the fresh
 /// render already writes an empty section.
 fn capture_section(body: &str, section: impl lk_vault::SectionKey) -> Option<String> {
-    let found = lk_vault::resolve_section(body, section)?;
+    let found = lk_vault::resolve_section_in_body(body, section)?;
     let trimmed = found.body.trim_matches('\n');
     (!trimmed.trim().is_empty()).then(|| trimmed.to_string())
 }

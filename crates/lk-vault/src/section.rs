@@ -18,10 +18,16 @@ fn markdown_offset(content: &str) -> Option<usize> {
 /// checked only after CommonMark establishes a root-level H2.
 fn find_section(content: &str, heading: &str) -> Option<std::ops::Range<usize>> {
     let offset = markdown_offset(content)?;
-    let body = &content[offset..];
+    let range = find_section_in_body(&content[offset..], heading)?;
+    Some(offset + range.start..offset + range.end)
+}
+
+/// [`find_section`] over Markdown whose frontmatter was already removed: a leading `---`
+/// there is a thematic break, not another frontmatter opener.
+fn find_section_in_body(body: &str, heading: &str) -> Option<std::ops::Range<usize>> {
     let headings = lk_core::markdown::root_headings(body);
     let (_, range) = section_ranges(body, heading, &headings)?;
-    Some(offset + range.start..offset + range.end)
+    Some(range)
 }
 
 /// Exact owned heading and body ranges from an already parsed Markdown body.
@@ -114,7 +120,16 @@ pub fn replace_section_checked(
 /// bytes outside the body are preserved; generated separators use the heading's
 /// line terminator.
 pub fn replace_section(content: &str, heading: &str, new_body: &str) -> String {
-    let Some(body) = find_section(content, heading) else {
+    replace_found(content, find_section(content, heading), new_body)
+}
+
+/// [`replace_section`] in Markdown whose frontmatter was already removed.
+pub fn replace_section_in_body(body: &str, heading: &str, new_body: &str) -> String {
+    replace_found(body, find_section_in_body(body, heading), new_body)
+}
+
+fn replace_found(content: &str, found: Option<std::ops::Range<usize>>, new_body: &str) -> String {
+    let Some(body) = found else {
         return content.to_string();
     };
     let newline = terminator(&content[..body.start]);
@@ -190,9 +205,23 @@ pub fn section_headings(section: impl SectionKey) -> impl Iterator<Item = &'stat
 /// extraction that found nothing, a focus-filtered summary), and reporting the section absent
 /// would re-enqueue it forever.
 pub fn resolve_section(content: &str, section: impl SectionKey) -> Option<PageSection<'_>> {
+    resolve_with(content, section, section_body)
+}
+
+/// [`resolve_section`] in Markdown whose frontmatter was already removed, such as a parsed
+/// page's body.
+pub fn resolve_section_in_body(body: &str, section: impl SectionKey) -> Option<PageSection<'_>> {
+    resolve_with(body, section, section_in_body)
+}
+
+fn resolve_with<'a>(
+    content: &'a str,
+    section: impl SectionKey,
+    find: impl Fn(&'a str, &str) -> Option<&'a str>,
+) -> Option<PageSection<'a>> {
     let mut blank: Option<PageSection> = None;
     for heading in section_headings(&section) {
-        let Some(body) = section_body(content, heading) else {
+        let Some(body) = find(content, heading) else {
             continue;
         };
         if !body.trim().is_empty() {
@@ -209,6 +238,12 @@ pub fn resolve_section(content: &str, section: impl SectionKey) -> Option<PageSe
 /// whitespace verbatim — callers usually `.trim()`.
 pub fn section_body<'a>(content: &'a str, heading: &str) -> Option<&'a str> {
     Some(&content[find_section(content, heading)?])
+}
+
+/// [`section_body`] in Markdown whose frontmatter was already removed, such as a parsed
+/// page's body.
+pub fn section_in_body<'a>(body: &'a str, heading: &str) -> Option<&'a str> {
+    Some(&body[find_section_in_body(body, heading)?])
 }
 
 /// Split off a leading BOM the way `parse_page` does, so it can be restored and the page
@@ -555,6 +590,32 @@ mod tests {
     }
 
     use super::*;
+
+    /// A parsed body may open with a thematic break; read as a whole page, that `---` would
+    /// open another frontmatter block and hide every section up to the next one.
+    #[test]
+    fn a_body_opening_with_a_thematic_break_keeps_its_sections() {
+        let page = "---\ntype: concept\n---\n---\n\n## Sources\n\nA.\n\n---\n\n## Related\n";
+        let offset = lk_core::frontmatter::body_offset(page).unwrap();
+        let body = &page[offset..];
+        assert!(section_body(body, "Sources").is_none());
+        assert_eq!(
+            section_in_body(body, "Sources"),
+            section_body(page, "Sources")
+        );
+        assert_eq!(
+            resolve_section_in_body(body, |s| s.concept_sources),
+            resolve_section(page, |s| s.concept_sources)
+        );
+        assert_eq!(
+            format!(
+                "{}{}",
+                &page[..offset],
+                replace_section_in_body(body, "Sources", "B.")
+            ),
+            replace_section(page, "Sources", "B.")
+        );
+    }
 
     #[test]
     fn set_frontmatter_field_inserts_when_absent() {
