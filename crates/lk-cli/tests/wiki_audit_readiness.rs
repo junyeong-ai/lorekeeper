@@ -289,7 +289,7 @@ fn readiness_uses_verified_alias_owners_but_keeps_hard_link_task_ownership_disti
 }
 
 #[test]
-fn unknown_queue_or_staged_targets_refuse_readiness_without_changing_default_planning() {
+fn unknown_queue_targets_refuse_readiness_while_an_orphaned_result_is_ignored() {
     let fixture = Fixture::build();
     fixture.write("wiki/documents/a.md", &authored("A"));
     fixture.write(".lorekeeper/queue/tasks.jsonl", "not-json\n");
@@ -316,10 +316,14 @@ fn unknown_queue_or_staged_targets_refuse_readiness_without_changing_default_pla
         })
         .unwrap(),
     );
+    // With the queue fully parsed, a result matching no task is an orphan apply quarantines;
+    // it never publishes, so readiness does not wait on it.
     let before = fixture.bytes();
-    let refused = fixture.run(&["wiki", "audit-plan", "--ready"]);
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("unknown targets"));
+    let ready = fixture.plan(&["wiki", "audit-plan", "--ready"]);
+    assert!(
+        !ready["candidates"].as_array().unwrap().is_empty(),
+        "{ready}"
+    );
     assert_eq!(fixture.bytes(), before);
 }
 

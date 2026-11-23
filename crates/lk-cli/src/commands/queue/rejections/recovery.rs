@@ -515,6 +515,7 @@ mod tests {
                     &revision,
                     false,
                     Some(&session),
+                    &Default::default(),
                 )
                 .unwrap();
                 assert_eq!(applied.applied, 1);

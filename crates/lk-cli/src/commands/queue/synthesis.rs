@@ -26,6 +26,7 @@ pub(super) fn apply(
     config_revision: &str,
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
+    orphaned: &std::collections::BTreeSet<(String, String)>,
 ) -> miette::Result<ApplyResult> {
     let dir = queue.join(lk_queue::RESULTS_SUBDIR);
     let entries = match std::fs::read_dir(&dir) {
@@ -105,6 +106,9 @@ pub(super) fn apply(
                 return Ok(report);
             }
         };
+        if orphaned.contains(&(result.task_id.clone(), result.cache_hash.clone())) {
+            continue;
+        }
         proposals
             .entry((section, result.task_id.clone(), result.cache_hash.clone()))
             .or_default()
@@ -151,26 +155,40 @@ pub(super) fn apply(
                 return Ok(report);
             }
         };
+        if pending.unparseable == 0
+            && !pending
+                .tasks
+                .contains_key(&(result.task_id.clone(), result.cache_hash.clone()))
+        {
+            let quarantined = if dry_run {
+                quarantine_ready(queue)
+            } else {
+                group
+                    .iter()
+                    .try_for_each(|(path, _)| quarantine_orphan(queue, path, ORPHANED))
+            };
+            if let Err(error) = quarantined {
+                report.report.fail(error);
+                return Ok(report);
+            }
+            eprintln!("  ✗ {}: {ORPHANED}", path.display());
+            report.report.outcome(
+                None,
+                &snapshots,
+                super::application::Outcome::Orphaned {
+                    reason: ORPHANED.into(),
+                },
+            );
+            continue;
+        }
         let mut identity = None;
         let result = (|| -> miette::Result<bool> {
             let Some(task) = pending
                 .tasks
                 .get(&(result.task_id.clone(), result.cache_hash.clone()))
             else {
-                if pending.unparseable > 0 {
-                    return Err(miette::miette!(
-                        "no matching readable task; repair unparseable queue lines before deciding this result's fate"
-                    ));
-                }
-                let reason =
-                    "no matching pending task; its run was retired or the task identity is invalid";
-                if !dry_run {
-                    for (path, _) in &group {
-                        quarantine_orphan(queue, path, reason)?;
-                    }
-                }
                 return Err(miette::miette!(
-                    "{reason}; result quarantined (or would be in dry-run)"
+                    "no matching readable task; repair unparseable queue lines before deciding this result's fate"
                 ));
             };
             if section {
@@ -431,6 +449,23 @@ fn guard_citations(
             .map_err(|error| miette::miette!("{error}"))?;
     }
     Ok(())
+}
+
+/// Why a staged result whose exact identity matches no pending task is quarantined.
+pub(super) const ORPHANED: &str = "no matching pending task for this result's exact task id and cache hash: its request was retired or the identity is invalid; the result is quarantined under results/orphaned and independent work continues";
+
+/// Refuse a preview that could not quarantine: the orphan store must be absent or a directory.
+pub(super) fn quarantine_ready(queue: &Path) -> miette::Result<()> {
+    let dir = queue.join(lk_queue::RESULTS_SUBDIR).join("orphaned");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(metadata) if !metadata.is_dir() => Err(miette::miette!(
+            "cannot quarantine orphaned results: {} is not a directory",
+            dir.display()
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(miette::miette!("inspect {}: {error}", dir.display())),
+    }
 }
 
 /// Preserve the rejected answer and a durable reason outside the retry path.

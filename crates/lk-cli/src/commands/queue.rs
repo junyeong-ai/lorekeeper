@@ -803,10 +803,11 @@ async fn apply(
         );
     }
     eprintln!(
-        "queue apply: {} applied, {} dropped, {} failed{}",
+        "queue apply: {} applied, {} dropped, {} failed, {} orphaned{}",
         report.applied,
         report.dropped,
         report.rejected + usize::from(report.fatal.is_some()),
+        report.orphaned,
         if dry_run { " (dry-run)" } else { "" }
     );
     if report.ok {
@@ -869,26 +870,6 @@ async fn apply_into(
         report.fail("unreadable staged result payloads have unknown task identities");
         return Ok(());
     }
-    let mut orphaned = false;
-    for (identity, proposals) in &staged.groups {
-        if !pending.tasks.contains_key(identity) {
-            orphaned = true;
-            if !dry_run {
-                for proposal in proposals {
-                    synthesis::quarantine_orphan(
-                        &queue_dir,
-                        &vault_root.join(&proposal.proposal.path),
-                        "no matching pending task; its run was retired or the task identity is invalid",
-                    )?;
-                    report.quarantined += 1;
-                }
-            }
-        }
-    }
-    if orphaned {
-        report.fail("no matching pending task for staged results; results are quarantined or retained without publishing independent work");
-        return Ok(());
-    }
 
     let batch = lk_queue::read_results(&queue_dir)
         .map_err(|e| miette::miette!("read queue results: {e}"))?;
@@ -906,6 +887,42 @@ async fn apply_into(
         return Ok(());
     }
 
+    // A readable result whose exact identity matches no task in the fully parsed queue
+    // answers a retired request: quarantine it before any format or publication check, so
+    // it can neither be published nor stop independent groups.
+    let mut orphaned = std::collections::BTreeSet::new();
+    for (identity, proposals) in &staged.groups {
+        if pending.tasks.contains_key(identity) {
+            continue;
+        }
+        let quarantined = if dry_run {
+            synthesis::quarantine_ready(&queue_dir)
+        } else {
+            proposals.iter().try_for_each(|proposal| {
+                synthesis::quarantine_orphan(
+                    &queue_dir,
+                    &vault_root.join(&proposal.proposal.path),
+                    synthesis::ORPHANED,
+                )
+            })
+        };
+        if let Err(error) = quarantined {
+            report.fail(error);
+            return Ok(());
+        }
+        for proposal in proposals {
+            eprintln!("  ✗ {}: {}", proposal.proposal.path, synthesis::ORPHANED);
+        }
+        report.outcome(
+            None,
+            proposals,
+            application::Outcome::Orphaned {
+                reason: synthesis::ORPHANED.into(),
+            },
+        );
+        orphaned.insert(identity.clone());
+    }
+
     let synthesis_result = synthesis::apply(
         &vault_root,
         &queue_dir,
@@ -913,6 +930,7 @@ async fn apply_into(
         &config_revision,
         dry_run,
         mutation.as_ref(),
+        &orphaned,
     )?;
 
     let synthesis_fatal = synthesis_result.report.fatal.is_some();
@@ -962,10 +980,11 @@ async fn apply_into(
     let mut applied_groups = Vec::new();
     let mut proposals: BTreeMap<_, Vec<_>> = BTreeMap::new();
     for (path, result) in results {
-        proposals
-            .entry((result.task_id.clone(), result.cache_hash.clone()))
-            .or_default()
-            .push((path, result));
+        let identity = (result.task_id.clone(), result.cache_hash.clone());
+        if orphaned.contains(&identity) {
+            continue;
+        }
+        proposals.entry(identity).or_default().push((path, result));
     }
     let mut proposals = proposals.into_values().collect::<Vec<_>>();
     proposals.sort_by(|left, right| left[0].0.cmp(&right[0].0));
@@ -996,24 +1015,32 @@ async fn apply_into(
             .tasks
             .get(&(result.task_id.clone(), result.cache_hash.clone()))
         else {
-            let reason = if pending.unparseable > 0 {
-                "no matching readable task; repair unparseable queue lines before deciding this result's fate"
-            } else {
-                "no matching pending task; its run was retired or the task identity is invalid"
-            };
-            if pending.unparseable == 0 && !dry_run {
-                for path in &paths {
-                    if let Err(error) = synthesis::quarantine_orphan(&queue_dir, path, reason) {
-                        eprintln!(
-                            "  ✗ {}: cannot quarantine orphan result: {error}; its file stays for retry",
-                            path.display()
-                        );
-                    }
-                }
+            if pending.unparseable > 0 {
+                let reason = "no matching readable task; repair unparseable queue lines before deciding this result's fate";
+                fail(reason.into());
+                report.fail(reason);
+                return Ok(());
             }
-            fail(reason.into());
-            report.fail(reason);
-            return Ok(());
+            let quarantined = if dry_run {
+                synthesis::quarantine_ready(&queue_dir)
+            } else {
+                paths.iter().try_for_each(|path| {
+                    synthesis::quarantine_orphan(&queue_dir, path, synthesis::ORPHANED)
+                })
+            };
+            if let Err(error) = quarantined {
+                report.fail(error);
+                return Ok(());
+            }
+            fail(synthesis::ORPHANED.into());
+            report.outcome(
+                None,
+                &snapshots,
+                application::Outcome::Orphaned {
+                    reason: synthesis::ORPHANED.into(),
+                },
+            );
+            continue;
         };
         if let Err(error) = task
             .validate_retained_input()
@@ -2594,7 +2621,16 @@ mod tests {
         })).unwrap();
         assert!(pending_queue_files(&queue).unwrap().is_empty());
         assert!(
-            synthesis::apply(dir.path(), &queue, &config, "config-revision", true, None).is_ok()
+            synthesis::apply(
+                dir.path(),
+                &queue,
+                &config,
+                "config-revision",
+                true,
+                None,
+                &Default::default()
+            )
+            .is_ok()
         );
 
         std::fs::create_dir_all(queue.parent().unwrap()).unwrap();
@@ -2603,7 +2639,16 @@ mod tests {
         assert!(queue_load(dir.path()).is_err());
         assert!(prune_queue(dir.path(), &ConfigurationPin::Absent, &queue, true).is_err());
         assert!(
-            synthesis::apply(dir.path(), &queue, &config, "config-revision", true, None).is_err()
+            synthesis::apply(
+                dir.path(),
+                &queue,
+                &config,
+                "config-revision",
+                true,
+                None,
+                &Default::default()
+            )
+            .is_err()
         );
         assert!(!work_in_flight(dir.path()).unread.is_empty());
         assert_eq!(std::fs::read_to_string(&queue).unwrap(), "not a directory");

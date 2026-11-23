@@ -36,9 +36,11 @@ one agreed value before retrying; adding a third draft does not resolve the conf
 ## Application outcomes
 
 `lore queue apply --json` emits a typed report even when application fails. `ok`
-matches the exit verdict. Counts and `groups` distinguish applied, dropped and
-retained rejected proposals; each known group carries its task/cache/target owner
-and exact proposal file revisions. Rejected groups include their current validation
+matches the exit verdict. Counts and `groups` distinguish applied, dropped, retained
+rejected and orphaned proposals; each known group carries its task/cache/target owner
+and exact proposal file revisions. An orphaned group's exact task id and cache hash
+match no pending task, usually because its request was retired while it was drafted;
+it is moved to `results/orphaned/` with a reason file and independent groups continue. Rejected groups include their current validation
 scope and receipt. `fatal` reports a failure whose ownership or safety could not be
 established; partial publications remain real.
 
@@ -46,7 +48,7 @@ Native jobs record known scoped rejections under `.lorekeeper/queue/rejections/`
 continue independent work. These records are not completion or semantic approval; do
 not delete them to bypass a refusal. Preserve rejected answers separately before
 explicitly replacing an active proposal with a newly reviewed result; never relabel its
-guards. Unknown or unreadable state remains fatal.
+guards. Unreadable payloads, an unparseable queue and a failed quarantine remain fatal.
 
 The native job stays incomplete/nonzero while work remains. Corrupt records,
 unmatched result identities, storage failures and unknown state stop further work.

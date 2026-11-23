@@ -613,7 +613,7 @@ fn extraction_proposal_groups_classify_before_comparing_answers() {
         }
         let fatal = matches!(
             scenario,
-            "orphan" | "unparseable-pending" | "unreadable" | "invalid-input"
+            "unparseable-pending" | "unreadable" | "invalid-input"
         );
         assert_eq!(
             ws.read(other).contains("concepts_done:"),
@@ -2366,11 +2366,6 @@ fn orphan_quarantine_failure_preserves_bytes_and_halts_independent_extraction() 
             ws.read(&format!("{quarantine}/a-orphan.{suffix}.reason.txt"))
                 .contains("no matching pending task")
         );
-        assert_eq!(ws.read(PAGE), page_before);
-        assert_eq!(
-            ws.read(".lorekeeper/queue/results/z-independent.json"),
-            independent_before
-        );
         assert!(ws.run(&["queue", "apply"]).status.success());
         assert!(ws.read(PAGE).contains("concepts_done:"));
         assert!(
@@ -2380,6 +2375,32 @@ fn orphan_quarantine_failure_preserves_bytes_and_halts_independent_extraction() 
         );
         assert!(!results_dir(&ws).join("z-independent.json").exists());
     }
+}
+
+#[test]
+fn an_orphan_staged_in_two_formats_is_quarantined_before_format_checks() {
+    let ws = Workspace::new();
+    let synthesis = serde_json::json!({"task_id":"retired", "cache_hash":"old", "context_revision":"unavailable", "target_revision":"old", "synthesis":"Evidence.", "related":null}).to_string();
+    let section = serde_json::json!({"task_id":"retired", "cache_hash":"old", "target_revision":"old", "body":"Evidence."}).to_string();
+    ws.write(
+        ".lorekeeper/queue/results/retired.synthesis.json",
+        &synthesis,
+    );
+    ws.write(".lorekeeper/queue/results/retired.section.json", &section);
+    let output = ws.run(&["queue", "apply", "--json"]);
+    assert!(!output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report["fatal"].is_null(), "{report}");
+    assert_eq!(report["orphaned"], 1, "{report}");
+    assert_eq!(
+        ws.read(".lorekeeper/queue/results/orphaned/retired.synthesis.json"),
+        synthesis
+    );
+    assert_eq!(
+        ws.read(".lorekeeper/queue/results/orphaned/retired.section.json"),
+        section
+    );
+    assert!(ws.run(&["queue", "apply"]).status.success());
 }
 
 #[test]

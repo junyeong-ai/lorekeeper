@@ -136,8 +136,14 @@ paths:
   Unknown/fatal state and abnormal child termination stop; never classify error text.
   Classify retained rejected tasks before capturing current semantic scope. Done,
   stale and missing-target tasks receive no new host admission; deterministic apply
-  still owns reapplication or retirement. Unreadable, ambiguous, corrupt and orphaned
-  state remains fatal.
+  still owns reapplication or retirement. Unreadable, ambiguous and corrupt state
+  remains fatal. A readable result whose exact request is absent from a fully parsed
+  queue is an `orphaned` group: its request was retired (by prune or regeneration)
+  while a standalone session drafted it, which no lock spans. Apply quarantines it
+  under `results/orphaned/` with its reason before any format or publication check,
+  reports the run not ok (`orphaned`), and continues with independent groups; it is
+  never published or judged, and input readiness ignores it. A preview refuses when the
+  quarantine store could not be written.
 - Synthesis owns both sections and its completion marker atomically, with exact
   source/target/queue guards. Do not split core and related publication. Explicit
   year/date conflicts with `--previous` fail before flushing work.

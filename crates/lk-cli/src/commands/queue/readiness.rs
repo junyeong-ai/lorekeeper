@@ -135,14 +135,9 @@ impl InputReadiness {
             })?;
             staged.insert(identity);
         }
-        if staged
-            .iter()
-            .any(|identity| !pending.tasks.contains_key(identity))
-        {
-            return Err(miette::miette!(
-                "unmatched staged results have unknown targets; repair them before assessing knowledge"
-            ));
-        }
+        // With every pending task parsed, a staged result matching none is an orphan that
+        // apply quarantines and never publishes, so it is not an input dependency.
+        staged.retain(|identity| pending.tasks.contains_key(identity));
         let mut tasks: BTreeMap<PathBuf, Vec<QueueTask>> = BTreeMap::new();
         for task in pending.tasks.into_values() {
             read.check().into_diagnostic()?;

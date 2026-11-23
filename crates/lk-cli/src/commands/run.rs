@@ -527,6 +527,7 @@ mod native {
         applied: usize,
         dropped: usize,
         rejected: usize,
+        orphaned: usize,
         latest: Option<crate::commands::queue::application::Report>,
     }
 
@@ -1198,11 +1199,13 @@ mod native {
                 .queue_publication_observed |= report.applied != 0;
             self.result.queue_application.dropped += report.dropped;
             self.result.queue_application.rejected += report.rejected;
+            self.result.queue_application.orphaned += report.orphaned;
             let detail = format!(
-                "{} applied, {} dropped, {} rejected; {}",
+                "{} applied, {} dropped, {} rejected, {} orphaned; {}",
                 report.applied,
                 report.dropped,
                 report.rejected,
+                report.orphaned,
                 if can_continue {
                     "independent work may continue"
                 } else {

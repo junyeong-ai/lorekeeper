@@ -195,6 +195,11 @@ pub(in crate::commands) enum Outcome {
     Dropped {
         reason: String,
     },
+    /// The exact request this result answers is no longer pending: it was retired while the
+    /// result was being drafted. The result is quarantined, not published or judged.
+    Orphaned {
+        reason: String,
+    },
     Rejected {
         kind: RejectionKind,
         detail: String,
@@ -225,6 +230,11 @@ impl<'de> Deserialize<'de> for Group {
                 proposals: Vec<Proposal>,
                 reason: String,
             },
+            Orphaned {
+                identity: Option<TaskIdentity>,
+                proposals: Vec<Proposal>,
+                reason: String,
+            },
             Rejected {
                 identity: Option<TaskIdentity>,
                 proposals: Vec<Proposal>,
@@ -244,6 +254,11 @@ impl<'de> Deserialize<'de> for Group {
                 proposals,
                 reason,
             } => (identity, proposals, Outcome::Dropped { reason }),
+            Wire::Orphaned {
+                identity,
+                proposals,
+                reason,
+            } => (identity, proposals, Outcome::Orphaned { reason }),
             Wire::Rejected {
                 identity,
                 proposals,
@@ -284,6 +299,8 @@ pub(in crate::commands) struct Report {
     pub applied: usize,
     pub dropped: usize,
     pub rejected: usize,
+    /// Groups quarantined because their request was retired; independent work continues.
+    pub orphaned: usize,
     pub quarantined: usize,
     pub unreadable: usize,
     pub groups: Vec<Group>,
@@ -298,6 +315,7 @@ impl Default for Report {
             applied: 0,
             dropped: 0,
             rejected: 0,
+            orphaned: 0,
             quarantined: 0,
             unreadable: 0,
             groups: Vec::new(),
@@ -338,7 +356,13 @@ impl Report {
                     .iter()
                     .filter(|group| matches!(group.outcome, Outcome::Rejected { .. }))
                     .count()
-            && self.ok == (self.rejected == 0)
+            && self.orphaned
+                == self
+                    .groups
+                    .iter()
+                    .filter(|group| matches!(group.outcome, Outcome::Orphaned { .. }))
+                    .count()
+            && self.ok == (self.rejected == 0 && self.orphaned == 0)
             && self.groups.iter().all(|group| match &group.outcome {
                 Outcome::Rejected { receipt, scope, .. } => {
                     group.identity.as_ref().is_some_and(TaskIdentity::is_valid)
@@ -369,15 +393,28 @@ impl Report {
     }
 
     pub(super) fn append(&mut self, other: Self) {
-        self.ok &= other.ok;
-        self.applied += other.applied;
-        self.dropped += other.dropped;
-        self.rejected += other.rejected;
-        self.quarantined += other.quarantined;
-        self.unreadable += other.unreadable;
-        self.groups.extend(other.groups);
-        if other.fatal.is_some() {
-            self.fatal = other.fatal;
+        let Self {
+            ok,
+            dry_run: _,
+            applied,
+            dropped,
+            rejected,
+            orphaned,
+            quarantined,
+            unreadable,
+            groups,
+            fatal,
+        } = other;
+        self.ok &= ok;
+        self.applied += applied;
+        self.dropped += dropped;
+        self.rejected += rejected;
+        self.orphaned += orphaned;
+        self.quarantined += quarantined;
+        self.unreadable += unreadable;
+        self.groups.extend(groups);
+        if fatal.is_some() {
+            self.fatal = fatal;
         }
     }
 
@@ -390,6 +427,10 @@ impl Report {
         match &outcome {
             Outcome::Applied => self.applied += 1,
             Outcome::Dropped { .. } => self.dropped += 1,
+            Outcome::Orphaned { .. } => {
+                self.orphaned += 1;
+                self.ok = false;
+            }
             Outcome::Rejected { .. } => {
                 self.rejected += 1;
                 self.ok = false;

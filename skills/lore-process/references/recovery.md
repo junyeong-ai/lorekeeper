@@ -87,7 +87,10 @@ receipt; prune the stale request afterward. These commands inspect all staged wo
 or pending tasks, so verify the complete preview. Dropped groups can have no identity;
 associate them through their exact proposal paths and revisions. Prune keeps a request
 that a staged result still answers, so apply retires the proposal and receipt before a
-later prune removes the request. Retirement is not synthesis completion.
+later prune removes the request. A result staged after its request was retired is an
+`orphaned` group: apply moves it to `results/orphaned/` with a reason file and keeps
+publishing independent results; inspect it there before discarding or regenerating.
+Retirement is not synthesis completion.
 
 ## Exact retained-input regeneration
 

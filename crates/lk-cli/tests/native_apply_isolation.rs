@@ -978,7 +978,7 @@ fn corrupt_rejection_receipt_stops_before_independent_work() {
 }
 
 #[test]
-fn unknown_staged_work_stops_before_independent_host_execution() {
+fn malformed_staged_work_stops_while_an_orphaned_result_is_isolated() {
     for malformed in [false, true] {
         let fixture = Fixture::new("codex");
         let task = fixture.add_summary("b-independent");
@@ -999,9 +999,15 @@ fn unknown_staged_work_stops_before_independent_host_execution() {
         let original = std::fs::read(unknown).unwrap();
         let (output, report) = fixture.run("process");
         assert!(!output.status.success(), "{report}");
-        assert_eq!(report["semantic_calls"], 0, "{report}");
-        assert!(!fixture.is_completed(&task));
-        assert!(fixture.calls().is_empty());
+        assert_eq!(report["halted"], malformed, "{report}");
+        if malformed {
+            assert_eq!(report["semantic_calls"], 0, "{report}");
+            assert!(!fixture.is_completed(&task));
+            assert!(fixture.calls().is_empty());
+        } else {
+            // A result whose request was retired is quarantined; independent work proceeds.
+            assert!(fixture.is_completed(&task), "{report}");
+        }
         assert!(
             fixture
                 .snapshot()
@@ -1053,11 +1059,18 @@ fn unknown_extraction_preflight_precedes_valid_section_publication() {
             .unwrap();
         assert!(!output.status.success());
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert!(!report["fatal"].is_null(), "{report}");
-        assert_eq!(report["applied"], 0, "{report}");
-        assert_eq!(std::fs::read(target).unwrap(), before);
-        assert_eq!(std::fs::read(section).unwrap(), answer);
-        assert!(!fixture.is_completed(&task));
+        if malformed {
+            assert!(!report["fatal"].is_null(), "{report}");
+            assert_eq!(report["applied"], 0, "{report}");
+            assert_eq!(std::fs::read(target).unwrap(), before);
+            assert_eq!(std::fs::read(section).unwrap(), answer);
+            assert!(!fixture.is_completed(&task));
+        } else {
+            assert!(report["fatal"].is_null(), "{report}");
+            assert_eq!(report["orphaned"], 1, "{report}");
+            assert_eq!(report["applied"], 1, "{report}");
+            assert!(fixture.is_completed(&task));
+        }
         assert!(
             fixture
                 .snapshot()
