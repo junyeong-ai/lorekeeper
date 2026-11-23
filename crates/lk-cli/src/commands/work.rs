@@ -2949,6 +2949,16 @@ fn load_inspection_works(
     })
 }
 
+/// A Work's fresh validation failure as each of its replies reports it. A typed refusal keeps
+/// its kind, so a reply whose inputs changed while its host ran reports changed scope.
+#[cfg(unix)]
+fn fresh_validation_failure(error: &miette::Report) -> miette::Report {
+    match error.downcast_ref::<super::queue::application::PublicationRejection>() {
+        Some(refusal) => publication_rejection(refusal.kind, refusal.detail.clone()),
+        None => miette::miette!("fresh work validation failed: {error:#}"),
+    }
+}
+
 #[cfg(unix)]
 pub(super) struct PreparedInspections {
     pub turns: Vec<miette::Result<(state::WorkProgress, Vec<Value>)>>,
@@ -3034,7 +3044,7 @@ fn record_prepared_inspections(
                 }
                 let (work, prepared) = loaded.works[&reply.work_id]
                     .as_ref()
-                    .map_err(|error| miette::miette!("fresh work validation failed: {error:#}"))?;
+                    .map_err(fresh_validation_failure)?;
                 match reply.response {
                     InspectionResponse::Complete(candidate) => {
                         if candidate.output.work_id != reply.work_id

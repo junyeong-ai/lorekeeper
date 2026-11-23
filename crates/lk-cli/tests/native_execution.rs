@@ -7359,15 +7359,15 @@ fn native_evidence_wave_reads_distinct_work_without_a_candidate_roster_on_both_h
 
 #[test]
 fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies() {
-    // An unread candidate added mid-wave changes no evidence Work; a changed or unreadable
-    // assigned resource changes both.
+    // An unread candidate added mid-wave changes no evidence Work; a changed assigned
+    // resource discards both replies for replanning, and an unreadable one is fatal.
     for (mode, siblings, expected, halted) in [
         ("good", true, 2, false),
         ("failed", false, 1, false),
         ("malformed", false, 1, false),
         ("capacity", false, 1, false),
         ("action", false, 1, false),
-        ("changed", false, 0, true),
+        ("changed", false, 0, false),
         ("added", false, 2, false),
         ("unreadable", false, 0, true),
     ] {
@@ -7387,6 +7387,16 @@ fn native_evidence_wave_records_siblings_and_preserves_valid_independent_replies
             .count();
         assert_eq!(recorded, expected, "{mode}: {report}");
         assert_eq!(report["halted"], halted, "{mode}: {report}");
+        if mode == "changed" {
+            assert!(
+                report["stages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stage| stage["name"] == "bounded work context"),
+                "{report}"
+            );
+        }
         if mode == "unreadable" {
             assert!(
                 steps

@@ -283,6 +283,8 @@ mod native {
         Retry,
         Refined,
         Deferred(String),
+        /// The Work's inputs changed while its host ran; the reply is discarded unrecorded.
+        InputsChanged(miette::Report),
         InvocationFailed,
         Failed,
     }
@@ -1997,6 +1999,9 @@ mod native {
                     self.deferred(stage, &reason);
                     ObservationStep::Deferred(reason)
                 }
+                Err(error) if is_semantic_context_changed(&error) => {
+                    ObservationStep::InputsChanged(error)
+                }
                 Err(error) => {
                     self.failure("bounded work receipt", error);
                     ObservationStep::Failed
@@ -2596,6 +2601,7 @@ mod native {
             } = decoded;
             let mut usable = false;
             let mut held = false;
+            let mut replanned = false;
             if !returned.is_empty() {
                 match recorded {
                     Some((Ok(recorded), shared_ms)) => {
@@ -2611,14 +2617,21 @@ mod native {
                                 record.result,
                                 &mut turn.metrics,
                             );
-                            if matches!(step, ObservationStep::Failed) {
-                                accepted = false;
+                            if let ObservationStep::InputsChanged(error) = step {
+                                self.deferred("bounded work context", error);
+                                self.queue_replan = QueueReplan::Invalidate;
+                                self.queue_admitted.clear();
+                                replanned = true;
+                            } else {
+                                if matches!(step, ObservationStep::Failed) {
+                                    accepted = false;
+                                }
+                                usable |= !matches!(
+                                    step,
+                                    ObservationStep::InvocationFailed | ObservationStep::Failed
+                                );
+                                held |= matches!(step, ObservationStep::InvocationFailed);
                             }
-                            usable |= !matches!(
-                                step,
-                                ObservationStep::InvocationFailed | ObservationStep::Failed
-                            );
-                            held |= matches!(step, ObservationStep::InvocationFailed);
                             self.record_work_step(turn.metrics);
                         }
                     }
@@ -2639,7 +2652,7 @@ mod native {
             if usable && held {
                 self.queue_replan = QueueReplan::Invalidate;
             }
-            accepted && usable
+            accepted && (usable || replanned)
         }
         async fn settle_observation_attempts(
             &mut self,
@@ -3012,6 +3025,24 @@ mod native {
 
         /// Discards a queue finalizer step whose fresh guard found changed inputs; its answer, if
         /// any, is never relabeled. Each target may replan once per run, then defers.
+        /// Bounded Work whose inputs changed before or after its host: audit Work replans under
+        /// the per-subject allowance its caller spends, queue Work under the per-target one.
+        fn work_inputs_changed(
+            &mut self,
+            stage: ExecutionStage,
+            error: miette::Report,
+        ) -> WorkStep {
+            if stage != ExecutionStage::Audit {
+                return self.finalization_inputs_changed("bounded work inputs changed", error);
+            }
+            self.record(
+                "bounded audit inputs changed",
+                StageState::Skipped,
+                Some(error.to_string()),
+            );
+            WorkStep::Replan
+        }
+
         fn finalization_inputs_changed(&mut self, name: &str, error: miette::Report) -> WorkStep {
             self.record(name, StageState::Skipped, Some(error.to_string()));
             let targets = self
@@ -3532,16 +3563,7 @@ mod native {
                         return WorkStep::Deferred(reason);
                     }
                     if is_semantic_context_changed(&error) {
-                        if stage != ExecutionStage::Audit {
-                            return self
-                                .finalization_inputs_changed("bounded work inputs changed", error);
-                        }
-                        self.record(
-                            "bounded audit inputs changed",
-                            StageState::Skipped,
-                            Some(error.to_string()),
-                        );
-                        return WorkStep::Replan;
+                        return self.work_inputs_changed(stage, error);
                     }
                     self.failure("bounded work progress", error);
                     return WorkStep::Failed;
@@ -3560,6 +3582,7 @@ mod native {
                     | ObservationStep::Refined
                     | ObservationStep::Retry => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
+                    ObservationStep::InputsChanged(error) => self.work_inputs_changed(stage, error),
                     ObservationStep::InvocationFailed => WorkStep::Failed,
                     ObservationStep::Failed => WorkStep::Failed,
                 },

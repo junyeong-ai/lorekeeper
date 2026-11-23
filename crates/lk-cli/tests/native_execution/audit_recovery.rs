@@ -96,6 +96,70 @@ fn parallel_audit_writer_wait_replans_changed_reviews_without_pausing_scheduled_
 }
 
 #[test]
+fn an_inspection_whose_inputs_change_during_its_call_replans_without_pausing() {
+    for parallel in [false, true] {
+        let fixture = bounded_audit_fixture("codex", 3, RECORD_BOUNDED_AUDIT);
+        let mut config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("execution:\n", "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 256, max_run_seconds: 60}\n");
+        if parallel {
+            config = config.replace("max_calls: 3}", "max_calls: 3, max_parallel: 2}");
+        }
+        std::fs::write(&fixture.config, config).unwrap();
+        let subject = "wiki/concepts/large.md";
+        let raw = std::fs::read_to_string(fixture.root().join("vault").join(subject)).unwrap();
+        let page = lk_core::frontmatter::parse_page(&raw).unwrap();
+        let metadata = serde_json::json!({"status":"open","subjects":[subject],"evidence":[{"path":subject,"revision":lk_core::concept::source_revision(&page)}]});
+        std::fs::create_dir_all(fixture.root().join("vault/wiki/explorations")).unwrap();
+        let pending = fixture.root().join("review-during-inspection.md");
+        std::fs::write(
+            &pending,
+            format!("---\ntype: exploration\ntitle: Concurrent review\nreview: {metadata}\n---\nA scoped evidence question.\n"),
+        )
+        .unwrap();
+        let agent = fixture.root().join("agent executable");
+        let script = std::fs::read_to_string(&agent).unwrap();
+        let edit = "if action=='inspect':\n    pending=root/'review-during-inspection.md'\n    if pending.exists():\n        os.replace(pending, root/'vault/wiki/explorations/concurrent.md')\n";
+        std::fs::write(&agent, script.replacen("if action=='inspect':\n", edit, 1)).unwrap();
+
+        let output = fixture
+            .command()
+            .args(["run", "knowledge", "--scheduled", "--json"])
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&output.stderr)));
+        assert!(!pending.exists(), "{report}");
+        let run = &report["runs"][0];
+        assert_eq!(run["halted"], false, "{report}");
+        let changed = if parallel {
+            "bounded work context"
+        } else {
+            "bounded audit inputs changed"
+        };
+        assert!(
+            run["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == changed),
+            "{report}"
+        );
+        let usage: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/automation-usage.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(usage["paused"].as_object().unwrap().is_empty(), "{usage}");
+    }
+}
+
+#[test]
 fn bounded_audit_actions_are_guarded_and_unchanged_holds_spend_no_calls() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, RECORD_BOUNDED_AUDIT);

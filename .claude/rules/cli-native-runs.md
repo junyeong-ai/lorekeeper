@@ -207,8 +207,10 @@ paths:
   recapture the remaining selected subjects, refresh missing discovery and prepare
   current Work under the same run budget. Allow one such replan per subject per run;
   repeated drift defers that subject while independent subjects continue. Keep all
-  predecessor Work and paid outputs unchanged. Configuration/root drift, corrupt
-  state and unexpected changes during tool-free observation recording remain fatal.
+  predecessor Work and paid outputs unchanged. Configuration/root drift and corrupt
+  state remain fatal. A tool-free observation whose Work's inputs changed while its host
+  ran is discarded unrecorded and its Work replans as it would before a host call: an
+  external edit during an inspection never halts or pauses the run.
   Queue finalizers follow the same rule per target: a fresh guard that finds changed
   inputs before or after the host discards that step without relabeling its answer,
   allows one replan per target per run and then defers the target. A publication guard

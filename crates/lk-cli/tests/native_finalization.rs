@@ -1451,11 +1451,9 @@ fn inspection_actions_and_evidence_reject_forged_stale_empty_and_corrupt_states(
             fixture.mode(mode);
             let (_, report) = fixture.run();
             let authored = mode == "empty-inspection-evidence";
-            assert_eq!(
-                report["halted"],
-                mode == "inspection-action-drift",
-                "{engine}/{mode}: {report}"
-            );
+            // An external edit during the inspection discards its reply and replans; no
+            // action is recorded for the old request and the run is not halted.
+            assert_eq!(report["halted"], false, "{engine}/{mode}: {report}");
             assert!(!fixture.work_path(&plan, "inspection-actions.json").exists());
             let rejection = fixture.work_path(&plan, "observation-rejections.json");
             if authored {
@@ -1571,7 +1569,7 @@ fn oversized_observation_refuses_to_bind_a_changed_request() {
     let (_, blocked) = fixture.add("a-blocked", TaskKind::Summarize);
     fixture.mode("oversized-inspection-drift");
     let (_, report) = fixture.run();
-    assert_eq!(report["halted"], true, "{report}");
+    assert_eq!(report["halted"], false, "{report}");
     assert!(
         !fixture
             .work_path(&blocked, "inspection-actions.json")
