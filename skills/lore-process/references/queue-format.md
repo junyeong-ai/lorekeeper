@@ -133,7 +133,8 @@ describe how to read the selected articles.
 ## Extraction read scope
 
 Follow [extraction discovery](discovery.md) before drafting an extraction result.
-`work context` must be `ready`; source-observation completion or recorded screening
+The context must be ready: a standalone session confirms it with `work context`, and a
+native request is prepared from it. Source-observation completion or recorded screening
 decisions alone cannot authorize publication. The result envelope is in
 [processing kinds](processing-kinds.md#kind-extract-concepts).
 

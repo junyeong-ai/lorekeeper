@@ -134,8 +134,10 @@ keep historical/provider-attributed claims scoped. Current manifest changes do n
 that selected observation current truth. A citation without `rss_event` retains the full
 page authored-revision contract. Mixed page/event citations require both kinds of reads.
 
-1. Capture `lore work context --task-id TASK` before drafting and retain its
-   `context_revision` and `subject.target_revision`. Read its selected resource roster,
+1. Work from the task's captured context. A native request already carries it, so a
+   native task never runs `lore work context`; a standalone session captures
+   `lore work context --task-id TASK` before drafting and retains its `context_revision`
+   and `subject.target_revision`. Read the context's selected resource roster,
    including scoped reviews and related context; a scope hash is not a read receipt.
    Open `target.vault_path`. Read each page citation's exact source page under the vault
    root; for event citations, read the packet's selected immutable articles. Read both
@@ -290,8 +292,10 @@ input hash and is enforced by the native applier, not inferred from source type.
 
 Write one file per task to `<vault>/.lorekeeper/queue/results/{task_id}.json`:
 
-Before drafting, choose retrieval recipes through [extraction discovery](discovery.md)
-and require `lore work context --task-id TASK` to report `status: ready`. The default
+Before drafting, a standalone session chooses retrieval recipes through
+[extraction discovery](discovery.md) and requires `lore work context --task-id TASK` to
+report `status: ready`; a native request is prepared from that ready context and never
+runs the command. The default
 progressive scope first examines the ranked candidate-card roster, then reads
 selected bodies and their required reviews/evidence in full. `not-selected` certifies
 no whole-body negative judgment; unresolved `defer` blocks completion. `full-context`
