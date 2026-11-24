@@ -1674,10 +1674,17 @@ fn capture_review_dependency(
         } else {
             None
         };
-        let current_supplies_recorded = current
-            .as_ref()
-            .is_some_and(|page| page.source_revision.as_deref() == Some(&citation.revision));
-        let archived = if current_supplies_recorded {
+        // An RSS citation pins an immutable event payload its origin page binds; the review
+        // report owns whether that binding holds, and the original store is its archive.
+        let rss = citation.rss_event.is_some();
+        let current_supplies_recorded = current.as_ref().is_some_and(|page| {
+            if rss {
+                !report.changed_evidence.contains(&citation.path)
+            } else {
+                page.source_revision.as_deref() == Some(&citation.revision)
+            }
+        });
+        let archived = if current_supplies_recorded || rss {
             None
         } else {
             match lk_vault::load_archived_evidence_controlled(root, &citation.revision, read) {
@@ -1700,7 +1707,14 @@ fn capture_review_dependency(
                 }
             }
         };
-        if report.effective_state != lk_vault::ReviewEffectiveState::Invalid {
+        if report.effective_state != lk_vault::ReviewEffectiveState::Invalid && rss {
+            if current.is_none() != report.missing_evidence.contains(&citation.path) {
+                return Err(error(format!(
+                    "review evidence changed during audit planning: {}",
+                    citation.path
+                )));
+            }
+        } else if report.effective_state != lk_vault::ReviewEffectiveState::Invalid {
             let changed = current
                 .as_ref()
                 .is_some_and(|page| page.source_revision.as_deref() != Some(&citation.revision));

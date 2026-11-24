@@ -15,7 +15,7 @@ use lk_queue::{QueueTask, TaskKind};
 use lk_vault::{MutationPlan, MutationSession};
 use miette::IntoDiagnostic;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::Prepared;
 
@@ -93,36 +93,36 @@ pub(in crate::commands) fn admit(
             "a review needs distinct evidence resource indices".into()
         ));
     }
+    let cited: Vec<lk_core::concept::Citation> = match task
+        .input
+        .get("citations")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+    {
+        Ok(cited) => cited.unwrap_or_default(),
+        Err(error) => return Ok(Err(format!("synthesis citations: {error}"))),
+    };
     let mut citations = Vec::new();
     let mut guards = Vec::new();
     for index in &evidence {
-        let source = prepared
-            .resources
-            .get(*index)
-            .filter(|resource| resource.authority == SemanticAuthority::Page)
-            .map(|resource| PathBuf::from(&resource.address))
-            .filter(|path| !path.starts_with(&concepts))
-            .and_then(|path| prepared.pages.get(&path).map(|raw| (path, raw)));
-        let Some((source, raw)) = source else {
-            return Ok(Err(format!(
-                "review evidence {index} is not a source page this Work read"
-            )));
-        };
-        let page = match lk_core::frontmatter::parse_page(raw) {
-            Ok(page) => page,
-            Err(error) => {
-                return Ok(Err(format!(
-                    "review evidence {} is unreadable: {error}",
-                    source.display()
-                )));
+        let admitted = match prepared.resources.get(*index) {
+            Some(resource) if resource.authority == SemanticAuthority::RssEvent => {
+                rss_evidence(&cited, &prepared.pages, &resource.address)
             }
+            Some(resource) if resource.authority == SemanticAuthority::Page => {
+                page_evidence(prepared, &resource.address, &concepts)
+            }
+            _ => Err(format!(
+                "review evidence {index} is not a source page or RSS event this Work read"
+            )),
         };
-        let address = source.to_string_lossy().into_owned();
-        citations.push(json!({"path":address,"revision":lk_core::concept::source_revision(&page)}));
-        guards.push(lk_vault::PageRevision {
-            path: address,
-            revision: lk_core::concept::file_revision(raw),
-        });
+        let (citation, guard) = match admitted {
+            Ok(admitted) => admitted,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        citations.push(citation);
+        guards.push(guard);
     }
     let metadata = json!({"status":"open","subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null});
@@ -151,6 +151,59 @@ pub(in crate::commands) fn admit(
         Err(lk_vault::VaultError::Io(error)) => Err(error).into_diagnostic(),
         Err(error) => Ok(Err(format!("the review cannot be published: {error}"))),
     }
+}
+
+/// A read source page as page evidence: its source revision, guarded by its exact bytes.
+fn page_evidence(
+    prepared: &Prepared,
+    address: &str,
+    concepts: &Path,
+) -> Result<(Value, lk_vault::PageRevision), String> {
+    let source = PathBuf::from(address);
+    let raw = prepared
+        .pages
+        .get(&source)
+        .filter(|_| !source.starts_with(concepts))
+        .ok_or_else(|| format!("review evidence {address} is not a source page this Work read"))?;
+    let page = lk_core::frontmatter::parse_page(raw)
+        .map_err(|error| format!("review evidence {address} is unreadable: {error}"))?;
+    Ok((
+        json!({"path":address,"revision":lk_core::concept::source_revision(&page)}),
+        lk_vault::PageRevision {
+            path: address.to_owned(),
+            revision: lk_core::concept::file_revision(raw),
+        },
+    ))
+}
+
+/// A read RSS event payload as the synthesis's own RSS citation of it, guarded by the exact
+/// bytes of the origin page that binds it. The payload's file name is its revision.
+fn rss_evidence(
+    cited: &[lk_core::concept::Citation],
+    pages: &std::collections::BTreeMap<PathBuf, String>,
+    address: &str,
+) -> Result<(Value, lk_vault::PageRevision), String> {
+    let revision = Path::new(address)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| format!("review evidence {address} is not an RSS event payload"))?;
+    let citation = cited
+        .iter()
+        .find(|citation| citation.rss_event.is_some() && citation.revision == revision)
+        .ok_or_else(|| {
+            format!("review evidence {address} is not an RSS event this synthesis cites")
+        })?;
+    let origin = pages
+        .get(Path::new(&citation.path))
+        .ok_or_else(|| format!("the origin page of {address} is not one this Work read"))?;
+    let guard = lk_vault::PageRevision {
+        path: citation.path.clone(),
+        revision: lk_core::concept::file_revision(origin),
+    };
+    Ok((
+        serde_json::to_value(citation).map_err(|error| error.to_string())?,
+        guard,
+    ))
 }
 
 /// Whether a link destination names the concepts collection, by its address or through the
@@ -241,6 +294,42 @@ fn review_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_rss_payload_maps_to_the_synthesis_citation_that_selects_it() {
+        let revision = "a".repeat(64);
+        let citation = lk_core::concept::Citation {
+            path: "daily/rss.md".into(),
+            revision: revision.clone(),
+            rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                event_id: "rss:2026-10-18:0000000000000000".into(),
+            }),
+        };
+        let page =
+            lk_core::concept::Citation::at_revision(Path::new("daily/rss.md"), "b".repeat(32));
+        let payload = format!(".lorekeeper/evidence/rss/events/{revision}.json");
+        let pages = std::collections::BTreeMap::from([(
+            PathBuf::from("daily/rss.md"),
+            "origin bytes".to_owned(),
+        )]);
+        let (mapped, guard) =
+            rss_evidence(&[page.clone(), citation.clone()], &pages, &payload).unwrap();
+        assert_eq!(mapped, serde_json::to_value(&citation).unwrap());
+        assert_eq!(guard.path, "daily/rss.md");
+        assert_eq!(
+            guard.revision,
+            lk_core::concept::file_revision("origin bytes")
+        );
+        assert!(
+            rss_evidence(&[page], &pages, &payload).is_err(),
+            "an uncited event"
+        );
+        assert!(
+            rss_evidence(&[citation], &Default::default(), &payload).is_err(),
+            "an origin this Work did not read"
+        );
+    }
 
     #[test]
     fn a_long_title_in_any_script_keeps_the_review_filename_within_its_byte_bound() {

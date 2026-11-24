@@ -102,6 +102,11 @@ canonical; SQLite navigation is derived.
   declared concept in the concepts collection: the link makes the review that concept's
   synthesis input, so each synthesis would invalidate the pin. Evidence archive copies
   and concept-typed pages elsewhere are never synthesized from citations.
+- RSS review evidence is an event selector with its immutable payload revision, as
+  synthesis cites it. It is current while its origin page binds the event to a subject
+  (`RssEvidenceCapture`), changed once no subject binding remains, and its retained payload
+  in the original store is its archive, so curation guards the origin page and archives
+  nothing. Evidence identity is the path with its selected event.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review

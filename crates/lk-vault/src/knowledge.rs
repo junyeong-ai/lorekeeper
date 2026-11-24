@@ -545,6 +545,15 @@ pub fn plan_curation(
                         retain_read(&mut guarded, path, raw.clone())?;
                         raw
                     }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::NotFound
+                            && citation.rss_event.is_some() =>
+                    {
+                        return Err(invalid(format!(
+                            "RSS review evidence requires its current origin page: {}",
+                            citation.path
+                        )));
+                    }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         plan.require_absent(path);
                         crate::load_archived_evidence(root, &citation.revision)?
@@ -569,6 +578,21 @@ pub fn plan_curation(
                 )?,
             )? {
                 return Err(invalid(error));
+            }
+            if citation.rss_event.is_some() {
+                if !crate::review::rss_evidence_bound(
+                    root,
+                    &assessment.subjects,
+                    citation,
+                    &raw,
+                    &crate::ReadControl::default(),
+                )? {
+                    return Err(invalid(format!(
+                        "RSS review evidence must be an event its origin page binds to a subject: {}",
+                        citation.path
+                    )));
+                }
+                continue;
             }
             if source_revision(&evidence) != citation.revision {
                 return Err(invalid(format!(
