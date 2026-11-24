@@ -778,6 +778,9 @@ mod native {
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
+        /// Targets of the turn reserved for the current host invocation. Reservation consumes
+        /// `queue_turn`; a finalization whose inputs changed afterwards charges these targets.
+        reserved_targets: Vec<String>,
         queue_admitted: scheduler::AdmittedTurns,
         queue_replan: QueueReplan,
         writer_access_failed: bool,
@@ -2223,6 +2226,7 @@ mod native {
             let Some(turn) = self.queue_turn.take() else {
                 return true;
             };
+            self.reserved_targets = turn.targets.clone();
             let Some((session, waited)) = self.mutation_session("queue scheduling").await else {
                 return false;
             };
@@ -3095,11 +3099,10 @@ mod native {
 
         fn finalization_inputs_changed(&mut self, name: &str, error: miette::Report) -> WorkStep {
             self.record(name, StageState::Skipped, Some(error.to_string()));
-            let targets = self
-                .queue_turn
-                .as_ref()
-                .map(|turn| turn.targets.clone())
-                .unwrap_or_default();
+            let targets = self.queue_turn.as_ref().map_or_else(
+                || self.reserved_targets.clone(),
+                |turn| turn.targets.clone(),
+            );
             let mut replan = true;
             for target in &targets {
                 if !self
@@ -5293,6 +5296,7 @@ mod native {
                         }
                         continue;
                     }
+                    self.reserved_targets.clear();
                     self.queue_turn = Some(QueueTurn {
                         keys: keys.clone(),
                         binding: jobs[&selected].binding(&selected),
@@ -6925,6 +6929,7 @@ mod native {
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
+            reserved_targets: Vec::new(),
             queue_replan: QueueReplan::None,
             writer_access_failed: false,
             started_at: Instant::now(),

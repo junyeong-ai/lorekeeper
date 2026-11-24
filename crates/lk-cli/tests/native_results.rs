@@ -1676,6 +1676,22 @@ fn malformed_missing_oversized_and_changed_scope_results_never_publish() {
         }
     }
     let fixture = Fixture::new("codex");
+    let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, true);
+    std::fs::write(fixture.root().join("mode"), "changed-target").unwrap();
+    let report = fixture.run();
+    let finalizers = report["work_steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["role"] == "finalizer")
+        .count();
+    assert_eq!(
+        finalizers, 2,
+        "bounded Work spends its one replan, then defers: {report}"
+    );
+    assert_eq!(report["halted"], false, "{report}");
+    assert!(!fixture.done(&task));
+    let fixture = Fixture::new("codex");
     let (task, _) = fixture.add("subject", lk_queue::TaskKind::ExtractConcepts, false);
     std::fs::write(fixture.root().join("mode"), "missing").unwrap();
     let report = fixture.run();
