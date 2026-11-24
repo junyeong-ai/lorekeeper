@@ -48,8 +48,9 @@ lives in `lk-vault`/`lk-pipeline`.
   cannot excuse malformed inputs or an unsupported policy.
 - CLI status is authoritative: only `current` is work. Stale/missing targets are
   distinct from `done`; unreadable tasks remain for diagnosis. An unparseable line
-  blocks its file rather than licensing partial destructive pruning. Prune retains
-  answered history until the whole run can retire to `processed/`.
+  blocks its file rather than licensing partial destructive pruning. Prune retires
+  answered tasks to `processed/` history even while their run holds work, guarded by
+  the pages that proved them answered, so pending reads scale with work still owed.
 - Explicit regeneration journals the replaced pending request's exact bytes into
   processed history with the new request and completion invalidation. Preserve
   sibling lines verbatim; unknown historical policy cannot keep superseded work

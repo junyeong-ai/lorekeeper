@@ -4012,16 +4012,28 @@ fn indivisible_screening_envelope_defers_only_its_task_before_invocation() {
             );
             assert_eq!(report["semantic_calls"], calls, "{report}");
             let status = execution_json(&fixture, &["queue", "status", "--json"]);
-            for (id, expected) in [(&task.task_id, "current"), (&summary.task_id, "done")] {
-                assert!(
-                    status["data"]["tasks"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|row| row["task_id"] == id.as_str() && row["status"] == expected),
-                    "{status}"
-                );
-            }
+            let rows = status["data"]["tasks"].as_array().unwrap();
+            assert!(
+                rows.iter().any(
+                    |row| row["task_id"] == task.task_id.as_str() && row["status"] == "current"
+                ),
+                "{status}"
+            );
+            assert!(
+                rows.iter().all(
+                    |row| row["task_id"] != summary.task_id.as_str() || row["status"] == "done"
+                ),
+                "{status}"
+            );
+            let independent = lk_vault::parse_page(
+                &std::fs::read_to_string(root.join(&summary.target.vault_path)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                independent.frontmatter.get("llm_inputs").unwrap()["summary_done"],
+                summary.cache_hash,
+                "independent work completes"
+            );
             assert_eq!(
                 std::fs::read(root.join(&task.target.vault_path)).unwrap(),
                 target_before

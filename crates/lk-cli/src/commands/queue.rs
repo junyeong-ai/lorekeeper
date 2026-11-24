@@ -103,12 +103,12 @@ pub enum QueueCommand {
     ///
     /// `stale` and `missing-target` tasks are exactly what `/lore-process` would drop
     /// without editing anything, so removing them is that drop performed deterministically,
-    /// without spending a session. A `done` task is kept — its answer is on the page and the
-    /// run's record stays whole — but a run whose every remaining task is `done` needs no
-    /// session, so nothing would ever archive it; it is retired to `processed/` exactly as a
-    /// drain retires a finished run. A file left holding nothing never edited a page, so it
-    /// is deleted rather than archived. Rewrites are atomic; a file needing no change is
-    /// left byte-identical.
+    /// without spending a session. A `done` task's answer is on the page, so it moves to
+    /// `processed/` history even while its run still holds work: every reader of the pending
+    /// queue then pays for current work, not for what was already answered. A run whose
+    /// every task is `done` moves there whole. A file left holding nothing never edited a
+    /// page, so it is deleted rather than archived. Rewrites are atomic; a file needing no
+    /// change is left byte-identical.
     Prune {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -1879,7 +1879,11 @@ struct PruneSummary {
     /// Stale, missing-target or done tasks a staged result still answers. Apply publishes or
     /// retires that result first; a later prune then retires the task.
     kept_staged: usize,
+    /// Done tasks retired to processed history.
     retired_done: usize,
+    /// Done tasks kept beside their run's remaining work because the pages proving them
+    /// answered changed during this prune. A later prune retires them.
+    kept_answered: usize,
     files_rewritten: usize,
     files_deleted: usize,
     files_archived: usize,
@@ -1893,12 +1897,12 @@ struct PruneSummary {
 /// targeted pages that existed when it was renamed into place (the flush invariant), so
 /// `missing-target` means the page was deleted afterwards.
 ///
-/// A `done` task is not dead — its answer is already on the page — so it is retained,
-/// keeping the run's record whole for whoever archives it. What it must not do is keep the
-/// run alive: a file whose every remaining task is `done` needs no session, so nothing
-/// would ever archive it, and it would sit in the queue making `lore ingest` warn about
-/// pending work forever. This retires it exactly as a drain does — the file moved to
-/// `processed/` as it stands — so the two agree on what a finished run looks like.
+/// A `done` task is not dead — its answer is already on the page — so it is retired to
+/// `processed/` history rather than dropped, guarded by the pages that proved it answered.
+/// It leaves even while its run holds other work, so a queue read pays for current work
+/// rather than for the whole answered history. A file whose every task is
+/// `done` moves there as it stands, so prune and a drain agree on what a finished run looks
+/// like; a run with work left writes its answered rows to a new history file.
 ///
 /// A file with nothing retained held only dead tasks, so it never edited a page and there
 /// is nothing to archive; it is deleted. Queue and sidecar retirement share one guarded
@@ -1960,6 +1964,21 @@ pub(super) fn prune_with_session(
     report_prune(summary, json, false)
 }
 
+/// Retire what the pending queue no longer needs inside a run's own writer session.
+/// Unreadable and unparseable rows stay where they are for the run's queue check to report,
+/// so they never stop independent work. Returns the stage detail.
+pub(super) fn retire_in_session(session: &lk_vault::MutationSession) -> miette::Result<String> {
+    let root = session.root();
+    let summary = prune_queue_with_session(root, &root.join(".lorekeeper/queue"), Some(session))?;
+    Ok(format!(
+        "{} stale, {} missing-target and {} answered task(s) retired; {} current kept",
+        summary.pruned_stale,
+        summary.pruned_missing_target,
+        summary.retired_done,
+        summary.kept_current
+    ))
+}
+
 fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Result<()> {
     // A retained-because-unclassifiable task is a defect with a named repair — the target page's
     // frontmatter, or the queue line itself — and nothing else in a scheduled run reports it:
@@ -1984,6 +2003,7 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
                 "kept_blocked": summary.kept_blocked,
                 "kept_staged": summary.kept_staged,
                 "retired_done": summary.retired_done,
+                "kept_answered": summary.kept_answered,
                 "files_rewritten": summary.files_rewritten,
                 "files_deleted": summary.files_deleted,
                 "files_archived": summary.files_archived,
@@ -1998,8 +2018,8 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
         };
         eprintln!(
             "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable \
-             + {} unparseable + {} blocked + {} answered by a staged result, {} already done; \
-             {} file(s) rewritten, {} archived, {} deleted",
+             + {} unparseable + {} blocked + {} answered by a staged result + {} answered \
+             awaiting proof, {} done retired; {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
@@ -2007,6 +2027,7 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
             summary.kept_unparseable,
             summary.kept_blocked,
             summary.kept_staged,
+            summary.kept_answered,
             summary.retired_done,
             summary.files_rewritten,
             summary.files_archived,
@@ -3572,6 +3593,7 @@ mod tests {
                 kept_blocked: 0,
                 kept_staged: 0,
                 retired_done: 0,
+                kept_answered: 0,
                 files_rewritten: 1,
                 files_deleted: 0,
                 files_archived: 0,
@@ -3869,7 +3891,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_keeps_answered_tasks_in_a_run_that_still_has_work() {
+    fn prune_retires_answered_tasks_while_their_run_still_has_work() {
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
         write_page(
@@ -3902,12 +3924,19 @@ mod tests {
         assert_eq!(summary.kept_current, 1);
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(summary.files_rewritten, 1);
-        assert_eq!(summary.files_archived, 0);
-        assert_eq!(
-            std::fs::read_to_string(&file).unwrap().lines().count(),
-            2,
-            "the answered task stays; only the dead one goes"
-        );
+        assert_eq!(summary.files_archived, 1);
+        let pending = lk_queue::read_tasks(&file).unwrap().tasks;
+        assert_eq!(pending.len(), 1, "only the task still owed stays pending");
+        assert_eq!(pending[0].target.vault_path, "daily/s/2026-05-24.md");
+        let history = lk_queue::read_tasks(
+            &queue_dir
+                .join(lk_queue::PROCESSED_SUBDIR)
+                .join("run-1.jsonl"),
+        )
+        .unwrap()
+        .tasks;
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].target.vault_path, "daily/s/2026-05-23.md");
     }
 
     #[test]

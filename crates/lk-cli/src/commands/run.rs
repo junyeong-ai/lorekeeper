@@ -5575,6 +5575,7 @@ mod native {
             self.native("schema", &["schema"]).await;
             self.native("queue apply", &["queue", "apply"]).await;
             self.backlinks_sync("backlinks-sync").await;
+            self.retire_queue("queue retirement").await;
             self.drain().await;
             if self.result.yield_reason.is_some() || self.yield_to_waiter() {
                 return;
@@ -5584,6 +5585,28 @@ mod native {
             self.native("wiki refresh", &["wiki", "refresh"]).await;
             self.graph_lint("graph lint");
             self.native("queue completion", &["queue", "check"]).await;
+        }
+
+        /// Queue retirement inside the run, so planning and every later queue read pay for the
+        /// work still owed rather than for answered or superseded history. Rows it cannot
+        /// classify stay for the run's queue check to report.
+        async fn retire_queue(&mut self, name: &str) -> bool {
+            if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
+            {
+                return false;
+            }
+            let Some((session, _)) = self.mutation_session(name).await else {
+                return false;
+            };
+            let retired = crate::commands::queue::retire_in_session(&session);
+            drop(session);
+            if !self.configuration_is_current() {
+                return false;
+            }
+            match retired {
+                Ok(detail) => self.record(name, StageState::Completed, Some(detail)),
+                Err(error) => self.failure(name, error),
+            }
         }
 
         async fn inspect_halted_state(&mut self) {

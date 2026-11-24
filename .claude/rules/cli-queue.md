@@ -20,8 +20,9 @@ paths:
   cleanup. Share captures only within that preparation, never attach a later read baseline.
   Discard non-retiring raw snapshots. If a cached revision yields retirement without its
   read proof, reclassify the whole task from fresh snapshots before creating guards.
-  Completed rows retained in a mixed pending file do not constrain retirement; validate
-  their captured consistency only when that file is actually archived.
+  Done rows leave for processed history whenever their captured proof agrees, under
+  guards on those pages; a run with work left keeps done rows whose captures disagree,
+  and a whole-run archive refuses them.
   Validate discovery storage containment before enumerating or reading its records.
 - Result retirement uses that same captured classification and guards its target/source
   or absence in the deletion journal. Extraction result admission may ignore completion;

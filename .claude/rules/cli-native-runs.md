@@ -73,6 +73,9 @@ paths:
   Failed reads, publication conflicts and checks that could not complete stay fatal.
   Their stage records carry the counts and the first skipped pages; `lore graph lint`
   and `lore graph backlinks-sync --dry-run` report the rest.
+  Queue retirement runs inside the run under its own writer claim, after the first
+  reconciliation and before planning, through the shared prune owner, so planning reads
+  only work still owed. It keeps unclassifiable rows for the final queue check rather than halting.
   Queue settlement alone cannot satisfy review completion. Daily requires a passing
   review check before period resumption and checks again after publication.
 - Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.

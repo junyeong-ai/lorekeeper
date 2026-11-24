@@ -121,7 +121,7 @@ fn prepare_with_classifier(
             continue;
         }
         let raw = String::from_utf8(raw).into_diagnostic()?;
-        let mut tasks = Vec::with_capacity(read.tasks.len());
+        let mut rows = Vec::with_capacity(read.tasks.len());
         let mut done_pages = Ok(BTreeMap::new());
         let (mut dropped, mut work_left) = (0, 0);
         for task in read.tasks {
@@ -137,22 +137,21 @@ fn prepare_with_classifier(
             {
                 work_left += 1;
                 summary.kept_staged += 1;
-                tasks.push(task);
+                rows.push((task, false));
                 continue;
             }
             match status {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
-                    tasks.push(task);
+                    rows.push((task, false));
                 }
                 TaskStatus::Done => {
                     done_pages = done_pages.and_then(|mut pages| {
                         retain_snapshots(&mut pages, captured_pages)?;
                         Ok(pages)
                     });
-                    summary.retired_done += 1;
-                    tasks.push(task);
+                    rows.push((task, true));
                 }
                 TaskStatus::Stale => {
                     retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
@@ -167,26 +166,44 @@ fn prepare_with_classifier(
                 TaskStatus::Unreadable => {
                     work_left += 1;
                     summary.kept_unreadable += 1;
-                    tasks.push(task);
+                    rows.push((task, false));
                 }
             }
         }
-        if work_left == 0 {
-            retain_snapshots(&mut pages, done_pages.map_err(classification_drift)?)
-                .map_err(classification_drift)?;
-        }
-        for task in &tasks {
-            let identity = (task.task_id.clone(), task.cache_hash.clone());
-            retained.insert(identity.clone());
-            if work_left != 0 {
-                retained_pending.insert(identity);
+        // An answered task leaves the pending queue for processed history once the pages that
+        // proved it answered agree, whatever its run still holds. Only a run whose rows all
+        // retire must prove that; a run with work left keeps answers it could not prove.
+        let retire_answered = match done_pages {
+            Ok(done_pages) => {
+                retain_snapshots(&mut pages, done_pages).map_err(classification_drift)?;
+                true
             }
+            Err(path) if work_left == 0 => return Err(classification_drift(path)),
+            Err(_) => false,
+        };
+        let (answered, kept): (Vec<_>, Vec<_>) = rows
+            .into_iter()
+            .partition(|(_, answered)| *answered && retire_answered);
+        let answered: Vec<_> = answered.into_iter().map(|(task, _)| task).collect();
+        let kept: Vec<_> = kept.into_iter().map(|(task, _)| task).collect();
+        if retire_answered {
+            summary.retired_done += answered.len();
+        } else {
+            summary.kept_answered += kept.len() - work_left;
         }
-        if tasks.is_empty() {
+        for task in answered.iter().chain(&kept) {
+            retained.insert((task.task_id.clone(), task.cache_hash.clone()));
+        }
+        for task in &kept {
+            retained_pending.insert((task.task_id.clone(), task.cache_hash.clone()));
+        }
+        if kept.is_empty() && answered.is_empty() {
             summary.files_deleted += 1;
             changed.insert(relative.clone());
             plan.remove(relative, raw);
-        } else if work_left == 0 {
+            continue;
+        }
+        if !answered.is_empty() {
             summary.files_archived += 1;
             let destination = super::free_path_avoiding(
                 &queue.join(lk_queue::PROCESSED_SUBDIR),
@@ -199,12 +216,20 @@ fn prepare_with_classifier(
                 .into_diagnostic()?
                 .to_path_buf();
             changed.insert(relative.clone());
-            if dropped == 0 {
+            let history = lk_queue::serialize_tasks(&answered).into_diagnostic()?;
+            if !kept.is_empty() {
+                summary.files_rewritten += 1;
+                plan.edit(
+                    relative,
+                    raw,
+                    lk_queue::serialize_tasks(&kept).into_diagnostic()?,
+                );
+                plan.create(destination, history);
+            } else if dropped == 0 {
                 plan.rename(relative, destination, raw);
             } else {
-                let after = lk_queue::serialize_tasks(&tasks).into_diagnostic()?;
                 plan.rename(relative, destination.clone(), raw.clone());
-                plan.edit(destination, raw, after);
+                plan.edit(destination, raw, history);
             }
         } else if dropped != 0 {
             summary.files_rewritten += 1;
@@ -212,7 +237,7 @@ fn prepare_with_classifier(
             plan.edit(
                 relative,
                 raw,
-                lk_queue::serialize_tasks(&tasks).into_diagnostic()?,
+                lk_queue::serialize_tasks(&kept).into_diagnostic()?,
             );
         } else {
             plan.require_unchanged(relative, raw);
@@ -657,35 +682,50 @@ mod tests {
     }
 
     #[test]
-    fn retained_done_rows_do_not_guard_their_pages_when_other_rows_are_pruned() {
-        let fixture = Fixture::new();
-        let done: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
-        let mut current = done.clone();
-        current.task_id.push_str("-current");
-        current.target.vault_path = "wiki/documents/current.md".into();
-        let mut missing = done.clone();
-        missing.task_id.push_str("-missing");
-        missing.target.vault_path = "wiki/documents/missing.md".into();
-        let raw = format!(
-            "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
-            current.cache_hash
-        );
-        fixture.write(Path::new(&current.target.vault_path), &raw);
-        fixture.write(
-            Path::new(".lorekeeper/queue/run.jsonl"),
-            &lk_queue::serialize_tasks(&[done.clone(), current.clone(), missing]).unwrap(),
-        );
-        let prepared = fixture.prepare();
-        assert_eq!(prepared.summary.pruned_missing_target, 1);
-        fixture.write(Path::new(&done.target.vault_path), &raw);
-        let session = MutationSession::acquire(&fixture.root).unwrap();
-        prepared.apply(&session).unwrap();
-        let retained =
-            lk_queue::read_tasks(&fixture.root.join(".lorekeeper/queue/run.jsonl")).unwrap();
-        assert_eq!(retained.tasks.len(), 2);
-        assert_eq!(retained.tasks[0].task_id, done.task_id);
-        assert_eq!(retained.tasks[1].task_id, current.task_id);
-        assert!(fixture.root.join(&fixture.action).exists());
+    fn answered_rows_retire_beside_owed_work_only_while_their_proof_holds() {
+        for edited in [false, true] {
+            let fixture = Fixture::new();
+            let done: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+            let mut current = done.clone();
+            current.task_id.push_str("-current");
+            current.target.vault_path = "wiki/documents/current.md".into();
+            let raw = format!(
+                "---\ntype: document\nllm_inputs:\n  summary: {}\n---\n## Summary\n",
+                current.cache_hash
+            );
+            fixture.write(Path::new(&current.target.vault_path), &raw);
+            let pending = lk_queue::serialize_tasks(&[done.clone(), current.clone()]).unwrap();
+            fixture.write(Path::new(".lorekeeper/queue/run.jsonl"), &pending);
+            let prepared = fixture.prepare();
+            assert_eq!(prepared.summary.retired_done, 1);
+            if edited {
+                fixture.write(Path::new(&done.target.vault_path), &raw);
+            }
+            let session = MutationSession::acquire(&fixture.root).unwrap();
+            let applied = prepared.apply(&session);
+            let queue = fixture.root.join(".lorekeeper/queue");
+            if edited {
+                assert!(applied.is_err(), "a changed proof refuses the retirement");
+                assert_eq!(
+                    std::fs::read_to_string(queue.join("run.jsonl")).unwrap(),
+                    pending
+                );
+                assert!(!queue.join("processed").exists());
+                assert!(fixture.root.join(&fixture.action).exists());
+                continue;
+            }
+            applied.unwrap();
+            let retained = lk_queue::read_tasks(&queue.join("run.jsonl")).unwrap();
+            assert_eq!(retained.tasks.len(), 1);
+            assert_eq!(retained.tasks[0].task_id, current.task_id);
+            let history = lk_queue::read_tasks(&queue.join("processed/run.jsonl")).unwrap();
+            assert_eq!(history.tasks.len(), 1);
+            assert_eq!(history.tasks[0].task_id, done.task_id);
+            assert!(
+                !fixture.root.join(&fixture.action).exists(),
+                "a retired answer keeps no pending action"
+            );
+        }
     }
 
     #[test]
