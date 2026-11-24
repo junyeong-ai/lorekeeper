@@ -74,8 +74,10 @@ required identity judgment is absent from the observations, use the permitted ta
 read or return `needs-action`. The roster contains guards, not source bodies; native
 revision fields remain opaque and domain-specific.
 
-When `source_read` is present, use its command for a necessary targeted read of
-the exact retained source, including facts omitted from a lossy observation.
+Use `source_read`'s command for a necessary targeted read of any inspected resource of
+this Work, including facts omitted from a lossy observation: `--resource INDEX` selects
+it by its index in the inspected roster, and without it the command reads the retained
+task source (`default_resource`; null for a synthesis, which reads only by index).
 Literal `--find` seeks a text position; `--offset` and `--limit` page in Unicode
 scalars with an explicit `next_offset`. Follow continuation until the required
 claim and qualifications have been read. This does not restart paid inspections,

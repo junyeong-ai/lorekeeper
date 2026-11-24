@@ -156,10 +156,13 @@ pub enum WorkCommand {
         /// Ready node identifier returned by status
         node_id: String,
     },
-    /// Read a current retained source page without recording an observation or completion
+    /// Read a current page of a Work's planned resource without recording an observation or completion
     Source {
         /// Work identifier pinning the task source and its complete current scope
         work_id: String,
+        /// Planned resource index to read; defaults to the Work's retained task source
+        #[arg(long)]
+        resource: Option<usize>,
         /// Half-open Unicode scalar start, also the starting position for literal find
         #[arg(long, default_value = "0")]
         offset: usize,
@@ -4625,12 +4628,20 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
         }
         WorkCommand::Source {
             work_id,
+            resource,
             offset,
             limit,
             find,
         } => {
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
-            source::read(&work, &prepared.resources, offset, limit, find.as_deref())?
+            source::read(
+                &work,
+                &prepared.resources,
+                resource,
+                offset,
+                limit,
+                find.as_deref(),
+            )?
         }
         #[cfg(unix)]
         WorkCommand::Refine {

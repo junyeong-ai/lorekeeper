@@ -208,7 +208,8 @@ result-byte limit. Return after the selected node is recorded; do not drain othe
 
 For a necessary targeted read of an exact Work's retained task input, use
 `lore work source WORK --find 'literal source text' --limit 4000`, then continue
-with `--offset NEXT_OFFSET` as needed. Without `--find`, reading starts at the
+with `--offset NEXT_OFFSET` as needed. `--resource INDEX` reads another planned
+resource of that Work, such as a cited page or a selected owner, the same way. Without `--find`, reading starts at the
 requested Unicode scalar offset. A literal match is a text position, not an event
 identity; duplicate titles remain distinct. Preserve each event's own links,
 attribution and scope, and never infer missing article claims from a title.
@@ -218,8 +219,9 @@ attribution and scope, and never infer missing article claims from a title.
 JSON obeys this Work's input byte limit; a shorter page explicitly continues.
 Each page permits at most the shared inspection scalar workload. The command
 revalidates current Work/configuration/evidence and never records an observation,
-recovers a journal, changes paid outputs or establishes completion. Work without
-a unique retained task source refuses. A stale Work must be replanned and reread.
+recovers a journal, changes paid outputs or establishes completion. Without
+`--resource`, a Work lacking a unique retained task source refuses; name a resource
+index instead. A stale Work must be replanned and reread.
 
 ## Native section finalization
 

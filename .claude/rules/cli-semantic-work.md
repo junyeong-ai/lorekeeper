@@ -14,7 +14,7 @@ paths:
 - Bounded section finalizers use the same structured tool-result host as extraction
   and synthesis for necessary targeted source/review reads. Keep inspection workers
   and whole-input section calls tool-free. `source_read` only exposes this exact
-  Work's retained source; it neither replaces fresh guards nor creates observations.
+  Work's planned resources; it neither replaces fresh guards nor creates observations.
   Event refinement observations retain separate event claims, not a thematic digest.
 - Complete-envelope capacity defers only that target without clipping or rewriting paid
   Work. `execution.work` limits serialized request/result bytes and agent calls per
@@ -47,8 +47,11 @@ paths:
   miss. The index is disposable: maintenance rebuilds it from stored Work and drops
   entries whose origin is gone. Existing Works, reductions and refined nodes are never
   seeded.
-- `work source` reuses fresh Work capture to page its unique retained task input.
-  Literal seeks identify text positions, never events. Bound complete page JSON and
+- `work source` reuses fresh Work capture to page one planned resource: `--resource`
+  selects it by roster index, and its default is the unique retained task input. A queue
+  Work's native finalizer can therefore reread a cited page or selected owner that a lossy
+  observation summarized, instead of only refusing; audit requests carry no `source_read`. Literal seeks identify text
+  positions, never events. Bound complete page JSON and
   scalar counts, report continuation, and never record coverage/completion or recover
   journals. Native `source_read` metadata supplies this capability without source bodies.
 - Fresh source inspection uses the shared scalar workload policy (`semantic-ranges-v2`

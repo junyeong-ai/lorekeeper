@@ -190,7 +190,7 @@ fn instructions(
         ),
         SectionInput::Observations => (
             "completed guarded observations",
-            "Use tools only for decision-relevant read-only access to this exact Work's retained task input through source_read, or to supplied scoped review evidence. Page with lore work source WORK --find LITERAL and continuation --offset; literal matches are text positions, never event identities. Read the needed claim and its qualifications. Source collection, unrelated work, writes, discovery, screening, additional agents and restarting paid inspections are outside this finalization. A lossy observation does not prove that a fact is absent from retained source; use a targeted read when needed. If retained evidence remains insufficient, return needs-action without inventing content.",
+            "Use tools only for decision-relevant read-only access to this exact Work's planned resources, or to supplied scoped review evidence. Page with lore work source WORK [--resource INDEX] --find LITERAL and continuation --offset; without --resource it reads the retained task input; literal matches are text positions, never event identities. Read the needed claim and its qualifications. Source collection, unrelated work, writes, discovery, screening, additional agents and restarting paid inspections are outside this finalization. A lossy observation does not prove that a fact is absent from retained source; use a targeted read when needed. If retained evidence remains insufficient, return needs-action without inventing content.",
         ),
     };
     let mut result = format!(

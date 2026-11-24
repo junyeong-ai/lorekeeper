@@ -3,32 +3,41 @@ use serde_json::{Value, json};
 
 use super::Work;
 
+/// How a finalizer rereads this Work's planned resources: any of them through `--resource` and
+/// its index in the inspected roster, by default the retained task source when the Work has one.
 #[cfg(unix)]
-pub(super) fn descriptor(work: &Work) -> miette::Result<Option<Value>> {
-    let mut sources = work
-        .plan
-        .resources
+pub(super) fn descriptor(work: &Work) -> miette::Result<Value> {
+    let default = retained_source(&work.plan.resources, |guard| guard.authority)?;
+    Ok(json!({"work_id":work.plan.id,"default_resource":default,
+        "command":["lore","work","source",work.plan.id],
+        "offset_unit":"unicode-scalars","max_page_characters":lk_core::semantic::INSPECTION_CHARACTERS.get(),
+        "max_page_bytes":work.max_input_bytes}))
+}
+
+/// The index of the Work's single retained task source, if it has one.
+fn retained_source<T>(
+    resources: &[T],
+    authority: impl Fn(&T) -> SemanticAuthority,
+) -> miette::Result<Option<usize>> {
+    let mut sources = resources
         .iter()
         .enumerate()
-        .filter(|(_, guard)| guard.authority == SemanticAuthority::RetainedInput);
-    let Some((resource, _)) = sources.next() else {
-        return Ok(None);
-    };
+        .filter(|(_, resource)| authority(resource) == SemanticAuthority::RetainedInput);
+    let source = sources.next().map(|(index, _)| index);
     if sources.next().is_some() {
         return Err(miette::miette!(
             "this Work has ambiguous retained task sources"
         ));
     }
-    Ok(Some(json!({"work_id":work.plan.id,"resource":resource,
-        "command":["lore","work","source",work.plan.id],
-        "offset_unit":"unicode-scalars","max_page_characters":lk_core::semantic::INSPECTION_CHARACTERS.get(),
-        "max_page_bytes":work.max_input_bytes})))
+    Ok(source)
 }
 
-/// A read page is a current source view, never an observation or completion receipt.
+/// A read page is a current view of one planned resource, never an observation or completion
+/// receipt. Without `resource` it reads the Work's retained task source.
 pub(super) fn read(
     work: &Work,
     resources: &[SemanticResource],
+    resource: Option<usize>,
     offset: usize,
     limit: usize,
     find: Option<&str>,
@@ -44,18 +53,19 @@ pub(super) fn read(
             "source find requires nonblank literal text"
         ));
     }
-    let mut sources = resources
-        .iter()
-        .enumerate()
-        .filter(|(_, resource)| resource.authority == SemanticAuthority::RetainedInput);
-    let (index, source) = sources
-        .next()
-        .ok_or_else(|| miette::miette!("this Work has no retained task source"))?;
-    if sources.next().is_some() {
-        return Err(miette::miette!(
-            "this Work has ambiguous retained task sources"
-        ));
-    }
+    let index = match resource {
+        Some(index) if index < resources.len() => index,
+        Some(index) => {
+            return Err(miette::miette!(
+                "resource {index} is not one of this Work's {} planned resources",
+                resources.len()
+            ));
+        }
+        None => retained_source(resources, |resource| resource.authority)?.ok_or_else(|| {
+            miette::miette!("this Work has no retained task source; choose a planned resource")
+        })?,
+    };
+    let source = &resources[index];
     let guard = &work.plan.resources[index];
     if offset > guard.characters {
         return Err(miette::miette!(
@@ -167,7 +177,7 @@ mod tests {
         let mut offset = 0;
         let mut reconstructed = String::new();
         loop {
-            let page = read(&work, &resources, offset, 80000, None).unwrap();
+            let page = read(&work, &resources, None, offset, 80000, None).unwrap();
             assert!(bytes(&page) <= work.max_input_bytes);
             assert_eq!(page["status"], "page");
             assert_eq!(page["range"]["start"], offset);
@@ -185,30 +195,63 @@ mod tests {
             }
         }
         assert_eq!(reconstructed, text);
-        let eof = read(&work, &resources, text.chars().count(), 4, None).unwrap();
+        let eof = read(&work, &resources, None, text.chars().count(), 4, None).unwrap();
         assert_eq!(eof["text"], "");
         assert!(eof["next_offset"].is_null());
+    }
+
+    #[test]
+    fn any_planned_resource_reads_by_index_and_only_the_retained_source_by_default() {
+        let resources = vec![
+            SemanticResource {
+                address: "wiki/documents/cited.md".into(),
+                revision: lk_core::concept::file_revision("Cited evidence."),
+                authority: SemanticAuthority::Page,
+                text: "Cited evidence.".into(),
+            },
+            SemanticResource {
+                address: "wiki/concepts/owner.md".into(),
+                revision: lk_core::concept::file_revision("Owner body."),
+                authority: SemanticAuthority::Context,
+                text: "Owner body.".into(),
+            },
+        ];
+        let work = Work::build(
+            &resources,
+            "scope",
+            json!({"purpose":{"operation":"queue","task_kind":"synthesize-concept"}}),
+            WorkLimits {
+                max_input_bytes: 8192,
+                max_result_bytes: 1024,
+            },
+        )
+        .unwrap();
+        let page = read(&work, &resources, Some(1), 0, 100, None).unwrap();
+        assert_eq!(page["resource"], 1);
+        assert_eq!(page["text"], "Owner body.");
+        assert!(read(&work, &resources, Some(2), 0, 100, None).is_err());
+        assert!(read(&work, &resources, None, 0, 100, None).is_err());
     }
 
     #[test]
     fn literal_seek_keeps_duplicate_matches_and_unicode_offsets_distinct() {
         let text = "한🙂Title\nfirst\nTitle\nsecond";
         let (work, resources) = fixture(text, 8192);
-        let first = read(&work, &resources, 0, 12, Some("Title")).unwrap();
+        let first = read(&work, &resources, None, 0, 12, Some("Title")).unwrap();
         assert_eq!(first["range"]["start"], 2);
         assert!(first["text"].as_str().unwrap().starts_with("Title\nfirst"));
-        let second = read(&work, &resources, 3, 12, Some("Title")).unwrap();
+        let second = read(&work, &resources, None, 3, 12, Some("Title")).unwrap();
         assert_eq!(second["range"]["start"], 14);
         assert_eq!(second["text"], "Title\nsecond");
-        let missing = read(&work, &resources, 0, 12, Some("title")).unwrap();
+        let missing = read(&work, &resources, None, 0, 12, Some("title")).unwrap();
         assert_eq!(missing["status"], "not-found");
         assert!(missing.get("text").is_none());
         for invalid in [0, 80001] {
-            assert!(read(&work, &resources, 0, invalid, None).is_err());
+            assert!(read(&work, &resources, None, 0, invalid, None).is_err());
         }
-        assert!(read(&work, &resources, usize::MAX, 1, None).is_err());
-        assert!(read(&work, &resources, 0, 1, Some(" \n")).is_err());
-        let error = read(&work, &resources, 0, 1, Some(&"x".repeat(10000))).unwrap_err();
+        assert!(read(&work, &resources, None, usize::MAX, 1, None).is_err());
+        assert!(read(&work, &resources, None, 0, 1, Some(" \n")).is_err());
+        let error = read(&work, &resources, None, 0, 1, Some(&"x".repeat(10000))).unwrap_err();
         assert!(
             error
                 .downcast_ref::<super::super::state::InputCapacity>()

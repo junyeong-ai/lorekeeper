@@ -408,6 +408,10 @@ fn bounded_sections_read_missing_retained_facts_without_replaying_paid_observati
     }
 }
 
+fn source_start(fixture: &Fixture, id: &str) -> Value {
+    fixture.json(&["work", "source", id, "--limit", "16"])["range"].clone()
+}
+
 #[test]
 fn retained_source_reads_are_current_guarded_and_leave_paid_work_unchanged() {
     let fixture = Fixture::new("codex", 8192);
@@ -420,6 +424,15 @@ fn retained_source_reads_are_current_guarded_and_leave_paid_work_unchanged() {
     assert_eq!(source["guard"]["authority"], "retained-input");
     assert!(source["text"].as_str().unwrap().starts_with("proposal"));
     assert!(source["next_offset"].is_number());
+    let index = source["resource"].to_string();
+    let selected = fixture.json(&["work", "source", id, "--resource", &index, "--limit", "16"]);
+    assert_eq!(selected["range"], source_start(&fixture, id));
+    let outside = fixture
+        .command()
+        .args(["work", "source", id, "--resource", "999"])
+        .output()
+        .unwrap();
+    assert!(!outside.status.success());
     assert_eq!(fixture.source_snapshot(&plan), before);
     assert!(fixture.calls().is_empty());
     assert!(!fixture.work_path(&plan, "seal.json").exists());
