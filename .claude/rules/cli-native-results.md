@@ -52,8 +52,9 @@ paths:
   typed task/target kinds. Extraction/synthesis use tool-enabled final-schema responses;
   bounded audits return structured judgments with supported review/repair tools. Native Rust assembles
   TaskResult/SynthesisResult/assessment metadata from the exact prepared scope, reserves envelope
-  bytes and owns finish/staging. Models return semantic values, needs-action, or
-  extraction-only needs-discovery with explicit DiscoveryQuery values.
+  bytes and owns finish/staging. Models return semantic values, needs-action,
+  extraction-only needs-discovery with explicit DiscoveryQuery values, or synthesis-only
+  needs-review with one review proposal.
 - Section instructions follow the typed input form: whole-input requests read retained
   resources directly; bounded finalizers compose completed observations and their evidence
   mapping. Neither representation may claim the other is supplied. Both retain complete
@@ -95,6 +96,25 @@ paths:
   `rejections.json`). Reasons obey compact UTF-8 JSON string bytes, including
   quotes/escapes, not character count. Signal/cleanup errors and failed fresh scope
   validation stay fatal.
+- A native synthesis finalizer may return `needs-review` with one review proposal
+  (`work/review.rs`): its kind (`conflict`, `evidence-gap`), title, Markdown judgment and
+  the inspected source pages it rests on, by roster index. It takes the coordinator's part
+  the synthesis contract assigns, because a native finalization runs alone on its concept,
+  yet it never writes the vault: Rust maps the indices to the Work's read source pages and
+  their current revisions, refuses concept evidence and concept links in the body, and
+  publishes an open review naming the concept in `subjects` through
+  `lk_vault::plan_curation`, journaled with the Work's read guards. Admission plans that
+  curation, judges concept links through the filesystem and bounds the file stem in bytes;
+  a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
+  fault. The run then replans; the review enters the concept's scope through `subjects`,
+  so the next finalization drafts against it. While a scoped review whose page still names
+  the concept in `subjects` is open, a proposal becomes a needs-action hold instead: a
+  concept carries at most one open native-proposed question, and resolving that review
+  changes the request so a held synthesis is attempted afresh. A review retargeted
+  elsewhere, resolved or unreadable does not hold it. A completed synthesis is not
+  rewritten when its review is later resolved; that takes an explicit resynthesis. Observers record a disagreement as a finding or source
+  question, never as an `unresolved` processing blocker, so bounded Work reaches this
+  finalizer.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster, which presents references and paths, never revisions. Rust
   expands it to the unchanged canonical path/file-revision contract with the file revision

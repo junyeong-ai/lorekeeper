@@ -91,6 +91,15 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
                 results.append({'status':'needs-discovery','value':value,'reason':'Explicit fresh owner discovery is required.'}); continue
         if (mode.startswith('frontier-action') and 'frontier' in target) or (mode=='action' and 'blocked' in target) or (mode=='batch-capacity' and 'blocked' in target and request['max_response_bytes'] < item['max_response_bytes']):
             results.append({'status':'needs-action','value':None,'reason':'A scoped review action is required.'}); continue
+        if mode.startswith('needs-review') and task['kind']=='synthesize-concept':
+            roster=request['inspected_resources'] if completed is not None else item['resources']
+            authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
+            if mode=='needs-review-always' or not any(authority(entry)=='review' for entry in roster):
+                page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
+                (root/'review-proposals').write_text(str(int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1))
+                results.append({'status':'needs-review','value':{'kind':'conflict','title':'Deployment status disagreement',
+                    'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
+                    'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
             path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
         if mode=='changed-review':
@@ -545,6 +554,88 @@ fn native_owns_extraction_and_synthesis_results_for_selected_and_bounded_work_on
                 }
             }
         }
+    }
+}
+
+/// A synthesis finalizer proposes a review instead of holding its task; the run publishes it as
+/// an open review of the concept, replans, and the next finalization completes against it.
+#[test]
+fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_it() {
+    for planned in [false, true] {
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        assert!(fixture.done(&task), "{planned}: {report}");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.root().join("review-proposals")).unwrap(),
+            "1"
+        );
+        let review = std::fs::read_to_string(
+            fixture
+                .root()
+                .join("vault/wiki/explorations/deployment-status-disagreement.md"),
+        )
+        .unwrap();
+        let page = lk_core::frontmatter::parse_page(&review).unwrap();
+        let metadata = &page.frontmatter.fields["review"];
+        assert_eq!(metadata["status"], "open");
+        assert_eq!(metadata["subjects"][0], task.target.vault_path.as_str());
+        assert_eq!(metadata["evidence"].as_array().unwrap().len(), 1);
+        assert!(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/evidence")
+                .read_dir()
+                .unwrap()
+                .next()
+                .is_some(),
+            "the review's evidence is archived"
+        );
+
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review-always").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{planned}: {report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(
+            report["retained_progress"]["action_receipts"], 1,
+            "{report}"
+        );
+        assert_eq!(
+            fixture
+                .root()
+                .join("vault/wiki/explorations")
+                .read_dir()
+                .unwrap()
+                .count(),
+            1,
+            "an open review of the concept refuses a second one"
+        );
+
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review-concept-link").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{planned}: {report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["action_receipts"], 1,
+            "{report}"
+        );
+        assert!(!fixture.root().join("vault/wiki/explorations").exists());
     }
 }
 

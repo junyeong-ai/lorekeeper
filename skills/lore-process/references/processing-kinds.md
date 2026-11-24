@@ -213,7 +213,10 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    an existing review path when found; they never edit shared review pages. The
    coordinator deduplicates and publishes reviews before the final synthesis snapshot,
    then refreshes backlinks and task status and reissues affected work. Draft final
-   synthesis against those revisions. Review proposals are not part of the synthesis
+   synthesis against those revisions. A native finalization runs alone on its concept:
+   when no scoped review in its request records the disagreement, it returns the review
+   as a `needs-review` proposal, the run publishes it as an open review of this concept
+   and replans, and the next finalization drafts the synthesis against it. Review proposals are not part of the synthesis
    result JSON; do not add fields to that contract.
    Do not create a review for superficial wording differences or already-explained scope.
 6. Length follows reusable understanding, not the number of citations. Lead with the

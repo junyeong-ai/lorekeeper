@@ -195,6 +195,8 @@ mod native {
         screening_packets: usize,
         staged_requests: usize,
         discovery_recipes: usize,
+        /// Open reviews a synthesis finalizer proposed and the run published for its concept.
+        synthesis_reviews: usize,
         action_receipts: usize,
         queue_publication_observed: bool,
     }
@@ -205,6 +207,7 @@ mod native {
                 || self.screening_packets != 0
                 || self.staged_requests != 0
                 || self.discovery_recipes != 0
+                || self.synthesis_reviews != 0
                 || self.action_receipts != 0
                 || self.queue_publication_observed
         }
@@ -3020,6 +3023,18 @@ mod native {
                     );
                     WorkStep::Staged
                 }
+                Ok(crate::commands::work::ResultFinish::ReviewRecorded(path)) => {
+                    metrics.outcome = WorkOutcome::Recorded;
+                    self.result
+                        .work_telemetry
+                        .retained_progress
+                        .synthesis_reviews += 1;
+                    self.record("synthesis review", StageState::Completed, Some(path));
+                    self.queue_admitted.clear();
+                    self.queue_turn = None;
+                    self.queue_replan = QueueReplan::Invalidate;
+                    WorkStep::Replan
+                }
                 Ok(crate::commands::work::ResultFinish::DiscoveryRecorded) => {
                     metrics.outcome = WorkOutcome::Recorded;
                     self.result
@@ -3234,6 +3249,14 @@ mod native {
                             StageState::Skipped,
                             input["task"]["task_id"].as_str().map(str::to_owned),
                         );
+                    }
+                    Ok(crate::commands::work::generation::SelectedFinish::ReviewRecorded(path)) => {
+                        self.result
+                            .work_telemetry
+                            .retained_progress
+                            .synthesis_reviews += 1;
+                        recovered = true;
+                        self.record("synthesis review", StageState::Completed, Some(path));
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
                         self.result.work_telemetry.retained_progress.action_receipts += 1;

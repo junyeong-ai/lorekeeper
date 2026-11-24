@@ -125,6 +125,13 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   Include current queries still needed for the extraction; omitted queries are not
   carried forward. Native validation checks the resulting scope afresh. Changing
   queries alone does not establish that the missing semantic evidence was obtained.
+- Synthesis review: `status: needs-review`, `value: {kind, title, body, evidence}` and a
+  concrete nonblank reason, when the synthesis contract requires a durable review for a
+  material disagreement or evidence gap that no scoped review in the request records.
+  `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
+  links no concept page; `evidence` indexes the cited source pages it rests on. Rust
+  publishes it as an open review of the concept and replans. While an open scoped review
+  of the concept exists, draft against it instead.
 
 An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
@@ -148,7 +155,8 @@ observations remain retained. Recovery grants no observation, seal, publication 
 semantic approval. Identical requests and exact request cycles defer without another
 call. Never infer queries from an earlier action reason or edit recovery receipts.
 Changed scope or review publication requires fresh preparation and regeneration,
-never new guards on old prose. Return `needs-action` for other required steps.
+never new guards on old prose. A synthesis that needs a durable review returns
+`needs-review` rather than holding. Return `needs-action` for other required steps.
 An unchanged exact request/action defers before another call; independent work continues.
 Actions bind the actual supplied request, including its selected tasks and shared response
 allowance. A changed action request is reconsidered individually; a new unchanged action

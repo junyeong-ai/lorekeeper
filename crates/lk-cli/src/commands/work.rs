@@ -19,6 +19,8 @@ mod publication;
 mod receipt;
 mod resources;
 #[cfg(unix)]
+mod review;
+#[cfg(unix)]
 pub(super) mod section;
 mod selection;
 mod source;
@@ -3730,6 +3732,7 @@ pub(super) enum ResultFinish {
     Staged,
     NeedsAction(String),
     DiscoveryRecorded,
+    ReviewRecorded(String),
     Rejected(String),
 }
 
@@ -3757,6 +3760,7 @@ pub(super) fn finish_result(
     let outcome = match &prepared.subject {
         Subject::Audit { .. } => audit::assemble(&prepared, reply.clone())?,
         Subject::Queue { task_id, .. } => generation::assemble_prepared(
+            root,
             config,
             &super::queue::current_task(root, task_id)?,
             &prepared,
@@ -3827,6 +3831,27 @@ pub(super) fn finish_result(
                 plan,
             )?;
             Ok(ResultFinish::DiscoveryRecorded)
+        }
+        generation::Outcome::NeedsReview(..) => {
+            unreachable!("assemble_prepared admits or refuses every review")
+        }
+        generation::Outcome::ReviewAdmitted(review) => {
+            let Subject::Queue { task_id, .. } = &prepared.subject else {
+                return Err(miette::miette!(
+                    "a review proposal requires a queue subject"
+                ));
+            };
+            let task = super::queue::current_task(root, task_id)?;
+            let capture = work.capture_native_completion(root, &prepared.resources, result.kind)?;
+            if capture.result() != &completed {
+                return Err(miette::miette!(
+                    "completed Work changed before its review proposal"
+                ));
+            }
+            let mut plan = lk_vault::MutationPlan::default();
+            capture.plan_read_guards(&mut plan);
+            let path = review::record(session, &task, &prepared, review, plan)?;
+            Ok(ResultFinish::ReviewRecorded(path))
         }
         generation::Outcome::NeedsAction(reason) => {
             let mut plan = work.plan_finalization_action_for(

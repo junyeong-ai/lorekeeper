@@ -22,6 +22,8 @@ pub(in crate::commands) enum Outcome {
     Complete(Value),
     NeedsAction(String),
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
+    NeedsReview(super::review::ReviewProposal, String),
+    ReviewAdmitted(super::review::AdmittedReview),
     Rejected(rejection::ProposalRejection),
 }
 
@@ -30,6 +32,7 @@ pub(in crate::commands) enum SelectedFinish {
     NeedsAction(String),
     ScopeChanged,
     DiscoveryRecorded,
+    ReviewRecorded(String),
     Rejected(String),
 }
 
@@ -48,10 +51,13 @@ pub(in crate::commands) fn schema() -> Value {
         {"type":"object","additionalProperties":false,"properties":{"concepts":{"type":"array","items":concept}},"required":["concepts"]},
         {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]}},"required":["synthesis","related"]},
         {"type":"object","additionalProperties":false,"properties":{"queries":{"type":"array","minItems":1,"maxItems":16,"items":{
-            "type":"object","additionalProperties":false,"properties":{"query":{"type":"string","minLength":1},"phrase":{"type":"boolean"},"spacing":{"type":"boolean"}},"required":["query","phrase","spacing"]}}},"required":["queries"]}]});
+            "type":"object","additionalProperties":false,"properties":{"query":{"type":"string","minLength":1},"phrase":{"type":"boolean"},"spacing":{"type":"boolean"}},"required":["query","phrase","spacing"]}}},"required":["queries"]},
+        {"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["conflict","evidence-gap"]},
+            "title":{"type":"string","minLength":1},"body":{"type":"string","minLength":1},
+            "evidence":{"type":"array","minItems":1,"items":{"type":"integer","minimum":0}}},"required":["kind","title","body","evidence"]}]});
     json!({"type":"object","additionalProperties":false,"properties":{"results":{"type":"array","items":{
         "type":"object","additionalProperties":false,"properties":{
-            "status":{"type":"string","enum":["complete","needs-action","needs-discovery"]},"value":value,"reason":{"type":["string","null"]}},
+            "status":{"type":"string","enum":["complete","needs-action","needs-discovery","needs-review"]},"value":value,"reason":{"type":["string","null"]}},
         "required":["status","value","reason"]}}},"required":["results"]})
 }
 
@@ -95,6 +101,13 @@ pub(super) fn assemble(
             let recovery: super::discovery::recovery::Recovery =
                 serde_json::from_value(value).into_diagnostic()?;
             return Ok(Outcome::NeedsDiscovery(recovery.validate()?, reason));
+        }
+        ("needs-review", Some(value), Some(reason))
+            if task.kind == TaskKind::SynthesizeConcept && !reason.trim().is_empty() =>
+        {
+            let proposal: super::review::ReviewProposal =
+                serde_json::from_value(value).into_diagnostic()?;
+            return Ok(Outcome::NeedsReview(proposal, reason));
         }
         ("complete", Some(value), None) if value.is_object() => value,
         _ => {
@@ -223,6 +236,7 @@ pub(super) fn assemble(
 }
 
 pub(super) fn assemble_prepared(
+    root: &Path,
     config: &lk_core::config::Config,
     task: &QueueTask,
     prepared: &Prepared,
@@ -230,7 +244,7 @@ pub(super) fn assemble_prepared(
     reply: Value,
     limit: usize,
 ) -> miette::Result<Outcome> {
-    assemble(
+    let outcome = assemble(
         task,
         &prepared.subject,
         &prepared.result_binding()?,
@@ -238,7 +252,18 @@ pub(super) fn assemble_prepared(
         &Owners::build(config, prepared)?,
         reply,
         limit,
-    )
+    )?;
+    Ok(match outcome {
+        Outcome::NeedsReview(proposal, reason) => {
+            match super::review::admit(root, config, task, prepared, proposal)? {
+                Ok(review) => Outcome::ReviewAdmitted(review),
+                Err(refusal) => {
+                    Outcome::NeedsAction(format!("{reason} (review refused: {refusal})"))
+                }
+            }
+        }
+        outcome => outcome,
+    })
 }
 
 #[derive(Debug)]
@@ -318,11 +343,25 @@ pub(super) fn minimum_reply(task: &QueueTask) -> miette::Result<Value> {
     Ok(json!({"status":"complete","value":value,"reason":null}))
 }
 
-pub(super) fn instruction() -> String {
-    format!(
-        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction alone may return {{status: needs-discovery, value: {{queries: [{{query: explicit_query, phrase: boolean, spacing: boolean}}]}}, reason: nonblank}} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion. Extraction semantic_object contains concepts with semantic name/category/aliases/synthesis/rss_evidence fields and admission {{decision: new}} or {{decision: reuse, owner_ref: exact_reference}}. Each task or completed Work supplies its own owners roster. Reuse only a reference from that exact roster after the required identity comparison. Never return owner paths or revisions; Rust expands the selected reference into the unchanged canonical ReportedConcept owner. An empty owners roster permits no reuse; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. If extraction needs new discovery, use needs-discovery with explicit queries. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
+/// The extraction-only reply that asks for new lexical discovery.
+const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion.";
+
+/// The synthesis-only reply that proposes the durable review its contract requires.
+const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no scoped review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
+
+pub(super) fn instruction(kinds: impl IntoIterator<Item = TaskKind>) -> String {
+    let kinds = kinds.into_iter().collect::<Vec<_>>();
+    let mut instruction = format!(
+        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction semantic_object contains concepts with semantic name/category/aliases/synthesis/rss_evidence fields and admission {{decision: new}} or {{decision: reuse, owner_ref: exact_reference}}. Each task or completed Work supplies its own owners roster. Reuse only a reference from that exact roster after the required identity comparison. Never return owner paths or revisions; Rust expands the selected reference into the unchanged canonical ReportedConcept owner. An empty owners roster permits no reuse; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
         crate::commands::execution::finalization::publication_rules()
-    )
+    );
+    if kinds.contains(&TaskKind::ExtractConcepts) {
+        instruction = format!("{instruction} {DISCOVERY_REPLY}");
+    }
+    if kinds.contains(&TaskKind::SynthesizeConcept) {
+        instruction = format!("{instruction} {REVIEW_REPLY}");
+    }
+    instruction
 }
 
 pub(super) enum Admission {
@@ -504,6 +543,7 @@ pub(in crate::commands) fn finish_selected_controlled(
     let path = GENERATION.path(&task.task_id, &task.cache_hash);
     let mut plan = lk_vault::MutationPlan::default();
     let reason = match assemble_prepared(
+        root,
         config,
         &task,
         &prepared,
@@ -541,6 +581,13 @@ pub(in crate::commands) fn finish_selected_controlled(
                 plan,
             )?;
             return Ok(SelectedFinish::DiscoveryRecorded);
+        }
+        Outcome::NeedsReview(..) => {
+            unreachable!("assemble_prepared admits or refuses every review")
+        }
+        Outcome::ReviewAdmitted(review) => {
+            let path = super::review::record(session, &task, &prepared, review, plan)?;
+            return Ok(SelectedFinish::ReviewRecorded(path));
         }
         Outcome::NeedsAction(reason) => {
             prepared.guard_pages(&mut plan);

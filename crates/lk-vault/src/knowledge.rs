@@ -216,7 +216,7 @@ pub fn curate(
     categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<CurationResult, VaultError> {
-    let (plan, result) = build_curation(session.root(), dirs, categories, request)?;
+    let (plan, result) = plan_curation(session.root(), dirs, categories, request)?;
     session.apply(plan)?;
     Ok(result)
 }
@@ -227,12 +227,14 @@ pub fn preview_curation(
     categories: &[ConceptCategory],
     request: CurationPlan,
 ) -> Result<CurationResult, VaultError> {
-    let (plan, result) = build_curation(root, dirs, categories, request)?;
+    let (plan, result) = plan_curation(root, dirs, categories, request)?;
     plan.validate_addresses(root)?;
     Ok(result)
 }
 
-fn build_curation(
+/// The guarded plan a curation publishes, for a caller that journals it together with its own
+/// guards in one session.
+pub fn plan_curation(
     root: &Path,
     dirs: &VaultDirs,
     categories: &[ConceptCategory],
@@ -944,7 +946,7 @@ mod tests {
         .unwrap();
         drop(session);
         let updated = std::fs::read_to_string(root.path().join(path)).unwrap();
-        let (plan, _) = build_curation(
+        let (plan, _) = plan_curation(
             root.path(),
             &VaultDirs::default(),
             &[],
@@ -980,7 +982,7 @@ mod tests {
             "concepts": [{"path": path, "revision": file_revision(before), "tags": ["reviewed"]}]
         }))
         .unwrap();
-        let (plan, _) = build_curation(root.path(), &dirs, &[], request).unwrap();
+        let (plan, _) = plan_curation(root.path(), &dirs, &[], request).unwrap();
         let serialized = serde_json::to_value(&plan).unwrap();
         let after = serialized["steps"]
             .as_array()
@@ -1032,7 +1034,7 @@ mod tests {
             .unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
             let (plan, _) =
-                build_curation(root.path(), &VaultDirs::default(), &[], request).unwrap();
+                plan_curation(root.path(), &VaultDirs::default(), &[], request).unwrap();
             let previous = std::fs::read_to_string(root.path().join(changed_path)).unwrap();
             let changed = format!("{previous}\nExternal edit.\n");
             writer
