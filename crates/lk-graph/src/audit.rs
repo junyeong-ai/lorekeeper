@@ -36,6 +36,14 @@ const DOCUMENT_POLICY: &str = "document-audit-v2";
 
 pub mod selection;
 
+/// Decode stored audit state with unique fields at every nesting level. A duplicated key would
+/// otherwise keep one value silently, and the next rewrite of the store would drop the other.
+pub(crate) fn decode_state<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, GraphError> {
+    lk_core::json::decode_object(raw.as_bytes())
+        .and_then(serde_json::from_value)
+        .map_err(error)
+}
+
 fn error(message: impl std::fmt::Display) -> GraphError {
     GraphError::Io(message.to_string())
 }
@@ -1140,7 +1148,7 @@ fn load_controlled(
 ) -> Result<(Option<String>, Receipts), GraphError> {
     match load_controlled_raw(root, read)? {
         Some(raw) => {
-            let state = serde_json::from_str(&raw).map_err(error)?;
+            let state = decode_state(&raw)?;
             Ok((Some(raw), state))
         }
         None => Ok((None, Receipts::default())),
@@ -2390,9 +2398,7 @@ fn load_synthesis_receipts(
     let Some(raw) = load_controlled_raw(root, read)? else {
         return Ok((receipts, unavailable));
     };
-    let store = lk_core::json::decode_object(raw.as_bytes())
-        .and_then(serde_json::from_value::<Store>)
-        .map_err(error)?;
+    let store = decode_state::<Store>(&raw)?;
     let revisions = pages
         .iter()
         .map(|page| (page_address(&page.path), page.revision.as_deref()))
@@ -4307,6 +4313,46 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("stored discovery")
+        );
+    }
+
+    #[test]
+    fn a_duplicated_ledger_key_refuses_every_audit_write_instead_of_dropping_a_value() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/subject.md";
+        let raw = "---\ntype: document\ntitle: Subject\n---\nAn authored scope.\n";
+        write(root.path(), path, raw);
+        let recipe = |query: &str| {
+            format!(
+                r#"{{"subject_revision":"r","queries":[{{"query":"{query}","phrase":true,"spacing":false}}]}}"#
+            )
+        };
+        let ledger = format!(
+            r#"{{"entries":{{}},"pending":[],"next_class":"changed","discovery":{{"wiki/documents/other.md":{},"wiki/documents/other.md":{}}}}}"#,
+            recipe("first"),
+            recipe("second")
+        );
+        write(root.path(), STATE, &ledger);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let recorded = record_discovery(
+            &session,
+            &dirs,
+            &scan(root.path()),
+            AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(raw),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "authored scope".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        );
+        assert!(recorded.unwrap_err().to_string().contains("duplicate"));
+        assert_eq!(
+            std::fs::read_to_string(root.path().join(STATE)).unwrap(),
+            ledger
         );
     }
 

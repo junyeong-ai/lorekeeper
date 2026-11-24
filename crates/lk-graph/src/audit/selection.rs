@@ -290,7 +290,7 @@ fn read_artifact<T: serde::de::DeserializeOwned>(
     if file_revision(&raw) != expected {
         return Err(error("audit selection artifact revision differs"));
     }
-    let value = serde_json::from_str(&raw).map_err(error)?;
+    let value = super::decode_state(&raw)?;
     Ok((raw, value))
 }
 
@@ -1046,7 +1046,7 @@ fn capture_packet_status(
             .guards
             .get(&path)
             .ok_or_else(|| error("captured audit packet is absent"))?;
-        let packet: PacketReceipt = serde_json::from_str(raw).map_err(error)?;
+        let packet: PacketReceipt = super::decode_state(raw)?;
         if revision(&packet.request)? != revision(expected)? {
             recorded = false;
         }
@@ -1216,7 +1216,7 @@ pub fn record(
                     .guards
                     .get(&path)
                     .ok_or_else(|| error("captured audit receipt is absent"))?;
-                let packet: PacketReceipt = serde_json::from_str(raw).map_err(error)?;
+                let packet: PacketReceipt = super::decode_state(raw)?;
                 repeated &= revision(&packet.request)? == *packet_revision
                     && packet.decisions == *decisions;
             }
