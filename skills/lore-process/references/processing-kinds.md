@@ -108,7 +108,11 @@ The `### heading` lines themselves must be preserved — only replace the body
 text between headings. Match each body to its own source link and attribution;
 identical titles do not make events interchangeable. A link-only event cannot
 establish the linked article's findings, and a truncated excerpt supports only
-the content actually retained. Stage the complete replacement section as a `.section.json` result; the applier
+the content actually retained. When an event retained only its title, link, feed
+metadata or an access-check page, its body states in one sentence that the article
+content was not retained and keeps the link; that completes the event, and it never
+holds the section. When retained sources disagree on a detail, attribute each version
+to its source instead of choosing one. Stage the complete replacement section as a `.section.json` result; the applier
 checks the event heading sequence and stamps `llm_inputs.refine_events_done`.
 
 ## `kind: identify-themes`
