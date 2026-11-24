@@ -9,6 +9,11 @@ use super::application::{
 };
 
 mod history;
+
+/// Whether processed history can hold `row` as a retained reference.
+pub(super) fn is_retainable(row: &str) -> bool {
+    history::reference(row).is_ok()
+}
 mod recovery;
 #[cfg(unix)]
 pub(in crate::commands) use recovery::recover_sections_controlled;
@@ -538,9 +543,6 @@ pub(in crate::commands) fn blocked_tasks_controlled(
         let task = pending.tasks.get(&key).ok_or_else(|| {
             miette::miette!("active rejected proposal has no trusted pending task")
         })?;
-        if super::resolve_target_path(&task.target.vault_path).is_none() {
-            return Err(miette::miette!("invalid retained task target"));
-        }
         match super::classify_task_controlled(&root, task, &mut revisions, read)? {
             super::TaskStatus::Current => {}
             super::TaskStatus::Done
@@ -1087,7 +1089,9 @@ mod tests {
                 .map(|path| std::fs::read(root.join(path)).ok());
             let blocked = blocked_tasks(&root, &config, &config_revision);
             match state {
-                "done" | "stale" | "missing" => assert!(blocked.unwrap().is_empty(), "{state}"),
+                "done" | "stale" | "missing" | "invalid-path" => {
+                    assert!(blocked.unwrap().is_empty(), "{state}")
+                }
                 "current" => assert!(
                     blocked
                         .unwrap()

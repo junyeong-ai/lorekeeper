@@ -215,6 +215,7 @@ impl clap::ValueEnum for TaskStatus {
             Self::Stale,
             Self::MissingTarget,
             Self::Unreadable,
+            Self::InvalidTarget,
         ]
     }
 
@@ -1911,8 +1912,8 @@ struct PruneSummary {
     kept_staged: usize,
     /// Done tasks retired to processed history.
     retired_done: usize,
-    /// Done tasks kept beside their run's remaining work because the pages proving them
-    /// answered changed during this prune. A later prune retires them.
+    /// Done tasks kept pending: the pages proving them answered changed during this prune, or
+    /// processed history could not hold their row as written. A later prune retires the first.
     kept_answered: usize,
     files_rewritten: usize,
     files_deleted: usize,
@@ -2523,6 +2524,7 @@ fn read_source_revision_with_reader_controlled(
 /// refused) rather than being joined onto the root as-is.
 fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
     lk_core::link::resolve_dest(Path::new(""), vault_path)
+        .filter(|path| !path.as_os_str().is_empty())
 }
 
 fn classify_against_page(
@@ -4038,10 +4040,12 @@ mod tests {
         );
         let mut current = task("daily/s/2026-05-24.md", "live");
         current.task_id = "sum-current".into();
+        let mut empty = task(".", "y");
+        empty.task_id = "sum-empty".into();
         let file = write_queue_file(
             &queue_dir,
             "run-1.jsonl",
-            &[task("../notes.md", "x"), current.clone()],
+            &[task("../notes.md", "x"), empty, current.clone()],
         );
         let before = std::fs::read_to_string(&file).unwrap();
         let read = lk_vault::ReadControl::default();
@@ -4049,11 +4053,11 @@ mod tests {
         assert_eq!(selected.len(), 1, "planning skips the invalid row");
         assert_eq!(selected[0].task_id, current.task_id);
         let settlement = check::inspect(dir.path()).unwrap();
-        assert_eq!(settlement.invalid_target, 1);
+        assert_eq!(settlement.invalid_target, 2);
         assert!(!settlement.is_settled(), "check reports the row for repair");
         let summary =
             prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
-        assert_eq!(summary.kept_invalid_target, 1);
+        assert_eq!(summary.kept_invalid_target, 2);
         assert_eq!(summary.pruned_missing_target, 0);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }

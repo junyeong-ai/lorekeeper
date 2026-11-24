@@ -324,7 +324,7 @@ pub(super) fn apply(
                     None,
                     &snapshots,
                     super::application::Outcome::Dropped {
-                        reason: "done, stale or missing target".into(),
+                        reason: "done, stale, missing or invalid target".into(),
                     },
                 );
             }

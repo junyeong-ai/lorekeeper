@@ -171,6 +171,12 @@ fn prepare_with_classifier(
                     summary.kept_current += 1;
                     rows.push((task, line, false));
                 }
+                // Processed history must hold the row as written, or the next full cleanup that
+                // reads it refuses; such an answer stays pending and guards nothing.
+                TaskStatus::Done if !super::rejections::is_retainable(line) => {
+                    summary.kept_answered += 1;
+                    rows.push((task, line, false));
+                }
                 TaskStatus::Done => {
                     done_pages = done_pages.and_then(|mut pages| {
                         retain_snapshots(&mut pages, captured_pages)?;
@@ -216,6 +222,7 @@ fn prepare_with_classifier(
             Err(path) if work_left == 0 => return Err(classification_drift(path)),
             Err(_) => false,
         };
+        let done = rows.iter().filter(|(_, _, answered)| *answered).count();
         let (answered, kept): (Vec<_>, Vec<_>) = rows
             .into_iter()
             .partition(|(_, _, answered)| *answered && retire_answered);
@@ -223,11 +230,8 @@ fn prepare_with_classifier(
         let remaining: String = kept.iter().map(|(_, line, _)| *line).collect();
         let answered: Vec<_> = answered.into_iter().map(|(task, _, _)| task).collect();
         let kept: Vec<_> = kept.into_iter().map(|(task, _, _)| task).collect();
-        if retire_answered {
-            summary.retired_done += answered.len();
-        } else {
-            summary.kept_answered += kept.len() - work_left;
-        }
+        summary.retired_done += answered.len();
+        summary.kept_answered += done - answered.len();
         for task in answered.iter().chain(&kept) {
             retained.insert((task.task_id.clone(), task.cache_hash.clone()));
         }
@@ -889,13 +893,21 @@ mod tests {
             row["extension"] = json!({"kept": true});
             format!("{}\r\n", row)
         };
-        let (answered, owed) = (extended(&done), extended(&current));
+        let mut unheld = done.clone();
+        unheld.task_id.push_str("-extended");
+        let answered = format!("{}\r\n", serde_json::to_string(&done).unwrap());
+        let (unretainable, owed) = (extended(&unheld), extended(&current));
         fixture.write(
             Path::new(".lorekeeper/queue/run.jsonl"),
-            &format!("{answered}\n{owed}"),
+            &format!("{answered}\n{unretainable}{owed}"),
         );
-        fixture
-            .prepare()
+        let prepared = fixture.prepare();
+        assert_eq!(prepared.summary.retired_done, 1);
+        assert_eq!(
+            prepared.summary.kept_answered, 1,
+            "a row processed history cannot hold stays pending"
+        );
+        prepared
             .apply(&MutationSession::acquire(&fixture.root).unwrap())
             .unwrap();
         let queue = fixture.root.join(".lorekeeper/queue");
@@ -905,7 +917,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(queue.join("run.jsonl")).unwrap(),
-            owed
+            format!("{unretainable}{owed}")
         );
     }
 
