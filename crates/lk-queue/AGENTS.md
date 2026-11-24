@@ -47,10 +47,14 @@ lives in `lk-vault`/`lk-pipeline`.
   before classification, packet export, regeneration or apply. Matching markers
   cannot excuse malformed inputs or an unsupported policy.
 - CLI status is authoritative: only `current` is work. Stale/missing targets are
-  distinct from `done`; unreadable tasks remain for diagnosis. An unparseable line
+  distinct from `done`; unreadable tasks remain for diagnosis. A target address that
+  does not resolve is `invalid-target`: never work, never dropped, and unsettled for
+  `queue check` until its line is repaired. An unparseable line
   blocks its file rather than licensing partial destructive pruning. Prune retires
   answered tasks to `processed/` history even while their run holds work, guarded by
   the pages that proved them answered, so pending reads scale with work still owed.
+  Retirement decodes rows only to classify them; every row it keeps or moves is its
+  exact original line.
 - Explicit regeneration journals the replaced pending request's exact bytes into
   processed history with the new request and completion invalidation. Preserve
   sibling lines verbatim; unknown historical policy cannot keep superseded work

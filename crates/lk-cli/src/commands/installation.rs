@@ -636,12 +636,14 @@ fn refuse_while_work_is_queued(opts: &GlobalOptions, force: bool) -> miette::Res
         return Ok(());
     }
     Err(miette::miette!(
-        "queue is not settled: {} current task(s), {} unreadable task(s), {} unparseable line(s), \
+        "queue is not settled: {} current task(s), {} unreadable task(s), {} invalid target(s), \
+         {} unparseable line(s), \
          {} staged result(s), pending mutation: {} \
          — inspect with `lore queue check` and drain with `/lore-process` first, \
          or pass `--force` to update anyway",
         state.current,
         state.unreadable,
+        state.invalid_target,
         state.unparseable_lines,
         state.staged_results.len(),
         state.pending_mutation

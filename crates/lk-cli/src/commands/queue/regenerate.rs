@@ -185,7 +185,10 @@ pub(super) fn run(
                         candidate.task_id
                     ));
                 }
-                TaskStatus::Stale | TaskStatus::MissingTarget | TaskStatus::Unreadable => {}
+                TaskStatus::Stale
+                | TaskStatus::MissingTarget
+                | TaskStatus::InvalidTarget
+                | TaskStatus::Unreadable => {}
             }
         }
     }

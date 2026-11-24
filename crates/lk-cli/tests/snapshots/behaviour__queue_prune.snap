@@ -5,4 +5,4 @@ expression: "observe(staged.path(), argv)"
 exit: 0
 --- stdout ---
 --- stderr ---
-queue prune: dropped 0 stale + 0 missing-target, kept 0 current + 0 unreadable + 0 unparseable + 0 blocked + 0 answered by a staged result + 0 answered awaiting proof, 0 done retired; 0 file(s) rewritten, 0 archived, 0 deleted
+queue prune: dropped 0 stale + 0 missing-target, kept 0 current + 0 unreadable + 0 invalid-target + 0 unparseable + 0 blocked + 0 answered by a staged result + 0 answered awaiting proof, 0 done retired; 0 file(s) rewritten, 0 archived, 0 deleted

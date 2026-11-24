@@ -213,7 +213,10 @@ pub(super) fn apply(
             let state = classification.status();
             if matches!(
                 state,
-                TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
+                TaskStatus::Done
+                    | TaskStatus::Stale
+                    | TaskStatus::MissingTarget
+                    | TaskStatus::InvalidTarget
             ) {
                 super::application::retire_group(root, task, &snapshots, classification, session)?;
                 return Ok(false);

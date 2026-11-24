@@ -160,6 +160,11 @@ pub enum TaskStatus {
     /// that re-renders it re-enqueues the work under the heading the page now has — the
     /// same self-healing an unparseable result file relies on.
     MissingTarget,
+    /// The task's target address does not resolve to a vault path, so no page can ever answer
+    /// it and nothing proved one absent. Neither work nor dead: no session can do it, and
+    /// dropping it would erase its retained input. Reported and retained until the queue line
+    /// is repaired, without blocking independent work.
+    InvalidTarget,
 }
 
 /// Which queued artifact is being classified. They share every fact about the target page
@@ -189,6 +194,7 @@ impl TaskStatus {
             TaskStatus::Stale => "stale",
             TaskStatus::MissingTarget => "missing-target",
             TaskStatus::Unreadable => "unreadable",
+            TaskStatus::InvalidTarget => "invalid-target",
         }
     }
 
@@ -441,7 +447,10 @@ pub(super) fn current_tasks_controlled(
                     task.task_id
                 ));
             }
-            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget => {}
+            TaskStatus::Done
+            | TaskStatus::Stale
+            | TaskStatus::MissingTarget
+            | TaskStatus::InvalidTarget => {}
         }
     }
     read.check().into_diagnostic()?;
@@ -715,7 +724,10 @@ pub(super) fn require_citation_origin_quiescent(root: &Path, origin: &Path) -> m
         }
         if matches!(
             classify_task(root, task, &mut revisions)?,
-            TaskStatus::Current | TaskStatus::Unreadable | TaskStatus::MissingTarget
+            TaskStatus::Current
+                | TaskStatus::Unreadable
+                | TaskStatus::MissingTarget
+                | TaskStatus::InvalidTarget
         ) {
             return Err(miette::miette!(
                 "pending task {} touches citation origin; finish or repair it first",
@@ -1139,7 +1151,10 @@ async fn apply_into(
                     "target page will not parse; repair it and this result applies"
                 ));
             }
-            status @ (TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget) => {
+            status @ (TaskStatus::Done
+            | TaskStatus::Stale
+            | TaskStatus::MissingTarget
+            | TaskStatus::InvalidTarget) => {
                 drop_dead(status.as_str());
                 dropped += 1;
                 application::retire_group(
@@ -1685,6 +1700,8 @@ pub(crate) struct QueueLoad {
     pub work: usize,
     /// The target is unreadable or the synthesis input is inconsistent, so work is blocked.
     pub unreadable: usize,
+    /// The task names a target address outside the vault, so its queue line needs repair.
+    pub invalid_target: usize,
     /// The queue LINE decoded no target at all, so the work it names is unknown.
     pub unparseable: usize,
 }
@@ -1703,6 +1720,7 @@ pub(crate) fn queue_load_controlled(
     let mut load = QueueLoad {
         work: 0,
         unreadable: 0,
+        invalid_target: 0,
         unparseable: 0,
     };
     for file in pending_queue_files_controlled(&queue_dir, control)? {
@@ -1715,6 +1733,7 @@ pub(crate) fn queue_load_controlled(
             match classify_task_controlled(vault_root, &task, &mut revisions, control)? {
                 s if s.is_work() => load.work += 1,
                 TaskStatus::Unreadable => load.unreadable += 1,
+                TaskStatus::InvalidTarget => load.invalid_target += 1,
                 _ => {}
             }
         }
@@ -1728,6 +1747,7 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
     let QueueLoad {
         work: current,
         unreadable,
+        invalid_target,
         unparseable,
     } = queue_load(&vault_root)?;
     // stdout stays the machine contract: how many tasks a drain can act on. A task nothing can
@@ -1741,6 +1761,12 @@ async fn count(opts: &super::GlobalOptions, root: Option<PathBuf>) -> miette::Re
         eprintln!(
             "warning: {unreadable} task(s) have unreadable targets or inconsistent synthesis inputs — \
              `lore queue status` names them; repair the page or task before retrying."
+        );
+    }
+    if invalid_target > 0 {
+        eprintln!(
+            "warning: {invalid_target} task(s) name a target address outside the vault — \
+             `lore queue status` names them; repair or remove their queue lines."
         );
     }
     if unparseable > 0 {
@@ -1802,12 +1828,13 @@ fn queue_status(vault_root: &Path, selected: Option<TaskStatus>) -> miette::Resu
 
 fn print_status(report: &QueueStatus, json: bool) {
     let count = |status: TaskStatus| report.classified.iter().filter(|&&c| c == status).count();
-    let (current, done, stale, missing, unreadable) = (
+    let (current, done, stale, missing, unreadable, invalid) = (
         count(TaskStatus::Current),
         count(TaskStatus::Done),
         count(TaskStatus::Stale),
         count(TaskStatus::MissingTarget),
         count(TaskStatus::Unreadable),
+        count(TaskStatus::InvalidTarget),
     );
     if json {
         let tasks: Vec<serde_json::Value> = report
@@ -1835,6 +1862,7 @@ fn print_status(report: &QueueStatus, json: bool) {
                 "stale": stale,
                 "missing_target": missing,
                 "unreadable": unreadable,
+                "invalid_target": invalid,
                 "unparseable_lines": report.unparseable,
                 "tasks": tasks,
             }
@@ -1852,7 +1880,7 @@ fn print_status(report: &QueueStatus, json: bool) {
         }
         eprintln!(
             "queue: {current} current, {done} done, {stale} stale, {missing} missing-target, \
-             {unreadable} unreadable across {} task(s){}",
+             {unreadable} unreadable, {invalid} invalid-target across {} task(s){}",
             report.classified.len(),
             if report.unparseable > 0 {
                 format!("; {} line(s) could not be parsed", report.unparseable)
@@ -1870,6 +1898,8 @@ struct PruneSummary {
     kept_current: usize,
     /// Tasks whose target page could not be read. Retained: a repair of the page restores them.
     kept_unreadable: usize,
+    /// Tasks whose target address does not resolve. Retained for repair of their queue line.
+    kept_invalid_target: usize,
     /// Lines nobody could parse. Their file is left whole — see [`QueueFile::is_rewritable`].
     kept_unparseable: usize,
     /// Tasks held only because they share a file with such a line. Not classified: nothing here
@@ -2010,7 +2040,9 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
     // work no session can do, which leaves the janitor as the only place it can surface.
     // Reporting one kind and not the other left the janitor green over a queue it had just
     // described as blocked.
-    let blocked = summary.kept_unreadable > 0 || summary.kept_unparseable > 0;
+    let blocked = summary.kept_unreadable > 0
+        || summary.kept_invalid_target > 0
+        || summary.kept_unparseable > 0;
 
     if json {
         let envelope = serde_json::json!({
@@ -2023,6 +2055,7 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
                 "pruned_missing_target": summary.pruned_missing_target,
                 "kept_current": summary.kept_current,
                 "kept_unreadable": summary.kept_unreadable,
+                "kept_invalid_target": summary.kept_invalid_target,
                 "kept_unparseable": summary.kept_unparseable,
                 "kept_blocked": summary.kept_blocked,
                 "kept_staged": summary.kept_staged,
@@ -2042,12 +2075,13 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
         };
         eprintln!(
             "{label}: dropped {} stale + {} missing-target, kept {} current + {} unreadable \
-             + {} unparseable + {} blocked + {} answered by a staged result + {} answered \
+             + {} invalid-target + {} unparseable + {} blocked + {} answered by a staged result + {} answered \
              awaiting proof, {} done retired; {} file(s) rewritten, {} archived, {} deleted",
             summary.pruned_stale,
             summary.pruned_missing_target,
             summary.kept_current,
             summary.kept_unreadable,
+            summary.kept_invalid_target,
             summary.kept_unparseable,
             summary.kept_blocked,
             summary.kept_staged,
@@ -2065,6 +2099,13 @@ fn report_prune(summary: PruneSummary, json: bool, dry_run: bool) -> miette::Res
                 "{} task(s) kept because their target or synthesis input cannot be validated — \
                  repair the page or task; `lore queue status` names them.",
                 summary.kept_unreadable
+            );
+        }
+        if summary.kept_invalid_target > 0 {
+            eprintln!(
+                "{} task(s) kept because their target address is outside the vault — repair or \
+                 remove their queue lines; `lore queue status` names them.",
+                summary.kept_invalid_target
             );
         }
         if summary.kept_unparseable > 0 {
@@ -2298,7 +2339,7 @@ fn classify_with_reader_controlled(
     let mut target_status = None;
     let status = (|| -> miette::Result<TaskStatus> {
         let Some(target) = resolve_target_path(&task.target.vault_path) else {
-            return Ok(TaskStatus::MissingTarget);
+            return Ok(TaskStatus::InvalidTarget);
         };
         if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
             return Ok(TaskStatus::Unreadable);
@@ -2480,7 +2521,7 @@ fn read_source_revision_with_reader_controlled(
 /// text becomes a filesystem path that is read and then WRITTEN. It goes through the same
 /// lexical rule as every other vault address (`.`/`..` folded, absolute and escaping forms
 /// refused) rather than being joined onto the root as-is.
-pub(super) fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
+fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
     lk_core::link::resolve_dest(Path::new(""), vault_path)
 }
 
@@ -3618,6 +3659,7 @@ mod tests {
                 pruned_missing_target: 1,
                 kept_current: 1,
                 kept_unreadable: 0,
+                kept_invalid_target: 0,
                 kept_unparseable: 0,
                 kept_blocked: 0,
                 kept_staged: 0,
@@ -3986,14 +4028,32 @@ mod tests {
     }
 
     #[test]
-    fn prune_keeps_a_task_whose_target_address_cannot_resolve() {
+    fn an_invalid_target_address_stays_reported_without_blocking_independent_work() {
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
-        let file = write_queue_file(&queue_dir, "run-1.jsonl", &[task("../notes.md", "x")]);
+        write_page(
+            dir.path(),
+            "daily/s/2026-05-24.md",
+            &format!("id: y\nllm_inputs:\n  summary: {}\n", summary_hash("live")),
+        );
+        let mut current = task("daily/s/2026-05-24.md", "live");
+        current.task_id = "sum-current".into();
+        let file = write_queue_file(
+            &queue_dir,
+            "run-1.jsonl",
+            &[task("../notes.md", "x"), current.clone()],
+        );
         let before = std::fs::read_to_string(&file).unwrap();
+        let read = lk_vault::ReadControl::default();
+        let selected = current_tasks_controlled(dir.path(), &read).unwrap();
+        assert_eq!(selected.len(), 1, "planning skips the invalid row");
+        assert_eq!(selected[0].task_id, current.task_id);
+        let settlement = check::inspect(dir.path()).unwrap();
+        assert_eq!(settlement.invalid_target, 1);
+        assert!(!settlement.is_settled(), "check reports the row for repair");
         let summary =
             prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
-        assert_eq!(summary.kept_unreadable, 1);
+        assert_eq!(summary.kept_invalid_target, 1);
         assert_eq!(summary.pruned_missing_target, 0);
         assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }

@@ -10,6 +10,7 @@ use super::{queue_load_controlled, resolve_vault_root};
 pub(crate) struct QueueSettlement {
     pub current: usize,
     pub unreadable: usize,
+    pub invalid_target: usize,
     pub unparseable_lines: usize,
     pub staged_results: Vec<String>,
     pub pending_mutation: bool,
@@ -19,6 +20,7 @@ impl QueueSettlement {
     pub fn is_settled(&self) -> bool {
         self.current == 0
             && self.unreadable == 0
+            && self.invalid_target == 0
             && self.unparseable_lines == 0
             && self.staged_results.is_empty()
             && !self.pending_mutation
@@ -69,6 +71,7 @@ pub(crate) fn inspect_controlled(
     Ok(QueueSettlement {
         current: load.work,
         unreadable: load.unreadable,
+        invalid_target: load.invalid_target,
         unparseable_lines: load.unparseable,
         staged_results: staged,
         pending_mutation,

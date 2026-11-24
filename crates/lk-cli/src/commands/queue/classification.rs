@@ -53,7 +53,10 @@ impl CapturedClassification {
     pub fn retirement_plan(self) -> miette::Result<lk_vault::MutationPlan> {
         if !matches!(
             self.status,
-            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
+            TaskStatus::Done
+                | TaskStatus::Stale
+                | TaskStatus::MissingTarget
+                | TaskStatus::InvalidTarget
         ) {
             return Err(miette::miette!(
                 "classification does not authorize retirement"
@@ -100,7 +103,10 @@ fn capture_artifact(
         let status = classification.status;
         matches!(
             status,
-            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget
+            TaskStatus::Done
+                | TaskStatus::Stale
+                | TaskStatus::MissingTarget
+                | TaskStatus::InvalidTarget
         ) || status == TaskStatus::Current && classification.task_status == TaskStatus::Done
     };
     if retires(&classification)

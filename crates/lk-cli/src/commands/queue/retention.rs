@@ -139,10 +139,17 @@ fn prepare_with_classifier(
             continue;
         }
         let raw = String::from_utf8(raw).into_diagnostic()?;
+        let lines = row_lines(&raw);
+        if lines.len() != read.tasks.len() {
+            return Err(miette::miette!(
+                "queue file rows do not match their decoded tasks: {}",
+                relative.display()
+            ));
+        }
         let mut rows = Vec::with_capacity(read.tasks.len());
         let mut done_pages = Ok(BTreeMap::new());
         let (mut dropped, mut work_left) = (0, 0);
-        for task in read.tasks {
+        for (line, task) in lines.into_iter().zip(read.tasks) {
             if task.generation_policy().is_err() || task.validate_retained_input().is_err() {
                 complete = false;
             }
@@ -155,41 +162,41 @@ fn prepare_with_classifier(
             {
                 work_left += 1;
                 summary.kept_staged += 1;
-                rows.push((task, false));
+                rows.push((task, line, false));
                 continue;
             }
             match status {
                 TaskStatus::Current => {
                     work_left += 1;
                     summary.kept_current += 1;
-                    rows.push((task, false));
+                    rows.push((task, line, false));
                 }
                 TaskStatus::Done => {
                     done_pages = done_pages.and_then(|mut pages| {
                         retain_snapshots(&mut pages, captured_pages)?;
                         Ok(pages)
                     });
-                    rows.push((task, true));
+                    rows.push((task, line, true));
                 }
                 TaskStatus::Stale => {
                     retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
                     summary.pruned_stale += 1;
                     dropped += 1;
                 }
-                TaskStatus::MissingTarget
-                    if super::resolve_target_path(&task.target.vault_path).is_some() =>
-                {
+                TaskStatus::MissingTarget => {
                     retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
                     summary.pruned_missing_target += 1;
                     dropped += 1;
                 }
-                // A target address that cannot resolve was never proved absent: dropping the
-                // row would erase its retained input on a malformed address, so it stays for
-                // repair like a task retirement cannot judge.
-                TaskStatus::MissingTarget | TaskStatus::Unreadable => {
+                TaskStatus::Unreadable => {
                     work_left += 1;
                     summary.kept_unreadable += 1;
-                    rows.push((task, false));
+                    rows.push((task, line, false));
+                }
+                TaskStatus::InvalidTarget => {
+                    work_left += 1;
+                    summary.kept_invalid_target += 1;
+                    rows.push((task, line, false));
                 }
             }
         }
@@ -211,9 +218,11 @@ fn prepare_with_classifier(
         };
         let (answered, kept): (Vec<_>, Vec<_>) = rows
             .into_iter()
-            .partition(|(_, answered)| *answered && retire_answered);
-        let answered: Vec<_> = answered.into_iter().map(|(task, _)| task).collect();
-        let kept: Vec<_> = kept.into_iter().map(|(task, _)| task).collect();
+            .partition(|(_, _, answered)| *answered && retire_answered);
+        let history: String = answered.iter().map(|(_, line, _)| *line).collect();
+        let remaining: String = kept.iter().map(|(_, line, _)| *line).collect();
+        let answered: Vec<_> = answered.into_iter().map(|(task, _, _)| task).collect();
+        let kept: Vec<_> = kept.into_iter().map(|(task, _, _)| task).collect();
         if retire_answered {
             summary.retired_done += answered.len();
         } else {
@@ -244,15 +253,10 @@ fn prepare_with_classifier(
                 .into_diagnostic()?
                 .to_path_buf();
             changed.insert(relative.clone());
-            let history = lk_queue::serialize_tasks(&answered).into_diagnostic()?;
             if !kept.is_empty() {
                 summary.files_rewritten += 1;
                 plan.create(destination, history);
-                plan.edit(
-                    relative,
-                    raw,
-                    lk_queue::serialize_tasks(&kept).into_diagnostic()?,
-                );
+                plan.edit(relative, raw, remaining);
             } else if dropped == 0 {
                 plan.rename(relative, destination, raw);
             } else {
@@ -262,11 +266,7 @@ fn prepare_with_classifier(
         } else if dropped != 0 {
             summary.files_rewritten += 1;
             changed.insert(relative.clone());
-            plan.edit(
-                relative,
-                raw,
-                lk_queue::serialize_tasks(&kept).into_diagnostic()?,
-            );
+            plan.edit(relative, raw, remaining);
         } else {
             plan.require_unchanged(relative, raw);
         }
@@ -344,6 +344,15 @@ fn retain_snapshots(
         }
     }
     Ok(())
+}
+
+/// Each decoded row's exact line, terminator included, in file order. A rewritable file's
+/// nonblank lines are its rows one to one; rows move or stay as written, so retirement never
+/// re-encodes retained input or drops a field its decoder does not know.
+fn row_lines(raw: &str) -> Vec<&str> {
+    raw.split_inclusive('\n')
+        .filter(|line| !line.bytes().all(|byte| byte.is_ascii_whitespace()))
+        .collect()
 }
 
 /// The first page both captures hold with different bytes or absence.
@@ -437,7 +446,7 @@ mod tests {
 
         fn add_missing_task(&mut self) {
             let mut task: lk_queue::QueueTask = serde_json::from_str(self.pending.trim()).unwrap();
-            self.archived = lk_queue::serialize_tasks(std::slice::from_ref(&task)).unwrap();
+            self.archived = format!("{}\r\n", serde_json::to_string(&task).unwrap());
             task.task_id.push_str("-missing");
             task.target.vault_path = "wiki/documents/deleted.md".into();
             self.pending
@@ -858,6 +867,45 @@ mod tests {
         assert!(
             fixture.root.join(&fixture.action).exists(),
             "row retirement leaves sidecar retention to maintenance"
+        );
+    }
+
+    #[test]
+    fn a_split_moves_and_keeps_rows_as_their_original_bytes() {
+        let fixture = Fixture::new();
+        let done: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+        let mut current = done.clone();
+        current.task_id.push_str("-current");
+        current.target.vault_path = "wiki/documents/current.md".into();
+        fixture.write(
+            Path::new(&current.target.vault_path),
+            &format!(
+                "---\ntype: document\nllm_inputs: {{summary: {}}}\n---\n## Summary\n",
+                current.cache_hash
+            ),
+        );
+        let extended = |task: &lk_queue::QueueTask| {
+            let mut row = serde_json::to_value(task).unwrap();
+            row["extension"] = json!({"kept": true});
+            format!("{}\r\n", row)
+        };
+        let (answered, owed) = (extended(&done), extended(&current));
+        fixture.write(
+            Path::new(".lorekeeper/queue/run.jsonl"),
+            &format!("{answered}\n{owed}"),
+        );
+        fixture
+            .prepare()
+            .apply(&MutationSession::acquire(&fixture.root).unwrap())
+            .unwrap();
+        let queue = fixture.root.join(".lorekeeper/queue");
+        assert_eq!(
+            std::fs::read_to_string(queue.join("processed/run.jsonl")).unwrap(),
+            answered
+        );
+        assert_eq!(
+            std::fs::read_to_string(queue.join("run.jsonl")).unwrap(),
+            owed
         );
     }
 

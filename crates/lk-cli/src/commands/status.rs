@@ -351,6 +351,9 @@ fn queue_row(queue: &super::queue::check::QueueSettlement) -> (String, &'static 
     if queue.unreadable > 0 {
         parts.push(format!("{} unreadable", queue.unreadable));
     }
+    if queue.invalid_target > 0 {
+        parts.push(format!("{} invalid target(s)", queue.invalid_target));
+    }
     if queue.unparseable_lines > 0 {
         parts.push(format!("{} unparseable line(s)", queue.unparseable_lines));
     }
@@ -364,6 +367,7 @@ fn queue_row(queue: &super::queue::check::QueueSettlement) -> (String, &'static 
         return ("drained".to_string(), "/lore-process");
     }
     let only_waiting = queue.unreadable == 0
+        && queue.invalid_target == 0
         && queue.unparseable_lines == 0
         && queue.staged_results.is_empty()
         && !queue.pending_mutation;
@@ -410,6 +414,7 @@ mod tests {
         QueueSettlement {
             current: 0,
             unreadable: 0,
+            invalid_target: 0,
             unparseable_lines: 0,
             staged_results: Vec::new(),
             pending_mutation: false,
@@ -444,6 +449,7 @@ mod tests {
         let queue = QueueSettlement {
             current: 1,
             unreadable: 2,
+            invalid_target: 4,
             unparseable_lines: 3,
             staged_results: vec!["result.json".to_string()],
             pending_mutation: true,
@@ -451,8 +457,8 @@ mod tests {
         assert_eq!(
             queue_row(&queue),
             (
-                "1 task(s) waiting for an LLM session · 2 unreadable · 3 unparseable line(s) \
-                 · 1 staged result(s) · interrupted publication"
+                "1 task(s) waiting for an LLM session · 2 unreadable · 4 invalid target(s) \
+                 · 3 unparseable line(s) · 1 staged result(s) · interrupted publication"
                     .to_string(),
                 "lore queue check"
             )

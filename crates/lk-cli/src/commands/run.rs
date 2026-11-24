@@ -1126,7 +1126,11 @@ mod native {
                 Ok(state) => state,
                 Err(error) => return self.failure(name, error),
             };
-            if state.pending_mutation || state.unreadable != 0 || state.unparseable_lines != 0 {
+            if state.pending_mutation
+                || state.unreadable != 0
+                || state.invalid_target != 0
+                || state.unparseable_lines != 0
+            {
                 return self.failure(name, "queue contains an interrupted mutation or unknown inputs; inspect `lore queue check`");
             }
             if !state.staged_results.is_empty()

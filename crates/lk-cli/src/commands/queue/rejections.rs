@@ -545,7 +545,8 @@ pub(in crate::commands) fn blocked_tasks_controlled(
             super::TaskStatus::Current => {}
             super::TaskStatus::Done
             | super::TaskStatus::Stale
-            | super::TaskStatus::MissingTarget => continue,
+            | super::TaskStatus::MissingTarget
+            | super::TaskStatus::InvalidTarget => continue,
             super::TaskStatus::Unreadable => {
                 return Err(miette::miette!(
                     "unreadable rejected task prevents rejection inspection: {}",
