@@ -3733,10 +3733,12 @@ pub(super) enum ResultFinish {
     NeedsAction(String),
     DiscoveryRecorded,
     ReviewRecorded(String),
+    ReviewDeferred(String),
     Rejected(String),
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn finish_result(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -3744,6 +3746,7 @@ pub(super) fn finish_result(
     id: &str,
     result: ResultFinalization,
     reply: Value,
+    review: generation::ReviewAllowance,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<ResultFinish> {
     let root = session.root();
@@ -3764,9 +3767,9 @@ pub(super) fn finish_result(
             config,
             &super::queue::current_task(root, task_id)?,
             &prepared,
-            &work.plan.subject_revision,
+            &work,
             reply.clone(),
-            work.plan.max_result_bytes,
+            review,
         )?,
     };
     match outcome {
@@ -3835,6 +3838,7 @@ pub(super) fn finish_result(
         generation::Outcome::NeedsReview(..) => {
             unreachable!("assemble_prepared admits or refuses every review")
         }
+        generation::Outcome::ReviewDeferred(reason) => Ok(ResultFinish::ReviewDeferred(reason)),
         generation::Outcome::ReviewAdmitted(review) => {
             let Subject::Queue { task_id, .. } = &prepared.subject else {
                 return Err(miette::miette!(

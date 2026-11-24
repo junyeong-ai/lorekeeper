@@ -602,27 +602,37 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         fixture.route_synthesis();
         std::fs::write(fixture.root().join("mode"), "needs-review-always").unwrap();
         let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
-        let report = fixture.run();
-        assert!(!fixture.done(&task), "{planned}: {report}");
-        assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["retained_progress"]["synthesis_reviews"], 1,
-            "{report}"
-        );
-        assert_eq!(
-            report["retained_progress"]["action_receipts"], 1,
-            "{report}"
-        );
-        assert_eq!(
-            fixture
-                .root()
-                .join("vault/wiki/explorations")
-                .read_dir()
-                .unwrap()
-                .count(),
-            1,
-            "an open review of the concept refuses a second one"
-        );
+        let explorations = fixture.root().join("vault/wiki/explorations");
+        std::fs::create_dir_all(&explorations).unwrap();
+        let cited = &task.input["citations"][0];
+        std::fs::write(
+            explorations.join("rollback-principle.md"),
+            format!(
+                "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
+                task.target.vault_path,
+                cited["path"].as_str().unwrap(),
+                cited["revision"].as_str().unwrap()
+            ),
+        )
+        .unwrap();
+        for (run, published) in [(1, 2), (2, 3)] {
+            let report = fixture.run();
+            assert!(!fixture.done(&task), "{planned}: {report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["retained_progress"]["synthesis_reviews"], 1,
+                "{run}: {report}"
+            );
+            assert_eq!(
+                report["retained_progress"]["action_receipts"], 0,
+                "a further proposal waits unrecorded instead of holding its task: {report}"
+            );
+            assert_eq!(
+                explorations.read_dir().unwrap().count(),
+                published,
+                "a distinct open question never refuses a new review; each run publishes one"
+            );
+        }
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();

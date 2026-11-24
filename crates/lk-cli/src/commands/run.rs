@@ -2993,6 +2993,7 @@ mod native {
             let Some((session, _)) = self.mutation_session("native finalization").await else {
                 return WorkStep::Failed;
             };
+            let targets = self.finalization_targets();
             let finished = crate::commands::work::finish_result(
                 &session,
                 &self.config,
@@ -3000,6 +3001,7 @@ mod native {
                 id,
                 result,
                 reply,
+                self.finalization_replans.review_allowance(&targets),
                 self.supervisor.read_control(),
             );
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
@@ -3037,11 +3039,25 @@ mod native {
                         .work_telemetry
                         .retained_progress
                         .synthesis_reviews += 1;
+                    for target in &targets {
+                        self.finalization_replans.spend_review(target);
+                    }
                     self.record("synthesis review", StageState::Completed, Some(path));
                     self.queue_admitted.clear();
                     self.queue_turn = None;
                     self.queue_replan = QueueReplan::Invalidate;
                     WorkStep::Replan
+                }
+                Ok(crate::commands::work::ResultFinish::ReviewDeferred(reason)) => {
+                    for target in &targets {
+                        self.finalization_replans.defer(target, &reason);
+                    }
+                    self.record(
+                        "synthesis review",
+                        StageState::Skipped,
+                        Some(reason.clone()),
+                    );
+                    WorkStep::Deferred(reason)
                 }
                 Ok(crate::commands::work::ResultFinish::DiscoveryRecorded) => {
                     metrics.outcome = WorkOutcome::Recorded;
@@ -3101,12 +3117,17 @@ mod native {
             WorkStep::Replan
         }
 
-        fn finalization_inputs_changed(&mut self, name: &str, error: miette::Report) -> WorkStep {
-            self.record(name, StageState::Skipped, Some(error.to_string()));
-            let targets = self.queue_turn.as_ref().map_or_else(
+        /// The queue targets the bounded finalization in flight answers.
+        fn finalization_targets(&self) -> Vec<String> {
+            self.queue_turn.as_ref().map_or_else(
                 || self.reserved_targets.clone(),
                 |turn| turn.targets.clone(),
-            );
+            )
+        }
+
+        fn finalization_inputs_changed(&mut self, name: &str, error: miette::Report) -> WorkStep {
+            self.record(name, StageState::Skipped, Some(error.to_string()));
+            let targets = self.finalization_targets();
             let mut replan = true;
             for target in &targets {
                 if !self
@@ -3236,6 +3257,10 @@ mod native {
             let mut staged = false;
             let mut recovered = false;
             for (input, reply) in inputs.iter().zip(replies) {
+                let target = input["task"]["target"]["vault_path"]
+                    .as_str()
+                    .expect("selected task target")
+                    .to_owned();
                 match crate::commands::work::generation::finish_selected_controlled(
                     &session,
                     &self.config,
@@ -3243,6 +3268,8 @@ mod native {
                     &request,
                     input,
                     reply,
+                    self.finalization_replans
+                        .review_allowance(std::slice::from_ref(&target)),
                     self.supervisor.read_control(),
                 ) {
                     Ok(crate::commands::work::generation::SelectedFinish::DiscoveryRecorded) => {
@@ -3263,7 +3290,15 @@ mod native {
                             .retained_progress
                             .synthesis_reviews += 1;
                         recovered = true;
+                        self.finalization_replans.spend_review(&target);
                         self.record("synthesis review", StageState::Completed, Some(path));
+                    }
+                    Ok(crate::commands::work::generation::SelectedFinish::ReviewDeferred(
+                        reason,
+                    )) => {
+                        deferred = true;
+                        self.finalization_replans.defer(&target, &reason);
+                        self.record("synthesis review", StageState::Skipped, Some(reason));
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
                         self.result.work_telemetry.retained_progress.action_receipts += 1;
@@ -3286,14 +3321,11 @@ mod native {
                     Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
                         deferred = true;
                         self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
-                        let target = input["task"]["target"]["vault_path"]
-                            .as_str()
-                            .expect("selected task target");
                         if !self
                             .finalization_replans
-                            .try_spend(target, FINALIZATION_CHANGED_AGAIN)
+                            .try_spend(&target, FINALIZATION_CHANGED_AGAIN)
                         {
-                            self.deferred("finalization inputs unstable", target);
+                            self.deferred("finalization inputs unstable", &target);
                         }
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::Rejected(reason)) => {

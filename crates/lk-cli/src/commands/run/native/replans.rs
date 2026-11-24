@@ -42,6 +42,7 @@ impl AuditReplans {
 #[derive(Default)]
 pub(super) struct FinalizationReplans {
     spent: BTreeSet<String>,
+    reviews: BTreeSet<String>,
     deferred: BTreeMap<String, String>,
 }
 
@@ -57,6 +58,28 @@ impl FinalizationReplans {
 
     pub(super) fn deferral(&self, target: &str) -> Option<&str> {
         self.deferred.get(target).map(String::as_str)
+    }
+
+    /// Whether finalizing `targets` may publish a review this run.
+    pub(super) fn review_allowance(
+        &self,
+        targets: &[String],
+    ) -> crate::commands::work::generation::ReviewAllowance {
+        if targets.iter().any(|target| self.reviews.contains(target)) {
+            crate::commands::work::generation::ReviewAllowance::Spent
+        } else {
+            crate::commands::work::generation::ReviewAllowance::Available
+        }
+    }
+
+    /// Spends `target`'s one review publication for this run.
+    pub(super) fn spend_review(&mut self, target: &str) {
+        self.reviews.insert(target.to_owned());
+    }
+
+    /// Defers `target` for the rest of this run with `reason`.
+    pub(super) fn defer(&mut self, target: &str, reason: &str) {
+        self.deferred.insert(target.to_owned(), reason.to_owned());
     }
 }
 

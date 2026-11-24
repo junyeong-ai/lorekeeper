@@ -107,11 +107,13 @@ paths:
   curation, judges concept links through the filesystem and bounds the file stem in bytes;
   a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
   fault. The run then replans; the review enters the concept's scope through `subjects`,
-  so the next finalization drafts against it. While a scoped review whose page still names
-  the concept in `subjects` is open, a proposal becomes a needs-action hold instead: a
-  concept carries at most one open native-proposed question, and resolving that review
-  changes the request so a held synthesis is attempted afresh. A review retargeted
-  elsewhere, resolved or unreadable does not hold it. A completed synthesis is not
+  so the next finalization drafts against it. Whether a question is already recorded is
+  the finalizer's judgment over every scoped review it reads; an open review about a
+  different question never refuses a proposal. A target publishes at most one review per
+  run, spent when it publishes: a further proposal in that run publishes and records
+  nothing and defers only that target, so a distinct question waits for a later run, whose
+  request scopes the reviews already published, and a repeating finalizer cannot loop
+  through paid calls. A completed synthesis is not
   rewritten when its review is later resolved; that takes an explicit resynthesis. Observers record a disagreement as a finding or source
   question, never as an `unresolved` processing blocker, so bounded Work reaches this
   finalizer.

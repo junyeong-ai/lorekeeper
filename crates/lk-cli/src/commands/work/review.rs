@@ -2,6 +2,11 @@
 //! takes the coordinator's part the synthesis contract assigns for a material disagreement or a
 //! material evidence gap: it proposes one durable review, and Rust publishes it as an open review
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
+//!
+//! Whether a question is already recorded is the finalizer's judgment over every scoped review
+//! it reads, so an open review never blocks a distinct question about the same concept. The run
+//! bounds the outcome instead: a target publishes at most one review per run, and a further
+//! proposal waits unrecorded for a later run, whose request then scopes the reviews published.
 
 use std::path::{Path, PathBuf};
 
@@ -10,7 +15,7 @@ use lk_queue::{QueueTask, TaskKind};
 use lk_vault::{MutationPlan, MutationSession};
 use miette::IntoDiagnostic;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::Prepared;
 
@@ -55,11 +60,6 @@ pub(in crate::commands) fn admit(
     prepared: &Prepared,
     proposal: ReviewProposal,
 ) -> miette::Result<Result<AdmittedReview, String>> {
-    if let Some(open) = open_scoped_review(task, prepared) {
-        return Ok(Err(format!(
-            "the open review {open} already assesses this concept; draft the synthesis against it, and a new question waits until that review is resolved"
-        )));
-    }
     let title = proposal.title.trim();
     if title.is_empty() || title.contains('\n') || title.chars().count() > MAX_TITLE_CHARACTERS {
         return Ok(Err(format!(
@@ -151,34 +151,6 @@ pub(in crate::commands) fn admit(
         Err(lk_vault::VaultError::Io(error)) => Err(error).into_diagnostic(),
         Err(error) => Ok(Err(format!("the review cannot be published: {error}"))),
     }
-}
-
-/// The first scoped review that still assesses this concept and is open: its page names the
-/// concept in `subjects` and records `status: open`. A review retargeted elsewhere, resolved or
-/// unreadable leaves the concept free to propose; the audit reports an unreadable one.
-fn open_scoped_review(task: &QueueTask, prepared: &Prepared) -> Option<String> {
-    let scoped =
-        prepared.context["purpose"]["parameters"]["knowledge_scope"]["review_dependencies"]
-            .as_array()?;
-    scoped
-        .iter()
-        .filter_map(Value::as_str)
-        .find(|path| {
-            let review = prepared
-                .pages
-                .get(Path::new(path))
-                .and_then(|raw| lk_core::frontmatter::parse_page(raw).ok())
-                .and_then(|page| page.frontmatter.fields.get("review").cloned());
-            review.is_some_and(|review| {
-                review["status"] == "open"
-                    && review["subjects"].as_array().is_some_and(|subjects| {
-                        subjects
-                            .iter()
-                            .any(|subject| subject == task.target.vault_path.as_str())
-                    })
-            })
-        })
-        .map(str::to_owned)
 }
 
 /// Whether a link destination names the concepts collection, by its address or through the

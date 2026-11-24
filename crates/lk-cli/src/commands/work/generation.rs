@@ -24,7 +24,18 @@ pub(in crate::commands) enum Outcome {
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
     NeedsReview(super::review::ReviewProposal, String),
     ReviewAdmitted(super::review::AdmittedReview),
+    /// A review proposal the run's allowance for this target cannot publish now.
+    ReviewDeferred(String),
     Rejected(rejection::ProposalRejection),
+}
+
+/// Whether a finalization may publish the review it proposes. A run grants each target one
+/// review publication, so a finalizer that keeps proposing cannot loop through paid calls, and a
+/// further distinct question waits unrecorded for a later run instead of holding its task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum ReviewAllowance {
+    Available,
+    Spent,
 }
 
 pub(in crate::commands) enum SelectedFinish {
@@ -33,6 +44,7 @@ pub(in crate::commands) enum SelectedFinish {
     ScopeChanged,
     DiscoveryRecorded,
     ReviewRecorded(String),
+    ReviewDeferred(String),
     Rejected(String),
 }
 
@@ -240,20 +252,25 @@ pub(super) fn assemble_prepared(
     config: &lk_core::config::Config,
     task: &QueueTask,
     prepared: &Prepared,
-    revision: &str,
+    work: &super::Work,
     reply: Value,
-    limit: usize,
+    review: ReviewAllowance,
 ) -> miette::Result<Outcome> {
     let outcome = assemble(
         task,
         &prepared.subject,
         &prepared.result_binding()?,
-        revision,
+        &work.plan.subject_revision,
         &Owners::build(config, prepared)?,
         reply,
-        limit,
+        work.plan.max_result_bytes,
     )?;
     Ok(match outcome {
+        Outcome::NeedsReview(_, reason) if review == ReviewAllowance::Spent => {
+            Outcome::ReviewDeferred(format!(
+                "{reason} (this target already published a review in this run; the proposal waits for a later run)"
+            ))
+        }
         Outcome::NeedsReview(proposal, reason) => {
             match super::review::admit(root, config, task, prepared, proposal)? {
                 Ok(review) => Outcome::ReviewAdmitted(review),
@@ -347,7 +364,7 @@ pub(super) fn minimum_reply(task: &QueueTask) -> miette::Result<Value> {
 const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion.";
 
 /// The synthesis-only reply that proposes the durable review its contract requires.
-const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no scoped review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
+const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no scoped review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. An open review of this concept about a different question does not record this one. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
 
 pub(super) fn instruction(kinds: impl IntoIterator<Item = TaskKind>) -> String {
     let kinds = kinds.into_iter().collect::<Vec<_>>();
@@ -522,6 +539,7 @@ pub(in crate::commands) fn hold_selected_controlled(
     Ok(Some(format!("{}: {reason}", task.task_id)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::commands) fn finish_selected_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -529,6 +547,7 @@ pub(in crate::commands) fn finish_selected_controlled(
     request: &Value,
     input: &Value,
     reply: Value,
+    review: ReviewAllowance,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectedFinish> {
     let root = session.root();
@@ -542,101 +561,10 @@ pub(in crate::commands) fn finish_selected_controlled(
         .map(|(raw, _)| raw);
     let path = GENERATION.path(&task.task_id, &task.cache_hash);
     let mut plan = lk_vault::MutationPlan::default();
-    let reason = match assemble_prepared(
-        root,
-        config,
-        &task,
-        &prepared,
-        &work.plan.subject_revision,
-        reply.clone(),
-        work.plan.max_result_bytes,
-    )? {
-        Outcome::Rejected(reason) => {
-            prepared.guard_pages(&mut plan);
-            let reason = rejection::plan_record(
-                root,
-                rejection::Binding {
-                    task: &task,
-                    work: &work,
-                    input: rejection::Input::Selected,
-                    request,
-                },
-                rejection::Cause::proposal(reply, reason)?,
-                &mut plan,
-            )?;
-            SelectedFinish::Rejected(reason)
-        }
-        Outcome::NeedsDiscovery(recovery, reason) => {
-            super::discovery::recovery::record(
-                session,
-                super::discovery::recovery::Binding {
-                    task: &task,
-                    prepared: &prepared,
-                    request,
-                    context_revision: &work.plan.subject_revision,
-                    work_id: &work.plan.id,
-                },
-                recovery,
-                reason,
-                plan,
-            )?;
-            return Ok(SelectedFinish::DiscoveryRecorded);
-        }
-        Outcome::NeedsReview(..) => {
-            unreachable!("assemble_prepared admits or refuses every review")
-        }
-        Outcome::ReviewAdmitted(review) => {
-            let path = super::review::record(session, &task, &prepared, review, plan)?;
-            return Ok(SelectedFinish::ReviewRecorded(path));
-        }
-        Outcome::NeedsAction(reason) => {
-            prepared.guard_pages(&mut plan);
-            plan.publish_expected(
-                root,
-                path,
-                before,
-                serde_json::to_string(&Action {
-                    schema: GENERATION.schema.into(),
-                    task_id: task.task_id.clone(),
-                    cache_hash: task.cache_hash.clone(),
-                    context_revision: work.plan.subject_revision.clone(),
-                    request_revision: digest(request)?,
-                    reason: reason.clone(),
-                })
-                .into_diagnostic()?,
-            )
-            .into_diagnostic()?;
-            SelectedFinish::NeedsAction(reason)
-        }
-        Outcome::Complete(result) => {
-            prepared.guard_pages(&mut plan);
-            let mut guards = lk_vault::MutationPlan::default();
-            if let Err(error) = super::guard_queue_controlled(
-                root,
-                config,
-                config_revision,
-                &task.task_id,
-                result.clone(),
-                prepared.roster.as_ref().map(|roster| &roster.seal),
-                &mut guards,
-                prepared.read_control(),
-            ) {
-                if crate::commands::queue::application::is_citations_changed(&error)
-                    || error
-                        .downcast_ref::<crate::commands::queue::SynthesisHeld>()
-                        .is_some()
-                {
-                    return Ok(SelectedFinish::ScopeChanged);
-                }
-                let Some(refusal) = error
-                    .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
-                else {
-                    return Err(error);
-                };
-                let rejection = rejection::ProposalRejection::PublicationGuard {
-                    kind: refusal.kind,
-                    detail: refusal.detail.clone(),
-                };
+    let reason =
+        match assemble_prepared(root, config, &task, &prepared, &work, reply.clone(), review)? {
+            Outcome::Rejected(reason) => {
+                prepared.guard_pages(&mut plan);
                 let reason = rejection::plan_record(
                     root,
                     rejection::Binding {
@@ -645,33 +573,118 @@ pub(in crate::commands) fn finish_selected_controlled(
                         input: rejection::Input::Selected,
                         request,
                     },
-                    rejection::Cause::proposal(reply, rejection)?,
+                    rejection::Cause::proposal(reply, reason)?,
                     &mut plan,
                 )?;
-                session.apply(plan).into_diagnostic()?;
-                return Ok(SelectedFinish::Rejected(reason));
+                SelectedFinish::Rejected(reason)
             }
-            plan.extend(guards);
-            let destination = super::queue_result_path(task.kind, &result)?;
-            let raw = serde_json::to_string(&result).into_diagnostic()?;
-            let prior = match std::fs::read_to_string(root.join(&destination)) {
-                Ok(raw) => Some(raw),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                Err(error) => return Err(error).into_diagnostic(),
-            };
-            if prior.as_ref().is_some_and(|prior| prior != &raw) {
-                return Err(miette::miette!(
-                    "competing native result already exists; retained without overwrite"
-                ));
+            Outcome::NeedsDiscovery(recovery, reason) => {
+                super::discovery::recovery::record(
+                    session,
+                    super::discovery::recovery::Binding {
+                        task: &task,
+                        prepared: &prepared,
+                        request,
+                        context_revision: &work.plan.subject_revision,
+                        work_id: &work.plan.id,
+                    },
+                    recovery,
+                    reason,
+                    plan,
+                )?;
+                return Ok(SelectedFinish::DiscoveryRecorded);
             }
-            plan.publish_expected(root, destination, prior, raw)
+            Outcome::NeedsReview(..) => {
+                unreachable!("assemble_prepared admits or refuses every review")
+            }
+            Outcome::ReviewAdmitted(review) => {
+                let path = super::review::record(session, &task, &prepared, review, plan)?;
+                return Ok(SelectedFinish::ReviewRecorded(path));
+            }
+            Outcome::ReviewDeferred(reason) => return Ok(SelectedFinish::ReviewDeferred(reason)),
+            Outcome::NeedsAction(reason) => {
+                prepared.guard_pages(&mut plan);
+                plan.publish_expected(
+                    root,
+                    path,
+                    before,
+                    serde_json::to_string(&Action {
+                        schema: GENERATION.schema.into(),
+                        task_id: task.task_id.clone(),
+                        cache_hash: task.cache_hash.clone(),
+                        context_revision: work.plan.subject_revision.clone(),
+                        request_revision: digest(request)?,
+                        reason: reason.clone(),
+                    })
+                    .into_diagnostic()?,
+                )
                 .into_diagnostic()?;
-            if let Some(before) = before {
-                plan.remove(path, before);
+                SelectedFinish::NeedsAction(reason)
             }
-            SelectedFinish::Staged
-        }
-    };
+            Outcome::Complete(result) => {
+                prepared.guard_pages(&mut plan);
+                let mut guards = lk_vault::MutationPlan::default();
+                if let Err(error) = super::guard_queue_controlled(
+                    root,
+                    config,
+                    config_revision,
+                    &task.task_id,
+                    result.clone(),
+                    prepared.roster.as_ref().map(|roster| &roster.seal),
+                    &mut guards,
+                    prepared.read_control(),
+                ) {
+                    if crate::commands::queue::application::is_citations_changed(&error)
+                        || error
+                            .downcast_ref::<crate::commands::queue::SynthesisHeld>()
+                            .is_some()
+                    {
+                        return Ok(SelectedFinish::ScopeChanged);
+                    }
+                    let Some(refusal) = error
+                        .downcast_ref::<crate::commands::queue::application::PublicationRejection>(
+                    ) else {
+                        return Err(error);
+                    };
+                    let rejection = rejection::ProposalRejection::PublicationGuard {
+                        kind: refusal.kind,
+                        detail: refusal.detail.clone(),
+                    };
+                    let reason = rejection::plan_record(
+                        root,
+                        rejection::Binding {
+                            task: &task,
+                            work: &work,
+                            input: rejection::Input::Selected,
+                            request,
+                        },
+                        rejection::Cause::proposal(reply, rejection)?,
+                        &mut plan,
+                    )?;
+                    session.apply(plan).into_diagnostic()?;
+                    return Ok(SelectedFinish::Rejected(reason));
+                }
+                plan.extend(guards);
+                let destination = super::queue_result_path(task.kind, &result)?;
+                let raw = serde_json::to_string(&result).into_diagnostic()?;
+                let prior = match std::fs::read_to_string(root.join(&destination)) {
+                    Ok(raw) => Some(raw),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => return Err(error).into_diagnostic(),
+                };
+                if prior.as_ref().is_some_and(|prior| prior != &raw) {
+                    return Err(miette::miette!(
+                        "competing native result already exists; retained without overwrite"
+                    ));
+                }
+                plan.publish_expected(root, destination, prior, raw)
+                    .into_diagnostic()?;
+                if let Some(before) = before {
+                    plan.remove(path, before);
+                }
+                SelectedFinish::Staged
+            }
+        };
     session.apply(plan).into_diagnostic()?;
     Ok(reason)
 }
