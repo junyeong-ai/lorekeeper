@@ -112,7 +112,7 @@ fn load(absolute: &Path) -> miette::Result<Option<String>> {
 }
 
 fn decode(root: &Path, raw: String) -> miette::Result<Snapshot> {
-    let value = crate::commands::json::decode_object(raw.as_bytes())
+    let value = lk_core::json::decode_object(raw.as_bytes())
         .map_err(|_| miette::miette!("audit action requires unique JSON fields"))?;
     let receipt: Receipt = serde_json::from_value(value)
         .map_err(|_| miette::miette!("invalid audit action fields"))?;

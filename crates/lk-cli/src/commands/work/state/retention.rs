@@ -303,7 +303,7 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         seal.verify_captured(&work, &outputs, &nodes)?;
         let sealed_revision = seal.result_revision;
         let raw = read("final.json")?.ok_or_else(|| fail("published work result is missing"))?;
-        let result = crate::commands::json::decode_object(raw.as_bytes()).map_err(fail)?;
+        let result = lk_core::json::decode_object(raw.as_bytes()).map_err(fail)?;
         if receipt.work_id != id
             || receipt.final_result_revision != sealed_revision
             || revision(&result)? != receipt.final_result_revision

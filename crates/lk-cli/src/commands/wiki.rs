@@ -657,7 +657,7 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
             if adopt_screening {
                 let bytes = std::fs::read(&file).map_err(|error| miette::miette!("{error}"))?;
-                let value = super::json::decode_object(&bytes)
+                let value = lk_core::json::decode_object(&bytes)
                     .map_err(|error| miette::miette!("{error}"))?;
                 let request =
                     serde_json::from_value(value).map_err(|error| miette::miette!("{error}"))?;

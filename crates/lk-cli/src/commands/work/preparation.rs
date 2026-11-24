@@ -137,7 +137,7 @@ fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
             "preparation attempt exceeds its storage bound"
         ));
     }
-    let value = crate::commands::json::decode_object(raw.as_bytes())
+    let value = lk_core::json::decode_object(raw.as_bytes())
         .map_err(|_| miette::miette!("preparation attempt requires unique JSON fields"))?;
     let receipt: Receipt = serde_json::from_value(value)
         .map_err(|_| miette::miette!("invalid preparation attempt fields"))?;

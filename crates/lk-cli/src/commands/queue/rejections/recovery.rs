@@ -50,14 +50,14 @@ fn path(identity: &TaskIdentity, context: &str) -> miette::Result<PathBuf> {
 }
 
 fn decode(path: &Path, raw: &str) -> miette::Result<Recovery> {
-    let value = crate::commands::json::decode_object(raw.as_bytes()).into_diagnostic()?;
+    let value = lk_core::json::decode_object(raw.as_bytes()).into_diagnostic()?;
     let recovery: Recovery = serde_json::from_value(value).into_diagnostic()?;
     let receipt = super::decode(
         &super::path(&recovery.identity.task_id, &recovery.identity.cache_hash)?,
         &recovery.rejection,
     )?;
     let proposal: lk_queue::SectionResult = serde_json::from_value(
-        crate::commands::json::decode_object(recovery.proposal_raw.as_bytes()).into_diagnostic()?,
+        lk_core::json::decode_object(recovery.proposal_raw.as_bytes()).into_diagnostic()?,
     )
     .into_diagnostic()?;
     if recovery.schema != SCHEMA
@@ -211,7 +211,7 @@ fn plan_recovery_controlled(
             continue;
         }
         let result: lk_queue::SectionResult = serde_json::from_value(
-            crate::commands::json::decode_object(snapshots[0].raw.as_bytes()).into_diagnostic()?,
+            lk_core::json::decode_object(snapshots[0].raw.as_bytes()).into_diagnostic()?,
         )
         .into_diagnostic()?;
         if result.context_revision.is_none() {

@@ -541,7 +541,7 @@ pub(in crate::commands) fn decode_response(
     bytes: &[u8],
     limit: usize,
 ) -> miette::Result<Value> {
-    let response = crate::commands::json::decode_object(bytes).map_err(|_| {
+    let response = lk_core::json::decode_object(bytes).map_err(|_| {
         miette::miette!("worker returned invalid or ambiguous JSON; no observation was recorded")
     })?;
     let output = match engine {

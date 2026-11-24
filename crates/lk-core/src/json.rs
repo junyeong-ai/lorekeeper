@@ -4,16 +4,17 @@ use serde::de::{Error, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
-pub(super) fn decode_object(bytes: &[u8]) -> serde_json::Result<Value> {
+/// One JSON object decoded with unique fields at every nesting level. Duplicate fields,
+/// trailing input and non-finite numbers refuse rather than silently keeping one value.
+pub fn decode_object(bytes: &[u8]) -> serde_json::Result<Value> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = deserializer.deserialize_map(JsonVisitor)?;
     deserializer.end()?;
     Ok(value)
 }
 
-pub(super) fn deserialize_value<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<Value, D::Error> {
+/// `decode_object`'s unique-field reading for one value inside a typed decoder.
+pub fn deserialize_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Value, D::Error> {
     deserializer.deserialize_any(JsonVisitor)
 }
 

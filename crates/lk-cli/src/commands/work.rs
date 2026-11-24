@@ -813,7 +813,7 @@ pub(super) fn plan_section_recovery(
         let final_raw = completions
             .get(&final_path)
             .ok_or_else(|| miette::miette!("sealed recovery requires its exact final result"))?;
-        if super::json::decode_object(final_raw.as_bytes()).into_diagnostic()?
+        if lk_core::json::decode_object(final_raw.as_bytes()).into_diagnostic()?
             != serde_json::to_value(result).into_diagnostic()?
         {
             return Err(miette::miette!(
@@ -2164,7 +2164,7 @@ fn load_native_finalization_input(
             ));
         }
     }
-    super::json::decode_object(&bytes)
+    lk_core::json::decode_object(&bytes)
         .map(Some)
         .into_diagnostic()
 }
@@ -4759,7 +4759,7 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             file,
             prepared: request,
         } => {
-            let result = super::json::decode_object(&std::fs::read(file).into_diagnostic()?)
+            let result = lk_core::json::decode_object(&std::fs::read(file).into_diagnostic()?)
                 .into_diagnostic()?;
             let session = super::publication::acquire_mutation_now(&root, &pin)?;
             let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
@@ -5041,7 +5041,7 @@ fn plan_finish_completion(
         && (!matches!(prepared.subject, Subject::Audit { .. })
             || final_before
                 .as_deref()
-                .map(|raw| super::json::decode_object(raw.as_bytes()))
+                .map(|raw| lk_core::json::decode_object(raw.as_bytes()))
                 .transpose()
                 .map_err(|error| miette::miette!("{error}"))?
                 .as_ref()
@@ -5061,7 +5061,7 @@ fn plan_finish_completion(
     ] {
         let after = match &before {
             Some(before)
-                if super::json::decode_object(before.as_bytes())
+                if lk_core::json::decode_object(before.as_bytes())
                     .map_err(|error| miette::miette!("{error}"))?
                     == result =>
             {

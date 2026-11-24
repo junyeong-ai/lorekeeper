@@ -147,7 +147,7 @@ impl Usage {
                 "automation usage exceeds its storage bound"
             ));
         }
-        let value = crate::commands::json::decode_object(&bytes).map_err(|_| {
+        let value = lk_core::json::decode_object(&bytes).map_err(|_| {
             miette::miette!("automation usage requires a JSON object with unique fields")
         })?;
         let mut usage = Self::from(

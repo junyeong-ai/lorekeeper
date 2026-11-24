@@ -24,7 +24,7 @@ fn validation_policy() -> String {
         include_str!("application.rs"),
         include_str!("classification.rs"),
         include_str!("rejections.rs"),
-        include_str!("../json.rs"),
+        include_str!("../../../../lk-core/src/json.rs"),
         include_str!("../work.rs"),
         include_str!("../work/selection.rs"),
         include_str!("../work/publication.rs"),
@@ -85,7 +85,7 @@ fn relative_address(value: &str) -> bool {
 }
 
 fn decode(path: &Path, raw: &str) -> miette::Result<Receipt> {
-    let value = crate::commands::json::decode_object(raw.as_bytes()).into_diagnostic()?;
+    let value = lk_core::json::decode_object(raw.as_bytes()).into_diagnostic()?;
     let receipt: Receipt = serde_json::from_value(value).into_diagnostic()?;
     if receipt.schema != SCHEMA
         || !is_revision(&receipt.validation_policy)

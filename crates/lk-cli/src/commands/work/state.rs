@@ -75,7 +75,7 @@ pub(crate) struct WorkLimits {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Work {
     pub plan: SemanticPlan,
-    #[serde(deserialize_with = "crate::commands::json::deserialize_value")]
+    #[serde(deserialize_with = "lk_core::json::deserialize_value")]
     pub context: Value,
     pub max_input_bytes: usize,
     #[serde(default, skip_serializing_if = "ReductionPolicy::is_binary")]
@@ -473,7 +473,7 @@ impl CompletedWork {
         let prior_final = read_optional(root, &work_path(&self.work_id, "final.json")?)?;
         let prior_value = prior_final
             .as_deref()
-            .map(|raw| crate::commands::json::decode_object(raw.as_bytes()).map_err(fail))
+            .map(|raw| lk_core::json::decode_object(raw.as_bytes()).map_err(fail))
             .transpose()?;
         let prior_seal = CompletionSeal::load(root, work, &self.nodes)?;
         match (&prior_seal, &prior_value) {
@@ -735,7 +735,7 @@ pub(super) fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<S
 pub(super) fn load_result(root: &Path, path: &Path) -> miette::Result<Option<(String, Value)>> {
     read_optional(root, path)?
         .map(|raw| {
-            let value = crate::commands::json::decode_object(raw.as_bytes()).map_err(fail)?;
+            let value = lk_core::json::decode_object(raw.as_bytes()).map_err(fail)?;
             Ok((raw, value))
         })
         .transpose()

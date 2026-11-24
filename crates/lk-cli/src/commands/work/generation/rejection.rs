@@ -216,7 +216,7 @@ fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
             "native generation rejection exceeds its storage bound"
         ));
     }
-    let value = crate::commands::json::decode_object(raw.as_bytes()).into_diagnostic()?;
+    let value = lk_core::json::decode_object(raw.as_bytes()).into_diagnostic()?;
     let receipt: Receipt = if value["schema"] == PROPOSAL_SCHEMA {
         serde_json::from_value::<ProposalReceipt>(value)
             .into_diagnostic()?
