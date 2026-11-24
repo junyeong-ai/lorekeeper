@@ -353,7 +353,7 @@ impl RssEvidenceCapture {
         self.dependencies
             .insert(payload_path.clone(), Arc::clone(&payload));
         self.dependencies
-            .insert(PathBuf::from(&citation.path), Arc::clone(&origin.raw));
+            .insert(origin.owner.clone(), Arc::clone(&origin.raw));
         self.originals.read.check()?;
         Ok(RssCitationInput {
             origin_owner: origin.owner.clone(),

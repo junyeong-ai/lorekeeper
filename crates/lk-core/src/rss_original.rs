@@ -63,6 +63,10 @@ impl RssEntryIdentity {
 
 /// v1 serialization: JSON without whitespace; object keys recursively ordered by Rust
 /// String Ord, arrays in their declared order, serde_json scalar serialization. Not JCS.
+/// The vault address of the immutable payload `revision` names in the original store.
+pub fn event_payload_path(revision: &str) -> String {
+    format!("{RSS_ORIGINAL_STORE}/events/{revision}.json")
+}
 pub fn canonical_bytes(value: &impl Serialize) -> Result<Vec<u8>, String> {
     fn sorted(value: Value) -> Value {
         match value {
@@ -293,23 +297,34 @@ impl RssOriginalCapture {
         Ok(())
     }
 }
+/// The payload of event `event_id` whose canonical bytes `revision` names, verified without its
+/// manifest: a retained payload stands alone once its origin page is gone.
+pub fn verify_event_payload(
+    bytes: &[u8],
+    revision: &str,
+    event_id: &str,
+) -> Result<RssEventPayload, String> {
+    if bytes.len() > MAX_RSS_EVENT_BYTES || digest(bytes) != revision {
+        return Err("RSS event digest/length mismatch".into());
+    }
+    let p: RssEventPayload = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+    p.validate()?;
+    if canonical_bytes(&p)? != bytes || p.event_id != event_id {
+        return Err("RSS event differs from its selector".into());
+    }
+    Ok(p)
+}
 pub fn verify_payload(
     manifest: &RssOriginalManifest,
     entry: &RssEventEntry,
     bytes: &[u8],
 ) -> Result<RssEventPayload, String> {
-    if bytes.len() != entry.bytes
-        || bytes.len() > MAX_RSS_EVENT_BYTES
-        || digest(bytes) != entry.revision
-    {
+    if bytes.len() != entry.bytes {
         return Err("RSS event digest/length mismatch".into());
     }
-    let p: RssEventPayload = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
-    p.validate()?;
-    if canonical_bytes(&p)? != bytes
-        || p.source_id != manifest.source_id
+    let p = verify_event_payload(bytes, &entry.revision, &entry.event_id)?;
+    if p.source_id != manifest.source_id
         || p.date != manifest.date
-        || p.event_id != entry.event_id
         || p.event_timestamp != entry.event_timestamp
         || p.title != entry.title
         || p.url != entry.url

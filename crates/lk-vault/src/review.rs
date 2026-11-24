@@ -80,43 +80,58 @@ fn deserialize_evidence<'de, D: serde::Deserializer<'de>>(
     Ok(citations)
 }
 
-/// Whether the original store retains the exact RSS event payload `revision` names. The payload
-/// is immutable, so it is the archive of RSS review evidence.
-pub(crate) fn rss_payload_retained(
+/// The exact payload of the RSS event `citation` selects, when the original store retains it.
+/// The payload is immutable, so it is the archive of RSS review evidence; bytes that are not
+/// that event's canonical payload are not retained evidence.
+pub fn load_retained_rss_payload_controlled(
     root: &Path,
-    revision: &str,
+    citation: &Citation,
     read: &crate::ReadControl,
-) -> Result<bool, VaultError> {
+) -> Result<Option<String>, VaultError> {
+    let Some(selector) = &citation.rss_event else {
+        return Ok(None);
+    };
     let store = lk_core::rss_original::RSS_ORIGINAL_STORE;
-    let relative = format!("{store}/events/{revision}.json");
-    let path = crate::original_io::store_path(root, Path::new(&relative), store, false)?;
-    match crate::original_io::read_bytes_controlled(
-        &path,
-        lk_core::rss_original::MAX_RSS_EVENT_BYTES,
-        read,
-    ) {
-        Ok(bytes) => Ok(lk_core::rss_original::digest(&bytes) == revision),
-        Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
+    let relative = lk_core::rss_original::event_payload_path(&citation.revision);
+    let bytes = match crate::original_io::store_path(root, Path::new(&relative), store, false)
+        .and_then(|path| {
+            crate::original_io::read_bytes_controlled(
+                &path,
+                lk_core::rss_original::MAX_RSS_EVENT_BYTES,
+                read,
+            )
+        }) {
+        Ok(bytes) => bytes,
+        Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(
+        lk_core::rss_original::verify_event_payload(&bytes, &citation.revision, &selector.event_id)
+            .ok()
+            .and_then(|_| String::from_utf8(bytes).ok()),
+    )
 }
 
-/// Whether `raw`, the current origin page, binds the RSS event `citation` selects to one of the
-/// review's `subjects`.
-pub(crate) fn rss_evidence_bound(
+/// The capture proving that `raw`, the current origin page, binds the RSS event `citation`
+/// selects to one of the review's `subjects`: its dependencies are the origin, manifests and
+/// payload that proof read, for a publication to guard.
+pub fn find_rss_evidence_binding(
     root: &Path,
     subjects: &[String],
     citation: &Citation,
     raw: &str,
     read: &crate::ReadControl,
-) -> Result<bool, VaultError> {
+) -> Result<Option<crate::RssEvidenceCapture>, VaultError> {
     let mut capture = crate::RssEvidenceCapture::build(root, read)?;
     for subject in subjects {
         if capture.has_citation_in_page(Path::new(subject), citation, raw)? {
-            return Ok(true);
+            capture.load_citation(Path::new(subject), citation)?;
+            return Ok(Some(capture));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 impl KnowledgeReview {
@@ -157,7 +172,18 @@ impl KnowledgeReview {
             errors.push("resolved review requires a resolution".into());
         }
         let mut evidence = std::collections::BTreeSet::new();
+        let mut origins = std::collections::BTreeMap::new();
         for citation in &self.evidence {
+            if *origins
+                .entry(&citation.path)
+                .or_insert(citation.rss_event.is_some())
+                != citation.rss_event.is_some()
+            {
+                errors.push(format!(
+                    "review evidence cites {} both as a page and by its RSS events; cite one",
+                    citation.path
+                ));
+            }
             let selected = citation
                 .rss_event
                 .as_ref()
@@ -272,11 +298,12 @@ impl KnowledgeReview {
                 }
                 let archived = || -> Result<bool, VaultError> {
                     if citation.rss_event.is_some() {
-                        rss_payload_retained(
+                        load_retained_rss_payload_controlled(
                             root,
-                            &citation.revision,
+                            &citation,
                             &crate::ReadControl::default(),
                         )
+                        .map(|payload| payload.is_some())
                     } else {
                         Ok(load_archived_evidence(root, &citation.revision)?.is_some())
                     }
@@ -1366,23 +1393,23 @@ fn evaluate_rss_evidence(
     report: &mut ReviewReport,
     read: &crate::ReadControl,
 ) -> Result<(), VaultError> {
-    let retained = match rss_payload_retained(root, &citation.revision, read) {
+    let retained = match load_retained_rss_payload_controlled(root, citation, read) {
         Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
         Err(error) => {
             report.errors.push(format!("{}: {error}", citation.path));
             false
         }
-        Ok(retained) => retained,
+        Ok(payload) => payload.is_some(),
     };
     if retained {
         report.archived_evidence.push(citation.path.clone());
     }
     match read_source_snapshot_controlled(root, &citation.path, read) {
         Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
-        Ok((raw, _)) => match rss_evidence_bound(root, subjects, citation, &raw, read) {
+        Ok((raw, _)) => match find_rss_evidence_binding(root, subjects, citation, &raw, read) {
             Err(VaultError::Cancelled) => return Err(VaultError::Cancelled),
-            Ok(true) => {}
-            Ok(false) => report.changed_evidence.push(citation.path.clone()),
+            Ok(Some(_)) => {}
+            Ok(None) => report.changed_evidence.push(citation.path.clone()),
             Err(error) => report.errors.push(format!("{}: {error}", citation.path)),
         },
         Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1514,14 +1541,23 @@ mod tests {
                 }),
             })
             .collect::<Vec<_>>();
-        let review = |subject: &str| {
+        let review_of = |subject: &str, evidence: &[Citation]| {
             let metadata = serde_json::json!({"status":"open","subjects":[subject],
                 "evidence":evidence,"resolution":null});
             format!(
                 "---\ntype: exploration\ntitle: Disagreement\nreview: {metadata}\n---\nTwo events disagree.\n"
             )
         };
+        let review = |subject: &str| review_of(subject, &evidence);
         let dirs = VaultDirs::default();
+        let report_of = |raw: String| {
+            write("wiki/explorations/disagreement.md", &raw);
+            list_reviews(root.path(), &dirs)
+                .unwrap()
+                .into_iter()
+                .find(|report| report.path == "wiki/explorations/disagreement.md")
+                .unwrap()
+        };
         let report = |subject: &str| {
             write("wiki/explorations/disagreement.md", &review(subject));
             list_reviews(root.path(), &dirs)
@@ -1548,6 +1584,21 @@ mod tests {
             "no subject binds the events"
         );
 
+        let mut mixed = evidence.clone();
+        mixed.push(Citation::at_revision(
+            Path::new("daily/rss.md"),
+            "b".repeat(32),
+        ));
+        let mixed = report_of(review_of("wiki/concepts/topic.md", &mixed));
+        assert!(
+            mixed
+                .errors
+                .iter()
+                .any(|error| error.contains("both as a page and by its RSS events")),
+            "{:?}",
+            mixed.errors
+        );
+
         std::fs::remove_file(root.path().join("daily/rss.md")).unwrap();
         let removed = report("wiki/concepts/topic.md");
         assert_eq!(removed.missing_evidence.len(), 2);
@@ -1555,6 +1606,97 @@ mod tests {
             removed.errors.is_empty(),
             "a retained payload stands in for a removed origin: {:?}",
             removed.errors
+        );
+        let raw = review("wiki/concepts/topic.md");
+        crate::plan_curation(
+            root.path(),
+            &dirs,
+            &[],
+            crate::CurationPlan {
+                evidence: vec![crate::PageRevision {
+                    path: "wiki/concepts/topic.md".into(),
+                    revision: lk_core::concept::file_revision(
+                        "---\ntype: concept\n---\nA scoped claim.\n",
+                    ),
+                }],
+                concepts: Vec::new(),
+                reviews: vec![crate::ReviewCuration {
+                    path: "wiki/explorations/disagreement.md".into(),
+                    revision: Some(lk_core::concept::file_revision(&raw)),
+                    content: raw.clone(),
+                }],
+                pages: Vec::new(),
+            },
+        )
+        .expect("curation accepts a removed origin whose payload the store retains");
+        let refused = crate::plan_curation(
+            root.path(),
+            &dirs,
+            &[],
+            crate::CurationPlan {
+                evidence: vec![crate::PageRevision {
+                    path: "wiki/concepts/topic.md".into(),
+                    revision: lk_core::concept::file_revision(
+                        "---\ntype: concept\n---\nA scoped claim.\n",
+                    ),
+                }],
+                concepts: Vec::new(),
+                reviews: vec![crate::ReviewCuration {
+                    path: "wiki/explorations/new-finding.md".into(),
+                    revision: None,
+                    content: raw.clone(),
+                }],
+                pages: Vec::new(),
+            },
+        );
+        assert!(
+            refused.is_err_and(|error| error.to_string().contains("new RSS review evidence")),
+            "a payload alone cannot prove a binding no origin recorded"
+        );
+        write(
+            "wiki/concepts/other.md",
+            "---\ntype: concept\n---\nAnother claim.\n",
+        );
+        let moved = review("wiki/concepts/other.md");
+        let transferred = crate::plan_curation(
+            root.path(),
+            &dirs,
+            &[],
+            crate::CurationPlan {
+                evidence: vec![crate::PageRevision {
+                    path: "wiki/concepts/other.md".into(),
+                    revision: lk_core::concept::file_revision(
+                        "---\ntype: concept\n---\nAnother claim.\n",
+                    ),
+                }],
+                concepts: Vec::new(),
+                reviews: vec![crate::ReviewCuration {
+                    path: "wiki/explorations/disagreement.md".into(),
+                    revision: Some(lk_core::concept::file_revision(&raw)),
+                    content: moved,
+                }],
+                pages: Vec::new(),
+            },
+        );
+        assert!(
+            transferred.is_err_and(|error| error.to_string().contains("new RSS review evidence")),
+            "a recorded pin does not transfer to another subject"
+        );
+
+        let mut swapped = evidence.clone();
+        let first = swapped[0].rss_event.clone();
+        swapped[0].rss_event = swapped[1].rss_event.clone();
+        swapped[1].rss_event = first;
+        let swapped = report_of(review_of("wiki/concepts/topic.md", &swapped));
+        assert!(
+            swapped.archived_evidence.is_empty()
+                && swapped
+                    .errors
+                    .iter()
+                    .all(|error| error.contains("without a retained event payload"))
+                && swapped.errors.len() == 2,
+            "a payload of another event is no archive of this selector: {:?}",
+            swapped.errors
         );
     }
 

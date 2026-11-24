@@ -105,8 +105,13 @@ canonical; SQLite navigation is derived.
 - RSS review evidence is an event selector with its immutable payload revision, as
   synthesis cites it. It is current while its origin page binds the event to a subject
   (`RssEvidenceCapture`), changed once no subject binding remains, and its retained payload
-  in the original store is its archive, so curation guards the origin page and archives
-  nothing. Evidence identity is the path with its selected event.
+  in the original store is its archive. Curation guards the origin page with the manifests
+  and payload that proved the binding, and archives nothing; a removed origin's retained
+  payload stands in only for a pin the review already recorded, because the payload proves
+  the event, not its binding. A retained payload counts only as the selected event's
+  canonical bytes. Evidence identity is the path with its selected event; one
+  review cites an origin either as a page or by its events, never both, because review
+  reports name evidence by path. Audit supplies the payload as the review's archived input.
 - A review may declare `kind` (`conflict`, `evidence-gap`); undeclared reviews stay valid.
   An open evidence-gap review obliges its subject's synthesis to keep the named defining
   claims in the evidence-gap callout the CLI renders from a result's structured claims.

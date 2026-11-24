@@ -94,10 +94,10 @@ pub use self::read::{ReadControl, VerifiedFileRevision};
 pub use self::review::{
     EvidenceReport, KnowledgeReview, ReviewEffectiveState, ReviewHealth, ReviewInventory,
     ReviewKind, ReviewReport, ReviewStatus, archive_evidence, evidence_archive_path,
-    inspect_evidence, is_archived_evidence, list_reviews, list_reviews_controlled,
-    load_archived_evidence, load_archived_evidence_controlled, plan_document_publication,
-    plan_review_repointing, publish_document, publish_document_expected,
-    publish_document_expected_with_plan,
+    find_rss_evidence_binding, inspect_evidence, is_archived_evidence, list_reviews,
+    list_reviews_controlled, load_archived_evidence, load_archived_evidence_controlled,
+    load_retained_rss_payload_controlled, plan_document_publication, plan_review_repointing,
+    publish_document, publish_document_expected, publish_document_expected_with_plan,
 };
 pub use self::rss_evidence::{
     RssCitationInput, RssEvidenceCapture, RssEvidencePreview, accumulate_rss_evidence,

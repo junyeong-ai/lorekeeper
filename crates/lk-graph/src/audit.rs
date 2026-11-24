@@ -1025,6 +1025,31 @@ impl InputResources {
         Ok(())
     }
 
+    /// A review's retained RSS payload, counted once with the same event a subject cites.
+    fn retained_payload(
+        &mut self,
+        root: &Path,
+        selector: &lk_core::rss_evidence::RssEventSelector,
+        citation: &Citation,
+        archived: &AuditPageInput,
+    ) -> Result<(), GraphError> {
+        self.read.check().map_err(GraphError::from)?;
+        let payload = lk_vault::load_retained_rss_payload_controlled(root, citation, &self.read)
+            .map_err(GraphError::from)?
+            .filter(|payload| file_revision(payload) == archived.file_revision)
+            .ok_or_else(|| {
+                error(format!(
+                    "audit dependency changed during input measurement: {}",
+                    archived.path
+                ))
+            })?;
+        self.rss_payloads.insert(
+            (selector.event_id.clone(), citation.revision.clone()),
+            payload.len() as u64,
+        );
+        Ok(())
+    }
+
     fn include_candidate(
         &mut self,
         root: &Path,
@@ -1063,17 +1088,29 @@ impl InputResources {
                     )));
                 }
             }
-            for page in review
-                .evidence
-                .iter()
-                .flat_map(|evidence| evidence.current.iter().chain(&evidence.archived))
-            {
-                self.page(
-                    root,
-                    &page.path,
-                    Some(&page.file_revision),
-                    page.source_revision.as_deref(),
-                )?;
+            for evidence in &review.evidence {
+                if let Some(page) = &evidence.current {
+                    self.page(
+                        root,
+                        &page.path,
+                        Some(&page.file_revision),
+                        page.source_revision.as_deref(),
+                    )?;
+                }
+                let Some(archived) = &evidence.archived else {
+                    continue;
+                };
+                match &evidence.recorded.rss_event {
+                    Some(selector) => {
+                        self.retained_payload(root, selector, &evidence.recorded, archived)?
+                    }
+                    None => self.page(
+                        root,
+                        &archived.path,
+                        Some(&archived.file_revision),
+                        archived.source_revision.as_deref(),
+                    )?,
+                }
             }
         }
         Ok(())
@@ -1661,9 +1698,13 @@ fn capture_review_dependency(
     }
     for citation in &metadata.evidence {
         read.check().map_err(GraphError::from)?;
+        let mut origin = None;
         let current = if exact_page_address(&citation.path) {
             match load_page_input_controlled(root, &citation.path, read) {
-                Ok(input) => input.map(|(_, input)| input),
+                Ok(input) => input.map(|(raw, input)| {
+                    origin = Some(raw);
+                    input
+                }),
                 Err(GraphError::Cancelled) => return Err(GraphError::Cancelled),
                 Err(failure) => {
                     result.state = AuditReviewState::Invalid;
@@ -1675,7 +1716,8 @@ fn capture_review_dependency(
             None
         };
         // An RSS citation pins an immutable event payload its origin page binds; the review
-        // report owns whether that binding holds, and the original store is its archive.
+        // report owns whether that binding holds, and the retained payload is the evidence
+        // itself, supplied whatever the origin's state.
         let rss = citation.rss_event.is_some();
         let current_supplies_recorded = current.as_ref().is_some_and(|page| {
             if rss {
@@ -1684,7 +1726,22 @@ fn capture_review_dependency(
                 page.source_revision.as_deref() == Some(&citation.revision)
             }
         });
-        let archived = if current_supplies_recorded || rss {
+        let archived = if rss {
+            match lk_vault::load_retained_rss_payload_controlled(root, citation, read) {
+                Ok(payload) => payload.map(|payload| {
+                    page_input(
+                        &lk_core::rss_original::event_payload_path(&citation.revision),
+                        &payload,
+                    )
+                }),
+                Err(lk_vault::VaultError::Cancelled) => return Err(GraphError::Cancelled),
+                Err(failure) => {
+                    result.state = AuditReviewState::Invalid;
+                    result.errors.push(failure.to_string());
+                    None
+                }
+            }
+        } else if current_supplies_recorded {
             None
         } else {
             match lk_vault::load_archived_evidence_controlled(root, &citation.revision, read) {
@@ -1708,7 +1765,24 @@ fn capture_review_dependency(
             }
         };
         if report.effective_state != lk_vault::ReviewEffectiveState::Invalid && rss {
-            if current.is_none() != report.missing_evidence.contains(&citation.path) {
+            // The report names evidence by path, so a binding it judged held must still hold
+            // in the origin bytes this capture guards; another event of the origin may be the
+            // changed one.
+            let unbound = match &origin {
+                Some(raw) => lk_vault::find_rss_evidence_binding(
+                    root,
+                    &metadata.subjects,
+                    citation,
+                    raw,
+                    read,
+                )
+                .map_err(GraphError::from)?
+                .is_none(),
+                None => false,
+            };
+            if current.is_none() != report.missing_evidence.contains(&citation.path)
+                || (unbound && !report.changed_evidence.contains(&citation.path))
+            {
                 return Err(error(format!(
                     "review evidence changed during audit planning: {}",
                     citation.path
@@ -6244,6 +6318,25 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.evidence[0].rss_event.is_some())
         );
+        let metadata = json!({"status":"open","subjects":paths,
+            "evidence":[input.candidates[0].evidence[0]],"resolution":null});
+        let review = format!(
+            "---\ntype: exploration\ntitle: Finding\nreview: {metadata}\n---\nThe report disagrees.\n"
+        );
+        write(root.path(), "wiki/explorations/finding.md", &review);
+        let reviewed = expected + review.len() as u64;
+        let input = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, reviewed).unwrap();
+        assert!(
+            input.candidates[0].reviews[0].evidence[0]
+                .archived
+                .is_some()
+        );
+        assert_eq!(input.input.status, AuditInputStatus::Ready);
+        assert_eq!(
+            (input.input.bytes, input.input.rss_payloads),
+            (reviewed, 1),
+            "a payload a review pins and its subject cites is one input"
+        );
         let payload_path = root.path().join(format!(
             "{}/events/{}.json",
             lk_core::rss_original::RSS_ORIGINAL_STORE,
@@ -6252,6 +6345,87 @@ mod tests {
         std::fs::write(payload_path, "corrupt").unwrap();
         assert!(measure_inputs(root.path(), &input.candidates, u64::MAX).is_err());
         assert!(!root.path().join(STATE).exists());
+    }
+
+    #[test]
+    fn review_dependencies_supply_the_retained_rss_payload_a_review_pins() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let event: lk_core::event::Event = serde_json::from_value(json!({
+            "id":"rss:2026-10-18:0000000000000001", "source_id":"rss", "source_type":"rss",
+            "timestamp":"2026-10-18T00:00:00Z", "date":"2026-10-18", "title":"Report", "body":"Complete original report.",
+            "url":null, "author":null, "labels":[], "category":null,
+            "performance_category":null, "is_self":false, "is_personal":false, "metadata":{}
+        })).unwrap();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+        drop(session);
+        let selected = &capture.manifest.events[0];
+        let binding = json!([{"schema":lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+            "concept":"wiki/concepts/b.md", "manifest":reference,
+            "events":[{"event_id":selected.event_id, "revision":selected.revision}]}]);
+        let origin = "daily/report.md";
+        write(
+            root.path(),
+            origin,
+            &format!(
+                "---\ntype: daily\ntitle: Report\nsource: rss\ncreated: 2026-10-18\nsource_record: {}\nconcept_evidence: {binding}\n---\n## Related Concepts\n- [B](../wiki/concepts/b.md)\n",
+                json!({"rss_original":reference})
+            ),
+        );
+        let concept = "---\ntype: concept\ntitle: Subject\n---\n## Synthesis\nScoped claim.\n";
+        for path in ["wiki/concepts/a.md", "wiki/concepts/b.md"] {
+            write(root.path(), path, concept);
+        }
+        let citation = lk_core::concept::Citation {
+            path: origin.into(),
+            revision: selected.revision.clone(),
+            rss_event: Some(lk_core::rss_evidence::RssEventSelector {
+                schema: lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA.into(),
+                event_id: selected.event_id.clone(),
+            }),
+        };
+        let metadata = json!({"status":"open","subjects":["wiki/concepts/a.md","wiki/concepts/b.md"],
+            "evidence":[citation],"resolution":null});
+        write(
+            root.path(),
+            "wiki/explorations/finding.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Finding\nreview: {metadata}\n---\nThe report disagrees.\n"
+            ),
+        );
+        let payload = lk_core::rss_original::event_payload_path(&selected.revision);
+        let supplied = |root: &Path| {
+            let pages = BTreeMap::from([(
+                "wiki/concepts/a.md".to_owned(),
+                lk_vault::parse_page(concept).unwrap(),
+            )]);
+            let dependencies = review_dependencies(root, &dirs, &pages).unwrap();
+            let dependency = &dependencies["wiki/concepts/a.md"][0];
+            assert_eq!(
+                dependency.state,
+                AuditReviewState::Open,
+                "{:?}",
+                dependency.errors
+            );
+            let evidence = &dependency.evidence[0];
+            (
+                evidence.current.is_some(),
+                evidence.archived.as_ref().map(|input| input.path.clone()),
+            )
+        };
+        assert_eq!(
+            supplied(root.path()),
+            (true, Some(payload.clone())),
+            "a subject's audit reads the event another subject binds"
+        );
+        std::fs::remove_file(root.path().join(origin)).unwrap();
+        assert_eq!(
+            supplied(root.path()),
+            (false, Some(payload)),
+            "the retained payload outlives its origin"
+        );
     }
 
     #[test]

@@ -479,6 +479,7 @@ pub fn plan_curation(
         }
     }
     let mut archive_paths = BTreeSet::new();
+    let mut absent_origins = BTreeSet::new();
     let mut assessments: BTreeSet<String> = request
         .reviews
         .iter()
@@ -493,13 +494,18 @@ pub fn plan_curation(
     for review_path in assessments {
         let path = address(&review_path, Some(&explorations_dir))?;
         let staged_path = owners.get(&resolve_page_owner(root, &path)?);
-        let raw = if let Some((_, after)) = staged_path.and_then(|path| staged.get(path)) {
-            after.clone()
-        } else {
-            let raw = std::fs::read_to_string(crate::page_path(root, &path)?)?;
-            retain_read(&mut guarded, path.clone(), raw.clone())?;
-            raw
-        };
+        let (prior, raw) =
+            if let Some((before, after)) = staged_path.and_then(|path| staged.get(path)) {
+                (before.clone(), after.clone())
+            } else {
+                let raw = std::fs::read_to_string(crate::page_path(root, &path)?)?;
+                retain_read(&mut guarded, path.clone(), raw.clone())?;
+                (Some(raw.clone()), raw)
+            };
+        let prior = prior
+            .and_then(|prior| crate::parse_page(&prior).ok())
+            .and_then(|page| page.frontmatter.get("review").cloned())
+            .and_then(|value| serde_json::from_value::<KnowledgeReview>(value).ok());
         let page = crate::parse_page(&raw).map_err(invalid)?;
         let assessment: KnowledgeReview = serde_json::from_value(
             page.frontmatter
@@ -508,6 +514,13 @@ pub fn plan_curation(
                 .ok_or_else(|| invalid("curation requires review metadata"))?,
         )
         .map_err(|error| invalid(error.to_string()))?;
+        // Evidence this review already recorded for the same subjects, verified when pinned.
+        let subjects =
+            |review: &KnowledgeReview| review.subjects.iter().cloned().collect::<BTreeSet<_>>();
+        let recorded = prior
+            .filter(|prior| subjects(prior) == subjects(&assessment))
+            .map(|prior| prior.evidence)
+            .unwrap_or_default();
         let errors = assessment.validation_errors(&path, &page);
         if !errors.is_empty() {
             return Err(invalid(errors.join("; ")));
@@ -549,10 +562,36 @@ pub fn plan_curation(
                         if error.kind() == std::io::ErrorKind::NotFound
                             && citation.rss_event.is_some() =>
                     {
-                        return Err(invalid(format!(
-                            "RSS review evidence requires its current origin page: {}",
-                            citation.path
-                        )));
+                        // The payload proves the event, not that this origin bound it to a
+                        // subject: only a pin recorded for these subjects while its origin
+                        // did stands in for it.
+                        if !recorded.contains(citation) {
+                            return Err(invalid(format!(
+                                "new RSS review evidence requires its current origin page: {}",
+                                citation.path
+                            )));
+                        }
+                        let payload = crate::load_retained_rss_payload_controlled(
+                            root,
+                            citation,
+                            &crate::ReadControl::default(),
+                        )?
+                        .ok_or_else(|| {
+                            invalid(format!(
+                                "missing RSS review evidence without its retained event payload: {}",
+                                citation.path
+                            ))
+                        })?;
+                        if absent_origins.insert(path.clone()) {
+                            plan.require_absent(path);
+                        }
+                        let retained = PathBuf::from(lk_core::rss_original::event_payload_path(
+                            &citation.revision,
+                        ));
+                        if archive_paths.insert(retained.clone()) {
+                            plan.require_unchanged(retained, payload);
+                        }
+                        continue;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         plan.require_absent(path);
@@ -580,18 +619,20 @@ pub fn plan_curation(
                 return Err(invalid(error));
             }
             if citation.rss_event.is_some() {
-                if !crate::review::rss_evidence_bound(
+                crate::find_rss_evidence_binding(
                     root,
                     &assessment.subjects,
                     citation,
                     &raw,
                     &crate::ReadControl::default(),
-                )? {
-                    return Err(invalid(format!(
+                )?
+                .ok_or_else(|| {
+                    invalid(format!(
                         "RSS review evidence must be an event its origin page binds to a subject: {}",
                         citation.path
-                    )));
-                }
+                    ))
+                })?
+                .guard(&mut plan)?;
                 continue;
             }
             if source_revision(&evidence) != citation.revision {

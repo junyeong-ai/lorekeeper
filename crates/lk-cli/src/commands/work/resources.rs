@@ -426,14 +426,15 @@ impl<'a> Capture<'a> {
         )?;
         for evidence in &review.evidence {
             for current in evidence.current.iter().chain(&evidence.archived) {
-                let authority = if evidence
-                    .archived
-                    .as_ref()
-                    .is_some_and(|archive| archive.path == current.path)
-                {
-                    SemanticAuthority::Archive
-                } else {
-                    SemanticAuthority::Page
+                let authority = match evidence.archived.as_ref() {
+                    Some(archive) if archive.path == current.path => {
+                        if evidence.recorded.rss_event.is_some() {
+                            SemanticAuthority::RssEvent
+                        } else {
+                            SemanticAuthority::Archive
+                        }
+                    }
+                    _ => SemanticAuthority::Page,
                 };
                 self.page(
                     &current.path,
