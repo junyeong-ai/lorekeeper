@@ -56,8 +56,23 @@ impl PreparedPrune {
     }
 }
 
-pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune> {
-    prepare_with_classifier(root, queue, &mut |task, revisions| {
+/// What a retirement removes besides the pending rows it retires or drops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Reach {
+    /// Pending rows only. A native run retires its queue before planning and leaves sidecar
+    /// retention, which also reads processed history, to maintenance.
+    Rows,
+    /// Pending rows and the receipts, recipes and ledgers no retained task references.
+    Sidecars,
+}
+
+pub(super) fn prepare(
+    root: &Path,
+    queue: &Path,
+    reach: Reach,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<PreparedPrune> {
+    prepare_with_classifier(root, queue, reach, control, &mut |task, revisions| {
         classify_for_retirement(root, task, revisions)
     })
 }
@@ -65,6 +80,8 @@ pub(super) fn prepare(root: &Path, queue: &Path) -> miette::Result<PreparedPrune
 fn prepare_with_classifier(
     root: &Path,
     queue: &Path,
+    reach: Reach,
+    control: &lk_vault::ReadControl,
     classify: &mut impl FnMut(
         &lk_queue::QueueTask,
         &mut BTreeMap<PathBuf, Result<String, TaskStatus>>,
@@ -85,6 +102,7 @@ fn prepare_with_classifier(
     // later prune retire the task. Dropping the row first orphans the result.
     let staged = super::rejections::staged_identities(root)?;
     for file in super::pending_queue_files(queue)? {
+        control.check().into_diagnostic()?;
         let relative = file.strip_prefix(root).into_diagnostic()?.to_path_buf();
         let full = match lk_vault::page_path(root, &relative) {
             Ok(full) => full,
@@ -158,12 +176,17 @@ fn prepare_with_classifier(
                     summary.pruned_stale += 1;
                     dropped += 1;
                 }
-                TaskStatus::MissingTarget => {
+                TaskStatus::MissingTarget
+                    if super::resolve_target_path(&task.target.vault_path).is_some() =>
+                {
                     retain_snapshots(&mut pages, captured_pages).map_err(classification_drift)?;
                     summary.pruned_missing_target += 1;
                     dropped += 1;
                 }
-                TaskStatus::Unreadable => {
+                // A target address that cannot resolve was never proved absent: dropping the
+                // row would erase its retained input on a malformed address, so it stays for
+                // repair like a task retirement cannot judge.
+                TaskStatus::MissingTarget | TaskStatus::Unreadable => {
                     work_left += 1;
                     summary.kept_unreadable += 1;
                     rows.push((task, false));
@@ -171,9 +194,14 @@ fn prepare_with_classifier(
             }
         }
         // An answered task leaves the pending queue for processed history once the pages that
-        // proved it answered agree, whatever its run still holds. Only a run whose rows all
-        // retire must prove that; a run with work left keeps answers it could not prove.
-        let retire_answered = match done_pages {
+        // proved it answered agree, with each other and with every other retirement's captures,
+        // whatever its run still holds. Only a run whose rows all retire must prove that; a run
+        // with work left keeps answers it could not prove.
+        let proof = done_pages.and_then(|done_pages| match conflict(&pages, &done_pages) {
+            Some(path) => Err(path),
+            None => Ok(done_pages),
+        });
+        let retire_answered = match proof {
             Ok(done_pages) => {
                 retain_snapshots(&mut pages, done_pages).map_err(classification_drift)?;
                 true
@@ -219,12 +247,12 @@ fn prepare_with_classifier(
             let history = lk_queue::serialize_tasks(&answered).into_diagnostic()?;
             if !kept.is_empty() {
                 summary.files_rewritten += 1;
+                plan.create(destination, history);
                 plan.edit(
                     relative,
                     raw,
                     lk_queue::serialize_tasks(&kept).into_diagnostic()?,
                 );
-                plan.create(destination, history);
             } else if dropped == 0 {
                 plan.rename(relative, destination, raw);
             } else {
@@ -252,12 +280,15 @@ fn prepare_with_classifier(
     }
     guarded.extend(plan);
     let mut plan = guarded;
-    let mut removed = vec![(
-        "queue rejection receipt(s)",
-        super::rejections::plan_prune(root, complete.then_some(&retained), &mut plan)?,
-    )];
+    let mut removed = Vec::new();
     let mut screening_directories = Vec::new();
-    if complete {
+    if reach == Reach::Sidecars {
+        removed.push((
+            "queue rejection receipt(s)",
+            super::rejections::plan_prune(root, complete.then_some(&retained), &mut plan)?,
+        ));
+    }
+    if reach == Reach::Sidecars && complete {
         removed.push((
             "native preparation attempt(s)",
             super::super::work::preparation::plan_prune_queue(root, &retained_pending, &mut plan)?,
@@ -313,6 +344,17 @@ fn retain_snapshots(
         }
     }
     Ok(())
+}
+
+/// The first page both captures hold with different bytes or absence.
+fn conflict(
+    retained: &BTreeMap<PathBuf, Option<String>>,
+    snapshots: &BTreeMap<PathBuf, Option<String>>,
+) -> Option<PathBuf> {
+    snapshots
+        .iter()
+        .find(|(path, raw)| retained.get(*path).is_some_and(|held| held != *raw))
+        .map(|(path, _)| path.clone())
 }
 
 fn classification_drift(path: PathBuf) -> miette::Report {
@@ -384,7 +426,13 @@ mod tests {
         }
 
         fn prepare(&self) -> PreparedPrune {
-            prepare(&self.root, &self.root.join(".lorekeeper/queue")).unwrap()
+            prepare(
+                &self.root,
+                &self.root.join(".lorekeeper/queue"),
+                Reach::Sidecars,
+                &lk_vault::ReadControl::default(),
+            )
+            .unwrap()
         }
 
         fn add_missing_task(&mut self) {
@@ -729,6 +777,91 @@ mod tests {
     }
 
     #[test]
+    fn row_retirement_leaves_sidecars_and_disagreeing_proofs_across_runs() {
+        let fixture = Fixture::new();
+        let done: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
+        let mut later = done.clone();
+        later.task_id.push_str("-later");
+        let mut current = done.clone();
+        current.task_id.push_str("-current");
+        current.target.vault_path = "wiki/documents/current.md".into();
+        fixture.write(
+            Path::new(&current.target.vault_path),
+            &format!(
+                "---\ntype: document\nllm_inputs: {{summary: {}}}\n---\n## Summary\n",
+                current.cache_hash
+            ),
+        );
+        let first = lk_queue::serialize_tasks(&[done.clone(), current.clone()]).unwrap();
+        let second = lk_queue::serialize_tasks(&[later.clone(), current.clone()]).unwrap();
+        fixture.write(Path::new(".lorekeeper/queue/a.jsonl"), &first);
+        fixture.write(Path::new(".lorekeeper/queue/b.jsonl"), &second);
+        std::fs::remove_file(fixture.root.join(".lorekeeper/queue/run.jsonl")).unwrap();
+        let target = Path::new(&done.target.vault_path);
+        let edited = format!(
+            "{}Authored addition.\n",
+            std::fs::read_to_string(fixture.root.join(target)).unwrap()
+        );
+        let prepared = prepare_with_classifier(
+            &fixture.root,
+            &fixture.root.join(".lorekeeper/queue"),
+            Reach::Rows,
+            &lk_vault::ReadControl::default(),
+            &mut |task, revisions| {
+                let classification = classify_for_retirement(&fixture.root, task, revisions)?;
+                if task.task_id == done.task_id {
+                    fixture.write(target, &edited);
+                }
+                Ok(classification)
+            },
+        )
+        .unwrap();
+        assert_eq!(prepared.summary.retired_done, 1);
+        assert_eq!(prepared.summary.kept_answered, 1);
+        prepared
+            .apply(&MutationSession::acquire(&fixture.root).unwrap())
+            .unwrap_err();
+        let queue = fixture.root.join(".lorekeeper/queue");
+        assert_eq!(
+            std::fs::read_to_string(queue.join("a.jsonl")).unwrap(),
+            first
+        );
+        assert_eq!(
+            std::fs::read_to_string(queue.join("b.jsonl")).unwrap(),
+            second
+        );
+
+        std::fs::write(fixture.root.join(target), {
+            let raw = std::fs::read_to_string(fixture.root.join(target)).unwrap();
+            raw.replace("Authored addition.\n", "")
+        })
+        .unwrap();
+        let prepared = prepare(
+            &fixture.root,
+            &queue,
+            Reach::Rows,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        prepared
+            .apply(&MutationSession::acquire(&fixture.root).unwrap())
+            .unwrap();
+        for (file, retired) in [("a.jsonl", &done), ("b.jsonl", &later)] {
+            let pending = lk_queue::read_tasks(&queue.join(file)).unwrap().tasks;
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending[0].task_id, current.task_id);
+            let history = lk_queue::read_tasks(&queue.join("processed").join(file))
+                .unwrap()
+                .tasks;
+            assert_eq!(history[0].task_id, retired.task_id);
+        }
+        assert!(
+            fixture.root.join(&fixture.action).exists(),
+            "row retirement leaves sidecar retention to maintenance"
+        );
+    }
+
+    #[test]
     fn malformed_markers_preserve_pending_requests_and_action_bytes() {
         let fixture = Fixture::new();
         let task: lk_queue::QueueTask = serde_json::from_str(fixture.pending.trim()).unwrap();
@@ -814,6 +947,8 @@ mod tests {
                 let prepared = prepare_with_classifier(
                     &fixture.root,
                     &fixture.root.join(".lorekeeper/queue"),
+                    Reach::Sidecars,
+                    &lk_vault::ReadControl::default(),
                     &mut |task, revisions| {
                         let classification =
                             classify_for_retirement(&fixture.root, task, revisions)?;

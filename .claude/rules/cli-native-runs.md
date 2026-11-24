@@ -75,7 +75,9 @@ paths:
   and `lore graph backlinks-sync --dry-run` report the rest.
   Queue retirement runs inside the run under its own writer claim, after the first
   reconciliation and before planning, through the shared prune owner, so planning reads
-  only work still owed. It keeps unclassifiable rows for the final queue check rather than halting.
+  only work still owed. It retires pending rows only, leaving sidecar retention to
+  maintenance; a retirement that cannot complete keeps completion nonzero without
+  halting or pausing, and unclassifiable rows stay for the final queue check.
   Queue settlement alone cannot satisfy review completion. Daily requires a passing
   review check before period resumption and checks again after publication.
 - Stop on fatal or unknown state, cancellation, no verified progress, or an empty plan.

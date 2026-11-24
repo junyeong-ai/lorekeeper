@@ -5588,8 +5588,9 @@ mod native {
         }
 
         /// Queue retirement inside the run, so planning and every later queue read pay for the
-        /// work still owed rather than for answered or superseded history. Rows it cannot
-        /// classify stay for the run's queue check to report.
+        /// work still owed rather than for answered or superseded history. Draining is correct
+        /// without it, so a retirement that cannot complete keeps the job incomplete without
+        /// halting; rows it cannot classify stay for the run's queue check to report.
         async fn retire_queue(&mut self, name: &str) -> bool {
             if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
             {
@@ -5598,14 +5599,18 @@ mod native {
             let Some((session, _)) = self.mutation_session(name).await else {
                 return false;
             };
-            let retired = crate::commands::queue::retire_in_session(&session);
+            let retired =
+                crate::commands::queue::retire_in_session(&session, self.supervisor.read_control());
             drop(session);
             if !self.configuration_is_current() {
                 return false;
             }
             match retired {
                 Ok(detail) => self.record(name, StageState::Completed, Some(detail)),
-                Err(error) => self.failure(name, error),
+                Err(error) if self.supervisor.is_cancelled() => {
+                    self.record(name, StageState::Cancelled, Some(error.to_string()))
+                }
+                Err(error) => self.record(name, StageState::Failed, Some(error.to_string())),
             }
         }
 

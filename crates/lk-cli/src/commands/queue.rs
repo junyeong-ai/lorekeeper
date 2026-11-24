@@ -1917,13 +1917,21 @@ fn prune_queue(
         .then(|| crate::commands::publication::acquire_mutation_now(vault_root, pin))
         .transpose()
         .map_err(|error| miette::miette!("claim vault mutation: {error}"))?;
-    prune_queue_with_session(vault_root, queue_dir, session.as_ref())
+    prune_queue_with_session(
+        vault_root,
+        queue_dir,
+        session.as_ref(),
+        retention::Reach::Sidecars,
+        &lk_vault::ReadControl::default(),
+    )
 }
 
 fn prune_queue_with_session(
     vault_root: &Path,
     queue_dir: &Path,
     session: Option<&lk_vault::MutationSession>,
+    reach: retention::Reach,
+    control: &lk_vault::ReadControl,
 ) -> miette::Result<PruneSummary> {
     let queue_relative = queue_dir
         .strip_prefix(vault_root)
@@ -1935,7 +1943,8 @@ fn prune_queue_with_session(
     let queue_dir = queue_dir.as_path();
     let dry_run = session.is_none();
     let _claim = claim_writer(queue_dir, dry_run)?;
-    let prepared = retention::prepare(vault_root, queue_dir)?;
+    let prepared = retention::prepare(vault_root, queue_dir, reach, control)?;
+    control.check().into_diagnostic()?;
     if let Some(session) = session {
         prepared.apply(session)
     } else {
@@ -1960,16 +1969,31 @@ pub(super) fn prune_with_session(
     json: bool,
 ) -> miette::Result<()> {
     let root = session.root();
-    let summary = prune_queue_with_session(root, &root.join(".lorekeeper/queue"), Some(session))?;
+    let summary = prune_queue_with_session(
+        root,
+        &root.join(".lorekeeper/queue"),
+        Some(session),
+        retention::Reach::Sidecars,
+        &lk_vault::ReadControl::default(),
+    )?;
     report_prune(summary, json, false)
 }
 
-/// Retire what the pending queue no longer needs inside a run's own writer session.
-/// Unreadable and unparseable rows stay where they are for the run's queue check to report,
-/// so they never stop independent work. Returns the stage detail.
-pub(super) fn retire_in_session(session: &lk_vault::MutationSession) -> miette::Result<String> {
+/// Retire the pending rows a run no longer owes inside its own writer session, under its read
+/// control. Unreadable and unparseable rows stay for the run's queue check to report; sidecar
+/// retention stays with maintenance. Returns the stage detail.
+pub(super) fn retire_in_session(
+    session: &lk_vault::MutationSession,
+    control: &lk_vault::ReadControl,
+) -> miette::Result<String> {
     let root = session.root();
-    let summary = prune_queue_with_session(root, &root.join(".lorekeeper/queue"), Some(session))?;
+    let summary = prune_queue_with_session(
+        root,
+        &root.join(".lorekeeper/queue"),
+        Some(session),
+        retention::Reach::Rows,
+        control,
+    )?;
     Ok(format!(
         "{} stale, {} missing-target and {} answered task(s) retired; {} current kept",
         summary.pruned_stale,
@@ -2456,7 +2480,7 @@ fn read_source_revision_with_reader_controlled(
 /// text becomes a filesystem path that is read and then WRITTEN. It goes through the same
 /// lexical rule as every other vault address (`.`/`..` folded, absolute and escaping forms
 /// refused) rather than being joined onto the root as-is.
-fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
+pub(super) fn resolve_target_path(vault_path: &str) -> Option<PathBuf> {
     lk_core::link::resolve_dest(Path::new(""), vault_path)
 }
 
@@ -2653,9 +2677,14 @@ mod tests {
         std::fs::remove_file(&alias).unwrap();
         symlink(second.path(), &alias).unwrap();
 
-        let report =
-            prune_queue_with_session(&alias, &alias.join(".lorekeeper/queue"), Some(&session))
-                .unwrap();
+        let report = prune_queue_with_session(
+            &alias,
+            &alias.join(".lorekeeper/queue"),
+            Some(&session),
+            retention::Reach::Sidecars,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         assert_eq!(report.files_deleted, 1);
         assert!(!first.path().join(relative).exists());
         assert_eq!(std::fs::read(second.path().join(relative)).unwrap(), b"");
@@ -3954,6 +3983,19 @@ mod tests {
         assert_eq!(summary.pruned_missing_target, 1);
         assert_eq!(summary.files_deleted, 1);
         assert!(!file.exists(), "an all-dead file must be deleted");
+    }
+
+    #[test]
+    fn prune_keeps_a_task_whose_target_address_cannot_resolve() {
+        let dir = TempDir::new().unwrap();
+        let queue_dir = dir.path().join(".lorekeeper").join("queue");
+        let file = write_queue_file(&queue_dir, "run-1.jsonl", &[task("../notes.md", "x")]);
+        let before = std::fs::read_to_string(&file).unwrap();
+        let summary =
+            prune_queue(dir.path(), &ConfigurationPin::Absent, &queue_dir, false).unwrap();
+        assert_eq!(summary.kept_unreadable, 1);
+        assert_eq!(summary.pruned_missing_target, 0);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 
     /// A drain retiring a file between the listing and the read must not abandon every
