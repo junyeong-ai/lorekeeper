@@ -78,6 +78,7 @@ pub(super) fn apply(
                 target_revision: result.target_revision,
                 context_revision: result.context_revision.unwrap_or_default(),
                 synthesis: result.body,
+                gap_claims: None,
                 related: None,
             })
         } else {
@@ -259,14 +260,27 @@ pub(super) fn apply(
                 serde_json::to_value(result)
             }
             .map_err(|e| miette::miette!("{e}"))?;
-            let content = prepare_content(root, &target, &original, task, result)?;
-            super::super::work::guard_queue(
+            let gap_callout = super::super::work::guard_queue(
                 root,
                 config,
                 config_revision,
                 &result.task_id,
                 value,
                 &mut plan,
+            )?;
+            let published = gap_callout.map(|callout| SynthesisResult {
+                synthesis: match result.synthesis.trim_end() {
+                    "" => callout,
+                    synthesis => format!("{synthesis}\n\n{callout}"),
+                },
+                ..result.clone()
+            });
+            let content = prepare_content(
+                root,
+                &target,
+                &original,
+                task,
+                published.as_ref().unwrap_or(result),
             )?;
             task.generation_policy()
                 .map_err(|e| miette::miette!("{e}"))?;

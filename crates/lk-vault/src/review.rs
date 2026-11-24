@@ -15,9 +15,22 @@ pub enum ReviewStatus {
     Resolved,
 }
 
+/// What a review records, when its author declares it. A synthesis keeps the defining claims an
+/// open evidence-gap review of its concept names visible, marked as awaiting evidence.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewKind {
+    /// Cited sources disagree on a claim under the same subject, scope and time.
+    Conflict,
+    /// Cited sources no longer support claims the subject depends on, such as its definition.
+    EvidenceGap,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct KnowledgeReview {
     pub status: ReviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ReviewKind>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub subjects: Vec<String>,
     pub evidence: Vec<Citation>,
@@ -31,6 +44,8 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
         struct Fields {
             status: ReviewStatus,
             #[serde(default)]
+            kind: Option<ReviewKind>,
+            #[serde(default)]
             subjects: Vec<String>,
             #[serde(deserialize_with = "deserialize_evidence")]
             evidence: Vec<Citation>,
@@ -41,6 +56,7 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
             status: fields.status,
+            kind: fields.kind,
             subjects: fields.subjects,
             evidence: fields.evidence,
             resolution: fields.resolution,

@@ -763,6 +763,7 @@ fn superseded_rejection_after_independent_publication_does_not_halt_queue_planni
             context_revision: "0".repeat(64),
             synthesis: "Retained interpretation from an older semantic scope.".into(),
             related: Some(String::new()),
+            gap_claims: None,
         };
         let proposal = fixture.write(
             ".lorekeeper/queue/results/000-rejected.synthesis.json",

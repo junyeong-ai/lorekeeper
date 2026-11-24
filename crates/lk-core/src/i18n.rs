@@ -107,6 +107,9 @@ pub struct Strings {
     pub key_events: &'static str,
     pub key_messages: &'static str,
     pub related_concepts: &'static str,
+    // Concept synthesis: defining claims an open evidence-gap review names
+    pub evidence_gap_lead: &'static str,
+    pub evidence_gap_review: &'static str,
     // Personal / synthesis sections
     pub key_summary: &'static str,
     pub key_themes_this_week: &'static str,
@@ -195,6 +198,8 @@ static KO: Strings = Strings {
     key_events: "주요 이벤트",
     key_messages: "주요 메시지",
     related_concepts: "관련 개념",
+    evidence_gap_lead: "아래 정의는 이를 뒷받침할 근거를 기다리고 있다.",
+    evidence_gap_review: "근거 공백 검토",
     key_summary: "핵심 요약",
     key_themes_this_week: "이번 주 핵심 주제",
     overall_summary: "종합 요약",
@@ -264,6 +269,8 @@ static EN: Strings = Strings {
     key_events: "Key Events",
     key_messages: "Key Messages",
     related_concepts: "Related Concepts",
+    evidence_gap_lead: "These defining claims await supporting evidence.",
+    evidence_gap_review: "Evidence gap review",
     key_summary: "Summary",
     key_themes_this_week: "Key Themes This Week",
     overall_summary: "Overview",

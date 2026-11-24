@@ -113,7 +113,14 @@ paths:
   run, spent when it publishes: a further proposal in that run publishes and records
   nothing and defers only that target, so a distinct question waits for a later run, whose
   request scopes the reviews already published, and a repeating finalizer cannot loop
-  through paid calls. A completed synthesis is not
+  through paid calls. The published review records its `kind`. A synthesis capture names
+  each open `evidence-gap` review whose subject owner is the concept in `evidence_gaps`
+  (`work/gap.rs`). A synthesis result carries the defining claims in structured
+  `gap_claims`; after the context revision check, publication refuses claims that do not
+  match that scope and renders the callout beneath the synthesis from the same capture, so
+  reply and result bytes carry only the claims. An empty list answers that recovered
+  citations support every claim, publishes no callout and leaves the review to
+  reassessment, so recovered evidence never holds the request. A completed synthesis is not
   rewritten when its review is later resolved; that takes an explicit resynthesis. Observers record a disagreement as a finding or source
   question, never as an `unresolved` processing blocker, so bounded Work reaches this
   finalizer.

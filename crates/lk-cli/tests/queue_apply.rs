@@ -2150,6 +2150,84 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
 }
 
 #[test]
+fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout() {
+    for claims in [
+        None,
+        Some(None),
+        Some(Some("Retention is a legal obligation.")),
+    ] {
+        let ws = Workspace::new();
+        let source_path = "wiki/documents/policy.md";
+        let source = "---\ntype: document\n---\nRetention is 30 days. See [Retention](../concepts/retention.md).\n";
+        ws.write(source_path, source);
+        let citation = lk_core::concept::Citation::new(
+            Path::new(source_path),
+            &lk_core::frontmatter::parse_page(source).unwrap(),
+        );
+        let hash = lk_core::concept::citation_digest(std::slice::from_ref(&citation));
+        let target = "wiki/concepts/retention.md";
+        let body = format!(
+            "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nPrior scope.\n"
+        );
+        ws.write(target, &body);
+        ws.write(
+            "wiki/explorations/retention-gap.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Retention gap\nreview: {}\n---\n## Judgment\nThe legal basis is unsupported.\n",
+                serde_json::json!({"status":"open","kind":"evidence-gap","subjects":[target],"evidence":[citation],"resolution":null})
+            ),
+        );
+        let task = serde_json::json!({"task_id":"gap", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
+            "input":{"locale":"en","citations":[citation]}, "target":{"vault_path":target,"kind":"concept-synthesis","anchor":"## Synthesis"}});
+        ws.write(".lorekeeper/queue/gap.jsonl", &task.to_string());
+        let context = work_json(&ws, &["work", "context", "--task-id", "gap"]);
+        assert_eq!(
+            context["context"]["purpose"]["parameters"]["evidence_gaps"][0]["path"],
+            "wiki/explorations/retention-gap.md"
+        );
+        let mut result = serde_json::json!({"task_id":"gap","cache_hash":hash,
+            "target_revision":context["subject"]["target_revision"],"context_revision":context["context_revision"],
+            "synthesis":"The source declares retention of 30 days.","related":null});
+        if let Some(claim) = claims {
+            result["gap_claims"] = serde_json::json!(claim.into_iter().collect::<Vec<_>>());
+        }
+        ws.write(
+            ".lorekeeper/queue/results/gap.synthesis.json",
+            &result.to_string(),
+        );
+        let output = ws.run(&["queue", "apply"]);
+        let published = ws.read(target);
+        let Some(claim) = claims else {
+            assert!(
+                !output.status.success(),
+                "a result without claims is refused"
+            );
+            assert_eq!(published, body, "the concept is unchanged");
+            continue;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let Some(claim) = claim else {
+            assert!(
+                published.contains("The source declares retention of 30 days.")
+                    && !published.contains("[!gap]"),
+                "recovered evidence publishes without a callout: {published}"
+            );
+            continue;
+        };
+        assert!(
+            published.contains(&format!(
+                "The source declares retention of 30 days.\n\n> [!gap] These defining claims await supporting evidence.\n> - {claim}\n>\n> Evidence gap review: [Retention gap](../explorations/retention-gap.md)"
+            )),
+            "{published}"
+        );
+    }
+}
+
+#[test]
 fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_work() {
     for bounded in [false, true] {
         for scenario in [

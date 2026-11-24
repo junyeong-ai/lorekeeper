@@ -190,14 +190,18 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    An application example does not define the general concept. Losing its defining
    scope is a material evidence gap: recover supporting sources before finalizing
    a rewrite that would reduce the concept to that example. When the citations cannot
-   recover it, the coordinator records an open evidence-gap review of this concept
-   naming those defining claims, the pages checked and the missing evidence (a native
-   finalization proposes it as in step 5). Once that review is in scope, rewrite what the
-   citations support and keep the defining claims it names inside one concise
-   `> [!gap]` callout that says they await supporting evidence and links the open review,
-   then finish. The callout keeps the definition visible without presenting it as
-   supported; the review carries the gap until an audit recovers evidence or narrows the
-   claim.
+   recover it, the coordinator records an open review of this concept with
+   `kind: evidence-gap`, naming those defining claims, the pages checked and the missing
+   evidence (a native finalization proposes it as in step 5). Once an open
+   evidence-gap review of this concept is in scope, rewrite what the citations support and
+   finish. Return the defining claims it names that the citations still do not support,
+   one line each, in the result's `gap_claims` (a native reply and a result written
+   directly alike), or `[]` when the citations now support them all, and never write the
+   callout in `synthesis`: publication renders the evidence-gap callout beneath the
+   synthesis with its marker, those claims and a reference to every such review, and
+   refuses a synthesis in that scope without `gap_claims`. The callout
+   keeps the definition visible without presenting it as supported; the review carries the
+   gap until an audit recovers evidence or narrows the claim.
    Keep uncertainty in the concept only when it affects a current decision.
    If the citations merely name the concept without explaining it, state that
    evidence limit concisely instead of inventing a definition or emitting an empty body.

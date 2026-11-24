@@ -417,8 +417,9 @@ pub(in crate::commands) fn selected_request(
     let replies = tasks
         .iter()
         .map(|task| {
+            let gaps = super::gap::from_context(&task["context"])?;
             let task: QueueTask = serde_json::from_value(task["task"].clone()).into_diagnostic()?;
-            super::generation::minimum_reply(&task)
+            super::generation::minimum_reply(&task, &gaps)
         })
         .collect::<miette::Result<Vec<_>>>()?;
     let minimum_bytes = serde_json::to_vec(&json!({"results":replies}))
@@ -859,7 +860,7 @@ mod tests {
                 task.input
                     .insert("related_anchor".into(), json!("## Related"));
             }
-            let reply = super::super::generation::minimum_reply(&task).unwrap();
+            let reply = super::super::generation::minimum_reply(&task, &[]).unwrap();
             assert!(
                 !reply["value"]["synthesis"]
                     .as_str()
@@ -870,7 +871,7 @@ mod tests {
             assert_eq!(reply["value"]["related"].is_string(), related);
         }
         task.kind = TaskKind::Summarize;
-        assert!(super::super::generation::minimum_reply(&task).is_err());
+        assert!(super::super::generation::minimum_reply(&task, &[]).is_err());
     }
 
     #[test]
@@ -1138,7 +1139,7 @@ mod tests {
         let (task, _, context, _, _, _) = fixture();
         let root = tempfile::tempdir().unwrap();
         let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
-        let resources = (0..384)
+        let resources = (0..380)
             .map(|index| {
                 let text = format!("Declared source {index}. {}", "x".repeat(2000));
                 SemanticResource {

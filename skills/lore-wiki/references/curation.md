@@ -78,7 +78,10 @@ appearance in `review.evidence` alone does not mean the review assesses that con
 An existing generated page or unrelated authored exploration cannot be converted by
 this operation; its original ownership is checked before replacing content.
 Review metadata follows AGENTS.md: explicit `subjects` scope the assessment without
-adding citations; `evidence` pins authored source revisions from `wiki evidence`.
+adding citations; `evidence` pins authored source revisions from `wiki evidence`, or an
+RSS event exactly as `wiki citations` reports it. Declare `kind: evidence-gap` when the
+review records defining claims its subject's citations no longer support, so the
+subject's synthesis keeps them marked, or `kind: conflict` for a disagreement.
 Evidence must match the proposed final state when the same plan changes that page.
 For such evidence, write the complete proposed Markdown to a temporary file and use
 `lore wiki fingerprint --file DRAFT.md` to obtain its `source_revision`. This hashes

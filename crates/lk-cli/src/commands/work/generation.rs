@@ -61,7 +61,7 @@ pub(in crate::commands) fn schema() -> Value {
         "required":["admission","name","category","aliases","synthesis","rss_evidence"]});
     let value = json!({"anyOf":[{"type":"null"},
         {"type":"object","additionalProperties":false,"properties":{"concepts":{"type":"array","items":concept}},"required":["concepts"]},
-        {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]}},"required":["synthesis","related"]},
+        {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]},"gap_claims":{"type":["array","null"],"items":{"type":"string"}}},"required":["synthesis","related","gap_claims"]},
         {"type":"object","additionalProperties":false,"properties":{"queries":{"type":"array","minItems":1,"maxItems":16,"items":{
             "type":"object","additionalProperties":false,"properties":{"query":{"type":"string","minLength":1},"phrase":{"type":"boolean"},"spacing":{"type":"boolean"}},"required":["query","phrase","spacing"]}}},"required":["queries"]},
         {"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["conflict","evidence-gap"]},
@@ -188,7 +188,8 @@ pub(super) fn assemble(
             let body_error = concepts
                 .iter()
                 .filter_map(|concept| concept.synthesis.as_deref())
-                .find_map(|body| lk_core::markdown::validate_section_body(body).err());
+                .find_map(|body| lk_core::markdown::validate_section_body(body).err())
+                .map(|error| error.to_string());
             let result = serde_json::to_value(lk_queue::TaskResult {
                 concept_policy: serde_json::from_value(task.input["concept_policy"].clone())
                     .into_diagnostic()?,
@@ -211,6 +212,8 @@ pub(super) fn assemble(
             struct Synthesis {
                 synthesis: String,
                 related: Option<String>,
+                #[serde(default)]
+                gap_claims: Option<Vec<String>>,
             }
             if semantic.get("related").is_none() {
                 return Err(miette::miette!(
@@ -218,9 +221,15 @@ pub(super) fn assemble(
                 ));
             }
             let value: Synthesis = serde_json::from_value(semantic).into_diagnostic()?;
-            let body_error = std::iter::once(value.synthesis.as_str())
-                .chain(value.related.as_deref())
-                .find_map(|body| lk_core::markdown::validate_section_body(body).err());
+            let body_error =
+                super::gap::check_claims(&binding.evidence_gaps, value.gap_claims.as_deref())
+                    .err()
+                    .or_else(|| {
+                        std::iter::once(value.synthesis.as_str())
+                            .chain(value.related.as_deref())
+                            .find_map(|body| lk_core::markdown::validate_section_body(body).err())
+                            .map(|error| error.to_string())
+                    });
             let result = serde_json::to_value(lk_queue::SynthesisResult {
                 task_id: task_id.clone(),
                 cache_hash: cache_hash.clone(),
@@ -228,6 +237,7 @@ pub(super) fn assemble(
                 context_revision: context_revision.into(),
                 synthesis: value.synthesis,
                 related: value.related,
+                gap_claims: value.gap_claims,
             })
             .into_diagnostic()?;
             (result, body_error)
@@ -309,7 +319,7 @@ pub(super) fn response_limit(
     owners: &Owners,
     limit: usize,
 ) -> miette::Result<usize> {
-    let reply = minimum_reply(task)?;
+    let reply = minimum_reply(task, &binding.evidence_gaps)?;
     let Outcome::Complete(result) = assemble(
         task,
         subject,
@@ -348,12 +358,16 @@ pub(super) fn response_limit(
 /// Appended to a finalizer's instructions when its request discloses a candidate roster.
 pub(super) const ROSTER_INSTRUCTION: &str = "discovery lists each recorded query with the pages it matched and how many of them the ranked candidate roster carried. Pages beyond that roster were never examined: neither the roster nor the owners list is the complete related knowledge, and needs-discovery remains the way to widen the search.";
 
-pub(super) fn minimum_reply(task: &QueueTask) -> miette::Result<Value> {
+pub(super) fn minimum_reply(
+    task: &QueueTask,
+    gaps: &[super::gap::EvidenceGap],
+) -> miette::Result<Value> {
     let value = match task.kind {
         TaskKind::ExtractConcepts => json!({"concepts":[]}),
         TaskKind::SynthesizeConcept => json!({
             "synthesis":"x",
             "related":(task.anchors().len() == 2).then_some(""),
+            "gap_claims":(!gaps.is_empty()).then(|| json!([])),
         }),
         _ => return Err(miette::miette!("task uses section response bounds")),
     };
@@ -366,17 +380,19 @@ const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discov
 /// The synthesis-only reply that proposes the durable review its contract requires.
 const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no scoped review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. An open review of this concept about a different question does not record this one. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
 
+const GAP_REPLY: &str = "When context.purpose.parameters.evidence_gaps names open evidence-gap reviews of this concept, return the defining claims they name that the citations still do not support, one line each, in gap_claims, or an empty list when the citations now support every such claim; Rust appends the evidence-gap callout with its marker and a reference to each review, so never write that callout in synthesis. Without evidence_gaps, gap_claims is null.";
+
 pub(super) fn instruction(kinds: impl IntoIterator<Item = TaskKind>) -> String {
     let kinds = kinds.into_iter().collect::<Vec<_>>();
     let mut instruction = format!(
-        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction semantic_object contains concepts with semantic name/category/aliases/synthesis/rss_evidence fields and admission {{decision: new}} or {{decision: reuse, owner_ref: exact_reference}}. Each task or completed Work supplies its own owners roster. Reuse only a reference from that exact roster after the required identity comparison. Never return owner paths or revisions; Rust expands the selected reference into the unchanged canonical ReportedConcept owner. An empty owners roster permits no reuse; synthesis contains only synthesis and related. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
+        "Return one results entry for each supplied task, in exact supplied order (one entry for a completed Work). Each entry is {{status: complete, value: semantic_object, reason: null}}, or {{status: needs-action, value: null, reason: nonblank}}. Extraction semantic_object contains concepts with semantic name/category/aliases/synthesis/rss_evidence fields and admission {{decision: new}} or {{decision: reuse, owner_ref: exact_reference}}. Each task or completed Work supplies its own owners roster. Reuse only a reference from that exact roster after the required identity comparison. Never return owner paths or revisions; Rust expands the selected reference into the unchanged canonical ReportedConcept owner. An empty owners roster permits no reuse; synthesis contains only synthesis, related and gap_claims. Rust supplies all TaskResult/SynthesisResult task/cache/target/context/date/discovery/selection metadata and owns result-file serialization, finish, seals, staging and publication. Never return metadata, source_questions fields or extra keys. {} After completing the required reads and admission judgments, an empty extraction is valid when no concept satisfies the admission policy, even when the evidence leaves source questions open. Never invent a concept to carry unrelated questions. An inspection roster establishes read coverage, not semantic support or approval to reuse an owner. Evidence mappings identify cited resources, not every inspected resource. If a required identity judgment or supporting evidence is absent from the observations, perform the permitted targeted read or return needs-action; neither roster membership nor omission from the citation mapping settles that judgment. Read the supplied scope/contracts completely. Exact owner/name/alias checks, targeted missing reads and review/repair capabilities remain available when necessary. Do not repeat setup/queue enumeration or reconstruct guards. Native revisions are opaque and domain-specific: compare only the same named field from native output, never a raw checksum or another revision field. Rust validates captured revisions. Other scope changes require needs-action for fresh readiness; never attach new hashes to an old answer. Unknown semantic support is not approval. Processing blockers, missing required reads or actions require needs-action. Honor max_response_bytes, which reserves the native result envelope inside max_result_bytes. Do not drop task-relevant evidence or uncertainty to fit; return needs-action instead. Native guards revalidate the complete current scope after the host and again at publication.",
         crate::commands::execution::finalization::publication_rules()
     );
     if kinds.contains(&TaskKind::ExtractConcepts) {
         instruction = format!("{instruction} {DISCOVERY_REPLY}");
     }
     if kinds.contains(&TaskKind::SynthesizeConcept) {
-        instruction = format!("{instruction} {REVIEW_REPLY}");
+        instruction = format!("{instruction} {REVIEW_REPLY} {GAP_REPLY}");
     }
     instruction
 }
@@ -715,6 +731,7 @@ mod tests {
             let binding = super::super::resources::ResultBinding {
                 discovery: Vec::new(),
                 selection: None,
+                evidence_gaps: Vec::new(),
             };
             for (body, valid) in [
                 ("## Sibling\nBody.", false),
@@ -791,6 +808,7 @@ mod tests {
                 spacing: false,
             }],
             selection: Some(serde_json::from_value(selection.clone()).unwrap()),
+            evidence_gaps: Vec::new(),
         };
         let revision = "e".repeat(64);
         let owners = Owners(vec![lk_queue::ConceptOwner {

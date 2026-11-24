@@ -10,6 +10,7 @@ mod action;
 #[cfg(unix)]
 pub(super) mod audit;
 mod discovery;
+mod gap;
 #[cfg(unix)]
 pub(super) mod generation;
 #[cfg(unix)]
@@ -468,6 +469,8 @@ pub(super) struct QueuePublicationGuard {
     pages: std::collections::BTreeMap<PathBuf, String>,
     owned_pages: std::collections::BTreeSet<PathBuf>,
     bounded: bool,
+    /// The evidence-gap callout a synthesis publishes beneath its synthesis body.
+    gap_callout: Option<String>,
 }
 
 impl QueuePublicationGuard {
@@ -496,6 +499,8 @@ impl QueuePublicationGuard {
     }
 }
 
+/// Add the guards application needs for `result` and return the evidence-gap callout a
+/// synthesis publishes beneath its body, from the same publication capture.
 pub(super) fn guard_queue(
     root: &Path,
     config: &lk_core::config::Config,
@@ -503,17 +508,17 @@ pub(super) fn guard_queue(
     task_id: &str,
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
-) -> miette::Result<bool> {
-    guard_queue_controlled(
-        root,
-        config,
-        config_revision,
-        task_id,
-        result,
-        None,
-        mutation,
-        &lk_vault::ReadControl::default(),
-    )
+) -> miette::Result<Option<String>> {
+    let mut guard = prepare_queue_publication(root, config, config_revision, task_id, result)?;
+    let gap_callout = guard.gap_callout.take();
+    let owned = guard
+        .pages
+        .iter()
+        .filter(|(path, _)| guard.owned_pages.contains(*path))
+        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .collect();
+    guard.append_to(mutation, &owned)?;
+    Ok(gap_callout)
 }
 
 /// Add the guards application would need for `result`. `sealing` is the candidate roster
@@ -566,6 +571,31 @@ pub(super) fn prepare_queue_publication(
         None,
         &lk_vault::ReadControl::default(),
     )
+}
+
+/// The evidence-gap callout a synthesis result publishes beneath its synthesis, checked
+/// against the open evidence-gap reviews of the concept this publication capture holds.
+fn evidence_gap_callout(prepared: &Prepared, result: &Value) -> miette::Result<Option<String>> {
+    let binding = prepared.result_binding()?;
+    let claims: Option<Vec<String>> = match result.get("gap_claims") {
+        None | Some(Value::Null) => None,
+        Some(claims) => Some(serde_json::from_value(claims.clone()).into_diagnostic()?),
+    };
+    if let Err(reason) = gap::check_claims(&binding.evidence_gaps, claims.as_deref()) {
+        return Err(publication_rejection(RejectionKind::InvalidSection, reason));
+    }
+    let (Some(claims), Subject::Queue { target, .. }) = (claims, &prepared.subject) else {
+        return Ok(None);
+    };
+    if claims.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(gap::render(
+        gap::locale(&prepared.context)?,
+        target,
+        &binding.evidence_gaps,
+        &claims,
+    )))
 }
 
 fn prepare_queue_publication_controlled(
@@ -695,6 +725,11 @@ fn prepare_queue_publication_controlled(
             ));
         }
     }
+    let gap_callout = if scoped_synthesis {
+        evidence_gap_callout(&prepared, &result)?
+    } else {
+        None
+    };
     if scoped_extraction && !prepared.context["purpose"]["source_observations"].is_null() {
         let typed: lk_queue::TaskResult =
             serde_json::from_value(result.clone()).into_diagnostic()?;
@@ -723,6 +758,7 @@ fn prepare_queue_publication_controlled(
         pages,
         owned_pages,
         bounded,
+        gap_callout,
     })
 }
 

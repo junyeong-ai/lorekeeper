@@ -66,23 +66,27 @@ pub(super) struct Prepared {
     pub(super) graph_citations: Option<String>,
 }
 
-/// The discovery recipes and screening proof Rust writes into an extraction result.
+/// What Rust writes into a result beside the model's reply: an extraction's discovery recipes
+/// and screening proof, and the open evidence-gap reviews a synthesis references.
 pub(super) struct ResultBinding {
     pub discovery: Vec<lk_core::discovery::DiscoveryQuery>,
     pub selection: Option<lk_queue::ExtractionSelection>,
+    pub evidence_gaps: Vec<super::gap::EvidenceGap>,
 }
 
 impl ResultBinding {
     /// The bound roster's recipes and proof for screened evidence, the context's own
-    /// recipes otherwise.
+    /// recipes otherwise, and the evidence-gap reviews the synthesis context captured.
     pub(super) fn build(
         context: &Value,
         roster: Option<&super::selection::RosterBinding>,
     ) -> miette::Result<Self> {
+        let evidence_gaps = super::gap::from_context(context)?;
         match roster {
             Some(roster) => Ok(Self {
                 discovery: roster.queries(),
                 selection: Some(roster.selection.clone()),
+                evidence_gaps,
             }),
             None if is_screened(context) => Err(miette::miette!(
                 "screened extraction evidence is not bound to its current candidate roster"
@@ -95,6 +99,7 @@ impl ResultBinding {
                     None => Vec::new(),
                 },
                 selection: None,
+                evidence_gaps,
             }),
         }
     }
@@ -1069,7 +1074,19 @@ fn capture_task_with_audit_controlled(
             }
             captured.pages.insert(path, raw);
         }
+        let scoped_reviews: Vec<String> =
+            serde_json::from_value(scoped.context["purpose"]["review_dependencies"].clone())
+                .into_diagnostic()?;
+        let gaps = super::gap::open_reviews(
+            root,
+            &task.target.vault_path,
+            &scoped_reviews,
+            &captured.pages,
+        )?;
         purpose.insert("knowledge_scope".into(), scoped.context["purpose"].clone());
+        if !gaps.is_empty() {
+            purpose.insert("evidence_gaps".into(), json!(gaps));
+        }
     }
     let context = json!({
         "subject": subject,

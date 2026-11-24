@@ -107,6 +107,9 @@ canonical; SQLite navigation is derived.
   (`RssEvidenceCapture`), changed once no subject binding remains, and its retained payload
   in the original store is its archive, so curation guards the origin page and archives
   nothing. Evidence identity is the path with its selected event.
+- A review may declare `kind` (`conflict`, `evidence-gap`); undeclared reviews stay valid.
+  An open evidence-gap review obliges its subject's synthesis to keep the named defining
+  claims in the evidence-gap callout the CLI renders from a result's structured claims.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review
@@ -267,6 +270,6 @@ Cards and guard bytes exist only for roster members; `discover_queries` stays co
   verifying historical originals. Inventory revision pins membership; event payload
   revision pins selected text. No title/position inference or automatic migration.
 - Journal guards bind verified canonical originals and recheck preserved dependencies
-  during recovery, not a fresh unverified baseline. Review evidence stays page-only
-  and rejects selectors. SQLite link previews show ≤20 selected pairs plus explicit
+  during recovery, not a fresh unverified baseline. Review evidence may carry an
+  event selector under the review contract above. SQLite link previews show ≤20 selected pairs plus explicit
   total/truncation; full inventory is separate, not an event fulltext index.

@@ -129,13 +129,18 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   concrete nonblank reason, when the synthesis contract requires a durable review for a
   material disagreement or evidence gap that no scoped review in the request records.
   `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
-  links no concept page; `evidence` indexes the cited source pages it rests on. Rust
-  publishes it as an open review of the concept and replans. While an open scoped review
-  of the concept exists, draft against it instead.
+  links no concept page; `evidence` indexes the cited source pages or RSS event payloads
+  it rests on. Rust publishes it as an open review of the concept recording its `kind`
+  and replans. An open review about a different question does not record this one; a
+  concept publishes at most one review per run.
+- Synthesis value: `{synthesis, related, gap_claims}`. `gap_claims` lists, one line each,
+  the defining claims an open evidence-gap review in `context.purpose.parameters.evidence_gaps`
+  names that the citations still do not support, `[]` when they now support every such
+  claim, and `null` without such a review. Rust renders the evidence-gap callout from it.
 
 An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
-remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null}`.
+remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null, gap_claims: [...] | null}`.
 Use null or empty arrays for absent values required by the response schema. An empty
 concept list is valid after required reads and admission judgments, including when no
 concept meets the admission policy but source questions remain open. Do not invent a concept merely to carry those questions. Do not

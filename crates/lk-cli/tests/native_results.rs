@@ -97,7 +97,7 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             if mode=='needs-review-always' or not any(authority(entry)=='review' for entry in roster):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 (root/'review-proposals').write_text(str(int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1))
-                results.append({'status':'needs-review','value':{'kind':'conflict','title':'Deployment status disagreement',
+                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement',
                     'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
@@ -117,7 +117,10 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
                     'admission':{'decision':'reuse','owner_ref':owner['owner_ref']},'synthesis':None,'rss_evidence':[]}]}
             if mode=='new-concept': value={'concepts':[{'name':'Transactional Outbox','category':None,'aliases':[],
                 'admission':{'decision':'new'},'synthesis':'The source proposes a transactional outbox; deployment is unverified.','rss_evidence':[]}]}
-        else: value={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None}
+        else:
+            value={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None}
+            if mode=='needs-review-gap' and 'evidence_gaps' in json.dumps(item):
+                value['gap_claims']=['The protocol is deployed in production.']
         if mode=='metadata': value['task_id']='forged'
         if mode=='oversized': value={'synthesis':'x'*40000,'related':None}
         if mode=='invalid-body' and ('blocked' in target or 'frontier' in target):
@@ -596,6 +599,33 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
                 .next()
                 .is_some(),
             "the review's evidence is archived"
+        );
+
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review-gap").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        assert!(fixture.done(&task), "{planned}: {report}");
+        let review = std::fs::read_to_string(
+            fixture
+                .root()
+                .join("vault/wiki/explorations/deployment-status-disagreement.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            lk_core::frontmatter::parse_page(&review)
+                .unwrap()
+                .frontmatter
+                .fields["review"]["kind"],
+            "evidence-gap"
+        );
+        let concept =
+            std::fs::read_to_string(fixture.root().join("vault").join(&task.target.vault_path))
+                .unwrap();
+        assert!(
+            concept.contains("> [!gap] These defining claims await supporting evidence.\n> - The protocol is deployed in production.\n>\n> Evidence gap review: [Deployment status disagreement](../explorations/deployment-status-disagreement.md)"),
+            "Rust renders the callout with the claims and an exact review reference: {concept}"
         );
 
         let fixture = Fixture::new("codex");

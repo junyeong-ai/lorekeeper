@@ -19,22 +19,12 @@ use serde_json::{Value, json};
 
 use super::Prepared;
 
-/// What a proposed review records.
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
-pub(in crate::commands) enum ReviewKind {
-    /// Cited sources disagree on a claim under the same subject, scope and time.
-    Conflict,
-    /// Cited sources no longer support claims the concept depends on, such as its definition.
-    EvidenceGap,
-}
-
 /// One proposed open review of the synthesized concept. `evidence` names inspected resources of
 /// the finalized Work by their roster index.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::commands) struct ReviewProposal {
-    pub kind: ReviewKind,
+    pub kind: lk_vault::ReviewKind,
     pub title: String,
     pub body: String,
     pub evidence: Vec<usize>,
@@ -124,7 +114,7 @@ pub(in crate::commands) fn admit(
         citations.push(citation);
         guards.push(guard);
     }
-    let metadata = json!({"status":"open","subjects":[task.target.vault_path],
+    let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null});
     let content = format!(
         "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
@@ -257,12 +247,12 @@ fn review_path(
     root: &Path,
     dirs: &lk_core::config::VaultDirs,
     title: &str,
-    kind: ReviewKind,
+    kind: lk_vault::ReviewKind,
 ) -> miette::Result<Option<String>> {
     let directory = lk_core::vault_path::explorations_dir(dirs);
     let mut stem = lk_core::concept::slugify(title).unwrap_or_else(|| match kind {
-        ReviewKind::Conflict => "conflict-review".into(),
-        ReviewKind::EvidenceGap => "evidence-gap-review".into(),
+        lk_vault::ReviewKind::Conflict => "conflict-review".into(),
+        lk_vault::ReviewKind::EvidenceGap => "evidence-gap-review".into(),
     });
     let bound = MAX_STEM_BYTES - "-64".len();
     if stem.len() > bound {
@@ -338,7 +328,7 @@ mod tests {
             root.path(),
             &lk_core::config::VaultDirs::default(),
             &"검토".repeat(100),
-            ReviewKind::Conflict,
+            lk_vault::ReviewKind::Conflict,
         )
         .unwrap()
         .unwrap();

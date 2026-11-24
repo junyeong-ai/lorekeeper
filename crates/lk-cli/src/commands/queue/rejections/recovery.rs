@@ -230,6 +230,7 @@ fn plan_recovery_controlled(
             context_revision: result.context_revision.clone().unwrap_or_default(),
             synthesis: result.body.clone(),
             related: None,
+            gap_claims: None,
         };
         if let Err(error) =
             super::super::synthesis::prepare_content(root, &target, &original, task, &content)

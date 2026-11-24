@@ -260,6 +260,10 @@ pub struct SynthesisResult {
     pub context_revision: String,
     pub synthesis: String,
     pub related: Option<String>,
+    /// The defining claims an open evidence-gap review of the concept names, one line each.
+    /// Publication keeps them in the evidence-gap callout Rust renders beneath the synthesis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap_claims: Option<Vec<String>>,
 }
 
 pub const SYNTHESIS_RESULT_SUFFIX: &str = ".synthesis.json";
