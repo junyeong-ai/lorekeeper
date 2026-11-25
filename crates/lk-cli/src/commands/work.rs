@@ -10,8 +10,10 @@ mod action;
 #[cfg(unix)]
 pub(super) mod audit;
 mod discovery;
-mod gap;
-pub(in crate::commands) use gap::references_closed_review;
+mod open_review;
+pub(in crate::commands) use open_review::{
+    PUBLISHED_KEY as PUBLISHED_REVIEWS_KEY, PublishedReviews, references_closed_review,
+};
 #[cfg(unix)]
 pub(super) mod generation;
 #[cfg(unix)]
@@ -473,8 +475,8 @@ pub(super) struct QueuePublicationGuard {
     pages: std::collections::BTreeMap<PathBuf, String>,
     owned_pages: std::collections::BTreeSet<PathBuf>,
     bounded: bool,
-    /// The evidence-gap callout a synthesis publishes beneath its synthesis body.
-    gap_callout: Option<String>,
+    /// The review callouts a synthesis publishes beneath its body, and their record.
+    reviews: PublishedReviews,
 }
 
 impl QueuePublicationGuard {
@@ -503,8 +505,8 @@ impl QueuePublicationGuard {
     }
 }
 
-/// Add the guards application needs for `result` and return the evidence-gap callout a
-/// synthesis publishes beneath its body, from the same publication capture.
+/// Add the guards application needs for `result` and return the review callouts a synthesis
+/// publishes beneath its body and their record, from the same publication capture.
 pub(super) fn guard_queue(
     root: &Path,
     config: &lk_core::config::Config,
@@ -512,9 +514,9 @@ pub(super) fn guard_queue(
     task_id: &str,
     result: Value,
     mutation: &mut lk_vault::MutationPlan,
-) -> miette::Result<Option<String>> {
+) -> miette::Result<PublishedReviews> {
     let mut guard = prepare_queue_publication(root, config, config_revision, task_id, result)?;
-    let gap_callout = guard.gap_callout.take();
+    let reviews = std::mem::take(&mut guard.reviews);
     let owned = guard
         .pages
         .iter()
@@ -522,7 +524,7 @@ pub(super) fn guard_queue(
         .map(|(path, raw)| (path.clone(), raw.clone()))
         .collect();
     guard.append_to(mutation, &owned)?;
-    Ok(gap_callout)
+    Ok(reviews)
 }
 
 /// Add the guards application would need for `result`. `sealing` is the candidate roster
@@ -577,29 +579,35 @@ pub(super) fn prepare_queue_publication(
     )
 }
 
-/// The evidence-gap callout a synthesis result publishes beneath its synthesis, checked
-/// against the open evidence-gap reviews of the concept this publication capture holds.
-fn evidence_gap_callout(prepared: &Prepared, result: &Value) -> miette::Result<Option<String>> {
+/// The review callouts a synthesis result publishes beneath its synthesis and their record,
+/// checked against the open reviews of the concept this publication capture holds.
+fn published_reviews(prepared: &Prepared, result: &Value) -> miette::Result<PublishedReviews> {
     let binding = prepared.result_binding()?;
-    let claims: Option<Vec<String>> = match result.get("gap_claims") {
-        None | Some(Value::Null) => None,
-        Some(claims) => Some(serde_json::from_value(claims.clone()).into_diagnostic()?),
+    let list = |key: &str| -> miette::Result<Option<Vec<String>>> {
+        match result.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(values) => serde_json::from_value(values.clone()).into_diagnostic(),
+        }
     };
-    if let Err(reason) = gap::check_claims(&binding.evidence_gaps, claims.as_deref()) {
+    let (refs, claims) = (list("review_refs")?, list("gap_claims")?);
+    if let Err(reason) =
+        open_review::check_reply(&binding.open_reviews, refs.as_deref(), claims.as_deref())
+    {
         return Err(publication_rejection(RejectionKind::InvalidSection, reason));
     }
-    let (Some(claims), Subject::Queue { target, .. }) = (claims, &prepared.subject) else {
-        return Ok(None);
+    let (Some(refs), Subject::Queue { target, .. }) = (refs, &prepared.subject) else {
+        return Ok(PublishedReviews::default());
     };
-    if claims.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(gap::render(
-        gap::locale(&prepared.context)?,
-        target,
-        &binding.evidence_gaps,
-        &claims,
-    )))
+    Ok(PublishedReviews {
+        callout: open_review::render(
+            open_review::locale(&prepared.context)?,
+            target,
+            &binding.open_reviews,
+            &refs,
+            claims.as_deref().unwrap_or_default(),
+        ),
+        record: open_review::record(&binding.open_reviews, &refs),
+    })
 }
 
 fn prepare_queue_publication_controlled(
@@ -729,10 +737,10 @@ fn prepare_queue_publication_controlled(
             ));
         }
     }
-    let gap_callout = if scoped_synthesis {
-        evidence_gap_callout(&prepared, &result)?
+    let reviews = if scoped_synthesis {
+        published_reviews(&prepared, &result)?
     } else {
-        None
+        PublishedReviews::default()
     };
     if scoped_extraction && !prepared.context["purpose"]["source_observations"].is_null() {
         let typed: lk_queue::TaskResult =
@@ -762,7 +770,7 @@ fn prepare_queue_publication_controlled(
         pages,
         owned_pages,
         bounded,
-        gap_callout,
+        reviews,
     })
 }
 

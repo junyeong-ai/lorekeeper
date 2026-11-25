@@ -351,7 +351,7 @@ pub(crate) fn backlinks_sync_in_session(
     synchronize_backlinks(&rc, &views.scanned, false, Some(session), read)
 }
 
-/// The concepts whose evidence-gap callout references a closed review.
+/// The concepts whose review callout references a closed review.
 #[derive(Debug, Default)]
 pub(crate) struct ClosedGapCallouts {
     /// Concepts newly requested for resynthesis.
@@ -361,11 +361,11 @@ pub(crate) struct ClosedGapCallouts {
     pub unresynthesizable: Vec<PathBuf>,
 }
 
-/// Requests a resynthesis of every concept whose published evidence-gap callout, in the
-/// synthesis section a resynthesis rewrites, references a review that is no longer an open
-/// evidence gap of that concept, so the callout follows the review's state. A request already
-/// pending for the same citations is reused. Alias addresses are skipped: their owner is
-/// scanned under its own address.
+/// Requests a resynthesis of every concept whose published synthesis references a review that
+/// no longer matches its callout (`work::references_closed_review`), so the callout follows the
+/// review's state. That record is checked before the citation graph is built, so only a
+/// concept owing a request builds it. A request already pending for the same citations is
+/// reused. Alias addresses are skipped: their owner is scanned under its own address.
 pub(crate) fn request_closed_gap_resyntheses_in_session(
     config: &lk_core::config::Config,
     session: &lk_vault::MutationSession,
@@ -396,7 +396,7 @@ fn closed_gap_callouts(
         let (raw, _) = read
             .page_text(&rc.root.join(&page.path))
             .map_err(|e| format!("{}: {e}", page.path.display()))?;
-        if !raw.contains("> [!gap] ") {
+        if !raw.contains(super::work::PUBLISHED_REVIEWS_KEY) && !raw.contains("> [!gap] ") {
             continue;
         }
         let owner = lk_vault::resolve_page_owner(&rc.root, &page.path)
@@ -404,32 +404,23 @@ fn closed_gap_callouts(
         if owner != page.path {
             continue;
         }
-        let concept = page.path.to_string_lossy();
-        let closed = |text: &str| {
-            super::work::references_closed_review(&rc.root, &concept, text)
-                .map_err(|e| e.to_string())
-        };
-        let evidence = match lk_graph::backlinks::concept_resynthesis(
+        if !super::work::references_closed_review(&rc.root, &page.path.to_string_lossy(), &raw)
+            .map_err(|e| e.to_string())?
+        {
+            continue;
+        }
+        match lk_graph::backlinks::concept_resynthesis(
             &views.scanned,
             &rc.root,
             &rc.vault_dirs,
             &page.path,
         ) {
-            Ok(evidence) => evidence,
+            Ok(_) => {}
             Err(lk_graph::GraphError::Unresynthesizable(_)) => {
-                if closed(&raw)? {
-                    callouts.unresynthesizable.push(page.path.clone());
-                }
+                callouts.unresynthesizable.push(page.path.clone());
                 continue;
             }
             Err(error) => return Err(format!("{}: {error}", page.path.display())),
-        };
-        let heading = evidence.anchor.trim_start_matches("## ");
-        let Some(synthesis) = lk_vault::section_body(&raw, heading) else {
-            continue;
-        };
-        if !closed(synthesis)? {
-            continue;
         }
         let response = resynthesize::request(rc, &views.scanned, &page.path, false, Some(session))?;
         if response["data"]["already_pending"] == false {

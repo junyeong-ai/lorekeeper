@@ -101,8 +101,9 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
             if mode=='needs-review-always' or not any(authority(entry)=='review' for entry in roster):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
-                (root/'review-proposals').write_text(str(int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1))
-                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement',
+                proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
+                (root/'review-proposals').write_text(str(proposals))
+                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement'+('' if proposals==1 else f', restated {proposals}'),
                     'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
@@ -124,8 +125,20 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
                 'admission':{'decision':'new'},'synthesis':'The source proposes a transactional outbox; deployment is unverified.','rss_evidence':[]}]}
         else:
             value={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None}
-            if mode=='needs-review-gap' and 'evidence_gaps' in json.dumps(item):
-                value['gap_claims']=['The protocol is deployed in production.']
+            def find(node, key):
+                if isinstance(node, dict):
+                    if key in node: return node[key]
+                    node=list(node.values())
+                if isinstance(node, list):
+                    for child in node:
+                        found=find(child, key)
+                        if found is not None: return found
+                return None
+            reviews=find(item, 'open_reviews') or find(request, 'open_reviews')
+            if reviews:
+                value['review_refs']=[review['path'] for review in reviews]
+                if any(review['kind']=='evidence-gap' for review in reviews):
+                    value['gap_claims']=['The protocol is deployed in production.']
         if mode=='metadata': value['task_id']='forged'
         if mode=='oversized': value={'synthesis':'x'*40000,'related':None}
         if mode=='invalid-body' and ('blocked' in target or 'frontier' in target):
@@ -795,12 +808,12 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         );
         assert_eq!(
             report["retained_progress"]["action_receipts"], 1,
-            "a proposal repeating its scoped review holds the task: {report}"
+            "a restated proposal of an open review's kind holds the task: {report}"
         );
         assert_eq!(
             explorations.read_dir().unwrap().count(),
             2,
-            "the repeated proposal converges on the review it repeats"
+            "the restated proposal converges on the open review of its kind"
         );
         let calls = fixture.calls();
         let report = fixture.run();

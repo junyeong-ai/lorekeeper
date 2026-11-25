@@ -417,9 +417,9 @@ pub(in crate::commands) fn selected_request(
     let replies = tasks
         .iter()
         .map(|task| {
-            let gaps = super::gap::from_context(&task["context"])?;
+            let reviews = super::open_review::from_context(&task["context"])?;
             let task: QueueTask = serde_json::from_value(task["task"].clone()).into_diagnostic()?;
-            super::generation::minimum_reply(&task, &gaps)
+            super::generation::minimum_reply(&task, &reviews)
         })
         .collect::<miette::Result<Vec<_>>>()?;
     let minimum_bytes = serde_json::to_vec(&json!({"results":replies}))

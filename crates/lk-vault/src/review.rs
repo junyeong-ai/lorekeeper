@@ -35,9 +35,9 @@ pub struct KnowledgeReview {
     pub subjects: Vec<String>,
     pub evidence: Vec<Citation>,
     pub resolution: Option<String>,
-    /// For an evidence gap a synthesis proposed, the digest of the concept's citations it was
-    /// judged against (`lk_core::concept::citation_digest`). Until the citations change, the
-    /// gap cannot have been answered by new evidence.
+    /// For a typed review a synthesis proposed, the digest of the concept's citations it was
+    /// judged against (`lk_core::concept::citation_digest`). Until the citations change, its
+    /// question cannot have been settled by new evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_citation_digest: Option<String>,
 }
@@ -212,14 +212,14 @@ impl KnowledgeReview {
             }
         }
         if let Some(digest) = &self.judged_citation_digest
-            && (self.kind != Some(ReviewKind::EvidenceGap)
+            && (self.kind.is_none()
                 || digest.len() != 32
                 || !digest
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
         {
             errors.push(
-                "judged_citation_digest is an evidence gap's 32-digit lowercase citation digest"
+                "judged_citation_digest is a typed review's 32-digit lowercase citation digest"
                     .into(),
             );
         }

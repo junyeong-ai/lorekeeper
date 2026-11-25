@@ -2150,13 +2150,33 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
 }
 
 #[test]
-fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout() {
-    for (claims, judged) in [
-        (None, false),
-        (Some(None), false),
-        (Some(Some("Retention is a legal obligation.")), false),
-        (Some(None), true),
-        (Some(Some("Retention is a legal obligation.")), true),
+fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_record() {
+    let review_path = "wiki/explorations/retention-gap.md";
+    let claim = "Retention is a legal obligation.";
+    for (kind, judged, refs, claims, published_callout) in [
+        ("evidence-gap", false, None, None, None),
+        ("evidence-gap", false, Some(false), None, Some("")),
+        ("evidence-gap", true, Some(false), None, None),
+        ("evidence-gap", false, Some(true), None, None),
+        (
+            "evidence-gap",
+            true,
+            Some(true),
+            Some(claim),
+            Some(
+                "> [!gap] These defining claims await supporting evidence.\n> - Retention is a legal obligation.\n>\n> Evidence gap review: [Retention gap](../explorations/retention-gap.md)",
+            ),
+        ),
+        (
+            "conflict",
+            true,
+            Some(true),
+            None,
+            Some(
+                "> [!question] These reviews keep a question about this concept open.\n>\n> Open review: [Retention gap](../explorations/retention-gap.md)",
+            ),
+        ),
+        ("conflict", false, Some(true), Some(claim), None),
     ] {
         let ws = Workspace::new();
         let source_path = "wiki/documents/policy.md";
@@ -2172,17 +2192,14 @@ fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout()
             "---\ntype: concept\nllm_inputs:\n  synthesis: {hash}\n---\n## Synthesis\nPrior scope.\n"
         );
         ws.write(target, &body);
+        let mut review = serde_json::json!({"status":"open","kind":kind,"subjects":[target],"evidence":[citation],"resolution":null});
+        if judged {
+            review["judged_citation_digest"] = hash.clone().into();
+        }
         ws.write(
-            "wiki/explorations/retention-gap.md",
+            review_path,
             &format!(
-                "---\ntype: exploration\ntitle: Retention gap\nreview: {}\n---\n## Judgment\nThe legal basis is unsupported.\n",
-                {
-                    let mut review = serde_json::json!({"status":"open","kind":"evidence-gap","subjects":[target],"evidence":[citation],"resolution":null});
-                    if judged {
-                        review["judged_citation_digest"] = hash.clone().into();
-                    }
-                    review
-                }
+                "---\ntype: exploration\ntitle: Retention gap\nreview: {review}\n---\n## Judgment\nThe legal basis is unsupported.\n"
             ),
         );
         let task = serde_json::json!({"task_id":"gap", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
@@ -2190,14 +2207,18 @@ fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout()
         ws.write(".lorekeeper/queue/gap.jsonl", &task.to_string());
         let context = work_json(&ws, &["work", "context", "--task-id", "gap"]);
         assert_eq!(
-            context["context"]["purpose"]["parameters"]["evidence_gaps"][0]["path"],
-            "wiki/explorations/retention-gap.md"
+            context["context"]["purpose"]["parameters"]["open_reviews"][0]["path"],
+            review_path
         );
         let mut result = serde_json::json!({"task_id":"gap","cache_hash":hash,
             "target_revision":context["subject"]["target_revision"],"context_revision":context["context_revision"],
             "synthesis":"The source declares retention of 30 days.","related":null});
+        if let Some(listed) = refs {
+            result["review_refs"] =
+                serde_json::json!(if listed { vec![review_path] } else { vec![] });
+        }
         if let Some(claim) = claims {
-            result["gap_claims"] = serde_json::json!(claim.into_iter().collect::<Vec<_>>());
+            result["gap_claims"] = serde_json::json!([claim]);
         }
         ws.write(
             ".lorekeeper/queue/results/gap.synthesis.json",
@@ -2205,41 +2226,35 @@ fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout()
         );
         let output = ws.run(&["queue", "apply"]);
         let published = ws.read(target);
-        if judged && claims == Some(None) {
-            assert!(
-                !output.status.success(),
-                "the citations a gap was judged against cannot answer it"
-            );
-            assert_eq!(published, body, "the concept is unchanged");
-            continue;
-        }
-        let Some(claim) = claims else {
-            assert!(
-                !output.status.success(),
-                "a result without claims is refused"
-            );
-            assert_eq!(published, body, "the concept is unchanged");
+        let case = format!("{kind} judged={judged} refs={refs:?} claims={claims:?}");
+        let Some(callout) = published_callout else {
+            assert!(!output.status.success(), "{case} is refused");
+            assert_eq!(published, body, "{case}: the concept is unchanged");
             continue;
         };
         assert!(
             output.status.success(),
-            "{}",
+            "{case}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let Some(claim) = claim else {
+        let page = lk_core::frontmatter::parse_page(&published).unwrap();
+        let recorded = &page.frontmatter.fields["llm_inputs"]["synthesis_reviews"];
+        if callout.is_empty() {
             assert!(
                 published.contains("The source declares retention of 30 days.")
-                    && !published.contains("[!gap]"),
-                "recovered evidence publishes without a callout: {published}"
+                    && !published.contains("> [!"),
+                "{case}: settled reviews publish without a callout: {published}"
             );
+            assert!(recorded.is_null(), "{case}: {published}");
             continue;
-        };
+        }
         assert!(
             published.contains(&format!(
-                "The source declares retention of 30 days.\n\n> [!gap] These defining claims await supporting evidence.\n> - {claim}\n>\n> Evidence gap review: [Retention gap](../explorations/retention-gap.md)"
+                "The source declares retention of 30 days.\n\n{callout}"
             )),
-            "{published}"
+            "{case}: {published}"
         );
+        assert_eq!(recorded[review_path], kind, "{case}: {published}");
     }
 }
 

@@ -206,14 +206,17 @@ complete its exact bounded inspections instead of loading a growing resource ros
   "context_revision": "<work context revision captured before drafting>",
   "synthesis": "Section body, without its heading",
   "related": "Section body, without its heading; empty is valid",
+  "review_refs": ["wiki/explorations/<open review>.md"],
   "gap_claims": ["A defining claim the citations still do not support"]
 }
 ```
 
-Omit `related` only when the task has no `input.related_anchor`. Include `gap_claims`
-exactly when `work context` lists `context.purpose.parameters.evidence_gaps`: the claims
-those reviews name that the citations still do not support, or `[]` when none remain;
-otherwise omit it. Both bodies follow
+Omit `related` only when the task has no `input.related_anchor`. Include `review_refs`
+exactly when `work context` lists `context.purpose.parameters.open_reviews`: the path of
+each listed review whose question the synthesis leaves open, or `[]` when the citations
+now settle every one (refused while an entry has `citations_changed: false`); otherwise
+omit it. Include `gap_claims` exactly when `review_refs` lists an evidence-gap review: the
+defining claims it names that the citations still do not support; otherwise omit it. Both bodies follow
 the [section-containment rules](#single-section-result). `lore queue apply` validates the pending task, source revisions,
 and target/read-scope snapshot before publishing both sections and `synthesis_done` in
 one atomic file replacement. New, changed or removed scoped reviews and changed context

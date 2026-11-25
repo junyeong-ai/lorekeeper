@@ -110,6 +110,8 @@ pub struct Strings {
     // Concept synthesis: defining claims an open evidence-gap review names
     pub evidence_gap_lead: &'static str,
     pub evidence_gap_review: &'static str,
+    pub open_review_lead: &'static str,
+    pub open_review: &'static str,
     // Personal / synthesis sections
     pub key_summary: &'static str,
     pub key_themes_this_week: &'static str,
@@ -200,6 +202,8 @@ static KO: Strings = Strings {
     related_concepts: "관련 개념",
     evidence_gap_lead: "아래 정의는 이를 뒷받침할 근거를 기다리고 있다.",
     evidence_gap_review: "근거 공백 검토",
+    open_review_lead: "아래 검토가 이 개념의 질문을 아직 열어 두고 있다.",
+    open_review: "열린 검토",
     key_summary: "핵심 요약",
     key_themes_this_week: "이번 주 핵심 주제",
     overall_summary: "종합 요약",
@@ -271,6 +275,8 @@ static EN: Strings = Strings {
     related_concepts: "Related Concepts",
     evidence_gap_lead: "These defining claims await supporting evidence.",
     evidence_gap_review: "Evidence gap review",
+    open_review_lead: "These reviews keep a question about this concept open.",
+    open_review: "Open review",
     key_summary: "Summary",
     key_themes_this_week: "Key Themes This Week",
     overall_summary: "Overview",

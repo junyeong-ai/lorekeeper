@@ -72,26 +72,26 @@ pub(super) struct Prepared {
 }
 
 /// What Rust writes into a result beside the model's reply: an extraction's discovery recipes
-/// and screening proof, and the open evidence-gap reviews a synthesis references.
+/// and screening proof, and the open reviews a synthesis answers to.
 pub(super) struct ResultBinding {
     pub discovery: Vec<lk_core::discovery::DiscoveryQuery>,
     pub selection: Option<lk_queue::ExtractionSelection>,
-    pub evidence_gaps: Vec<super::gap::EvidenceGap>,
+    pub open_reviews: Vec<super::open_review::OpenReview>,
 }
 
 impl ResultBinding {
     /// The bound roster's recipes and proof for screened evidence, the context's own
-    /// recipes otherwise, and the evidence-gap reviews the synthesis context captured.
+    /// recipes otherwise, and the open reviews the synthesis context captured.
     pub(super) fn build(
         context: &Value,
         roster: Option<&super::selection::RosterBinding>,
     ) -> miette::Result<Self> {
-        let evidence_gaps = super::gap::from_context(context)?;
+        let open_reviews = super::open_review::from_context(context)?;
         match roster {
             Some(roster) => Ok(Self {
                 discovery: roster.queries(),
                 selection: Some(roster.selection.clone()),
-                evidence_gaps,
+                open_reviews,
             }),
             None if is_screened(context) => Err(miette::miette!(
                 "screened extraction evidence is not bound to its current candidate roster"
@@ -104,7 +104,7 @@ impl ResultBinding {
                     None => Vec::new(),
                 },
                 selection: None,
-                evidence_gaps,
+                open_reviews,
             }),
         }
     }
@@ -487,7 +487,12 @@ impl<'a> Capture<'a> {
         Ok(())
     }
 
+    /// Reads a scoped review. A review that no longer exists is not read: its dependency
+    /// inventory still names it, but nothing a synthesis or audit could cite remains.
     fn review(&mut self, review: &lk_graph::audit::AuditReviewDependency) -> miette::Result<()> {
+        if review.state == lk_graph::audit::AuditReviewState::Missing {
+            return Ok(());
+        }
         let expected = review
             .file_revision
             .as_deref()
@@ -1155,7 +1160,7 @@ fn capture_task_with_audit_controlled(
         let scoped_reviews: Vec<String> =
             serde_json::from_value(scoped.context["purpose"]["review_dependencies"].clone())
                 .into_diagnostic()?;
-        let gaps = super::gap::open_reviews(
+        let reviews = super::open_review::open_reviews(
             root,
             &task.target.vault_path,
             &task.cache_hash,
@@ -1163,8 +1168,8 @@ fn capture_task_with_audit_controlled(
             &captured.pages,
         )?;
         purpose.insert("knowledge_scope".into(), scoped.context["purpose"].clone());
-        if !gaps.is_empty() {
-            purpose.insert("evidence_gaps".into(), json!(gaps));
+        if !reviews.is_empty() {
+            purpose.insert("open_reviews".into(), json!(reviews));
         }
     }
     let context = json!({
@@ -2148,6 +2153,30 @@ mod tests {
             &refresh(&root, &config, "config-revision", &prepared.context).unwrap(),
         );
     }
+    #[test]
+    fn a_removed_review_is_not_read_while_an_unreadable_one_refuses() {
+        let directory = tempfile::tempdir().unwrap();
+        let read = lk_vault::ReadControl::default();
+        let mut captured = Capture::new(directory.path(), &read);
+        let dependency = |state| lk_graph::audit::AuditReviewDependency {
+            path: "wiki/explorations/gone.md".into(),
+            file_revision: None,
+            source_revision: None,
+            state,
+            errors: Vec::new(),
+            evidence: Vec::new(),
+        };
+        captured
+            .review(&dependency(lk_graph::audit::AuditReviewState::Missing))
+            .unwrap();
+        assert!(captured.pages.is_empty());
+        assert!(
+            captured
+                .review(&dependency(lk_graph::audit::AuditReviewState::Invalid))
+                .is_err()
+        );
+    }
+
     #[test]
     fn a_synthesis_request_reads_context_from_its_snapshot_and_everything_else_current() {
         let (directory, config, tasks, _) = synthesis_batch_fixture();

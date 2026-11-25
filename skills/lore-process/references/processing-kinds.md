@@ -194,12 +194,14 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    `kind: evidence-gap`, naming those defining claims, the pages checked and the missing
    evidence (a native finalization proposes it as in step 5). Once an open
    evidence-gap review of this concept is in scope, rewrite what the citations support and
-   finish. Return the defining claims it names that the citations still do not support,
-   one line each, in the result's `gap_claims` (a native reply and a result written
-   directly alike), or `[]` when the citations now support them all, and never write the
-   callout in `synthesis`: publication renders the evidence-gap callout beneath the
-   synthesis with its marker, those claims and a reference to every such review, and
-   refuses a synthesis in that scope without `gap_claims`. The callout
+   finish. List that review in the result's `review_refs` and the defining claims it names
+   that the citations still do not support, one line each, in `gap_claims` (a native reply
+   and a result written directly alike); omit the review from `review_refs` when the
+   citations now support them all. Never write the callout in `synthesis`: publication
+   renders the evidence-gap callout beneath the synthesis with its marker, those claims
+   and a reference to every listed review, and records the references. Any other open
+   review of the concept that the synthesis leaves open is listed the same way and
+   referenced in a `[!question]` callout. The callout
    keeps the definition visible without presenting it as supported; the review carries the
    gap until an audit recovers evidence or narrows the claim.
    Keep uncertainty in the concept only when it affects a current decision.

@@ -78,6 +78,7 @@ pub(super) fn apply(
                 target_revision: result.target_revision,
                 context_revision: result.context_revision.unwrap_or_default(),
                 synthesis: result.body,
+                review_refs: None,
                 gap_claims: None,
                 related: None,
             })
@@ -260,7 +261,7 @@ pub(super) fn apply(
                 serde_json::to_value(result)
             }
             .map_err(|e| miette::miette!("{e}"))?;
-            let gap_callout = super::super::work::guard_queue(
+            let reviews = super::super::work::guard_queue(
                 root,
                 config,
                 config_revision,
@@ -268,7 +269,7 @@ pub(super) fn apply(
                 value,
                 &mut plan,
             )?;
-            let published = gap_callout.map(|callout| SynthesisResult {
+            let published = reviews.callout.map(|callout| SynthesisResult {
                 synthesis: match result.synthesis.trim_end() {
                     "" => callout,
                     synthesis => format!("{synthesis}\n\n{callout}"),
@@ -291,6 +292,12 @@ pub(super) fn apply(
             )
             .ok_or_else(|| miette::miette!("cannot stamp completion"))?;
             let content = super::stamp_policy(&content, Some(task), task.target.kind)?;
+            let key = super::super::work::PUBLISHED_REVIEWS_KEY;
+            let content = match reviews.record {
+                Some(record) => lk_vault::set_llm_input(&content, key, &record)
+                    .ok_or_else(|| miette::miette!("cannot record referenced reviews"))?,
+                None => lk_vault::clear_llm_input(&content, key).unwrap_or(content),
+            };
             if !dry_run {
                 if classify_task(root, task, &mut BTreeMap::new())? != TaskStatus::Current
                     || super::read_page(root, &target).map_err(|e| miette::miette!("{e}"))?

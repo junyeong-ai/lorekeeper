@@ -230,6 +230,7 @@ fn plan_recovery_controlled(
             context_revision: result.context_revision.clone().unwrap_or_default(),
             synthesis: result.body.clone(),
             related: None,
+            review_refs: None,
             gap_claims: None,
         };
         if let Err(error) =

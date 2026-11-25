@@ -53,6 +53,17 @@ pub(in crate::commands) fn admit(
     prepared: &Prepared,
     proposal: ReviewProposal,
 ) -> miette::Result<Result<AdmittedReview, String>> {
+    if let Some(open) = prepared
+        .result_binding()?
+        .open_reviews
+        .into_iter()
+        .find(|review| review.kind == Some(proposal.kind))
+    {
+        return Ok(Err(format!(
+            "the open review {} already records a question of this kind about the concept; complete the synthesis listing it in review_refs and state any further open question in the synthesis",
+            open.path
+        )));
+    }
     let title = proposal.title.trim();
     if title.is_empty() || title.contains('\n') || title.chars().count() > MAX_TITLE_CHARACTERS {
         return Ok(Err(format!(
@@ -127,14 +138,11 @@ pub(in crate::commands) fn admit(
         &citations,
     )? {
         return Ok(Err(format!(
-            "the proposal repeats the scoped review {recorded}; answer the synthesis with that review in scope"
+            "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
-    let mut metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
-        "evidence":citations,"resolution":null});
-    if proposal.kind == lk_vault::ReviewKind::EvidenceGap {
-        metadata["judged_citation_digest"] = task.cache_hash.clone().into();
-    }
+    let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
+        "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash});
     let content = format!(
         "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
         serde_json::to_string(title).into_diagnostic()?,

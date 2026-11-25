@@ -131,16 +131,20 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
   links no concept page; `evidence` indexes the cited source pages or RSS event payloads
   it rests on. Rust publishes it as an open review of the concept recording its `kind`
-  and replans. An open review about a different question does not record this one; a
+  and replans. When an open review in `open_reviews` already records the question, complete
+  the synthesis and list it in `review_refs` instead: a proposal of an open review's kind is
+  refused. An untyped open review about a different question does not record this one; a
   concept publishes at most one review per run.
-- Synthesis value: `{synthesis, related, gap_claims}`. `gap_claims` lists, one line each,
-  the defining claims an open evidence-gap review in `context.purpose.parameters.evidence_gaps`
-  names that the citations still do not support, `[]` when they now support every such
-  claim, and `null` without such a review. Rust renders the evidence-gap callout from it.
+- Synthesis value: `{synthesis, related, review_refs, gap_claims}`. `review_refs` lists, by
+  path, each open review in `context.purpose.parameters.open_reviews` whose question the
+  synthesis leaves open, `[]` when the citations now settle every one, and `null` without
+  open reviews. `gap_claims` lists, one line each, the defining claims a listed
+  evidence-gap review names that the citations still do not support, and is `null`
+  otherwise. Rust renders the callouts from both and records the references.
 
 An extraction value is `{concepts: [...]}` using the supplied concept schema: names,
 aliases, categories, explicit new/reuse admission, grounding and RSS article selections
-remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null, gap_claims: [...] | null}`.
+remain semantic judgments. A synthesis value is `{synthesis: "...", related: "..." | null, review_refs: [...] | null, gap_claims: [...] | null}`.
 Use null or empty arrays for absent values required by the response schema. An empty
 concept list is valid after required reads and admission judgments, including when no
 concept meets the admission policy but source questions remain open. Do not invent a concept merely to carry those questions. Do not

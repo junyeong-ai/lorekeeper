@@ -806,6 +806,7 @@ mod tests {
                     context_revision: "a".repeat(64),
                     synthesis: "Authored answer.\n".into(),
                     related: Some("Related evidence.\n".into()),
+                    review_refs: None,
                     gap_claims: None,
                 })
                 .unwrap()

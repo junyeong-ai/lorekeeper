@@ -107,35 +107,39 @@ paths:
   curation, judges concept links through the filesystem and bounds the file stem in bytes;
   a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
   fault. The run then replans; the review enters the concept's scope through `subjects`,
-  so the next finalization drafts against it. Whether a question is already recorded is
-  the finalizer's judgment over every scoped review it reads; an open review about a
-  different question never refuses a proposal. A proposal repeating a scoped review exactly
-  (kind, title, judgment and evidence, whatever its status) is that review: it publishes
-  nothing and records a refusal that holds the task while its inputs stay current, so a
-  finalizer that repeats a recorded question cannot add a file per run. A target publishes
-  at most one review per run, spent when it publishes: a further proposal in that run
-  publishes and records nothing and defers only that target, so a distinct question waits
-  for a later run, whose request scopes the reviews already published, and a repeating
-  finalizer cannot loop through paid calls. The published review records its `kind`. A synthesis capture names
-  each open `evidence-gap` review whose subject owner is the concept in `evidence_gaps`
-  (`work/gap.rs`). A synthesis result carries the defining claims in structured
-  `gap_claims`; after the context revision check, publication refuses claims that do not
-  match that scope and renders the callout beneath the synthesis from the same capture, so
-  reply and result bytes carry only the claims. An evidence-gap review Rust publishes
-  records `judged_citation_digest`, the concept citations it was judged against, and the
-  capture marks each gap `citations_changed` when the request's citations differ (always,
-  for a review without that record). An empty list answers that recovered citations
-  support every claim, so it is refused while any gap was judged against these exact
-  citations; otherwise it publishes no callout and leaves the review to reassessment, so
-  recovered evidence never holds the request. A published callout follows its reviews:
-  when one it references is no longer an open evidence gap of the concept (resolved,
-  another kind or other subjects), the run's backlink reconciliation requests that
-  concept's resynthesis through `graph resynthesize`, reusing a pending request; only the
-  reference lines Rust renders inside the synthesis section a resynthesis rewrites count,
-  never a link inside a claim. A removed or unreadable review is left to review health, as
-  a synthesis whose scoped reviews cannot be read cannot be prepared; alias addresses are
-  skipped for their owner; a concept that cannot take a request (`Unresynthesizable`: no
-  current citations or synthesis heading) is reported and keeps its callout. Observers record a
+  so the next finalization completes against it. `needs-review` is only for a question no
+  open review in scope records: a proposal of the kind of an open review naming the concept
+  is refused (rephrasing cannot add a file per run; a second question of that kind waits for
+  the first to close, stated meanwhile in the synthesis), and one repeating a scoped review
+  exactly (kind, title, judgment and evidence, whatever its status) is that review. Either
+  refusal publishes nothing and holds the task while its inputs stay current. An untyped
+  open review never refuses a proposal. A target publishes at most one review per run, spent
+  when it publishes: a further proposal in that run publishes and records nothing and
+  defers only that target, and a repeating finalizer cannot loop through paid calls. The
+  published review records its `kind` and `judged_citation_digest`, the concept citations
+  it was judged against.
+- A synthesis capture lists every open review whose subject owner is the concept in
+  `open_reviews` (`work/open_review.rs`), each marked `citations_changed` when the request's
+  citations differ from those it was judged against (always, without that record). A
+  complete synthesis answers to them in `review_refs`: each review whose question it leaves
+  open, once; an empty list answers that the citations now settle every one, so it is refused
+  while any review was judged against these exact citations. A referenced evidence-gap
+  review needs its unsupported defining claims in structured `gap_claims`; otherwise
+  `gap_claims` is null. After the context revision check, publication refuses references
+  and claims that do not match that scope, renders the callouts beneath the synthesis from
+  the same capture (the evidence-gap callout with its claims, then one `[!question]` callout
+  for the other reviews) and records each referenced review and its kind in
+  `llm_inputs.synthesis_reviews`, so reply and result bytes carry only references and claims.
+  A published callout follows that record: when a review it names is removed, resolved, of
+  another kind or about other subjects, the run's backlink reconciliation requests that
+  concept's resynthesis through `graph resynthesize`, reusing a pending request. The record
+  is checked before any citation graph is built. A synthesis published before the record
+  existed is read from the evidence-gap callout of its synthesis section, only the
+  reference lines of a root block quote opening with the marker (never a quote in code or a
+  link inside a claim). An unreadable review is left to review health, and a removed one is
+  not read by any capture, so its resynthesis can be prepared; alias addresses are skipped
+  for their owner; a concept that cannot take a request (`Unresynthesizable`: no current
+  citations or synthesis heading) is reported and keeps its callout. Observers record a
   disagreement as a finding or source question, never as an `unresolved` processing
   blocker, so bounded Work reaches this finalizer.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete

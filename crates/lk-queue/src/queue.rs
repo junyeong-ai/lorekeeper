@@ -260,8 +260,13 @@ pub struct SynthesisResult {
     pub context_revision: String,
     pub synthesis: String,
     pub related: Option<String>,
-    /// The defining claims an open evidence-gap review of the concept names, one line each.
-    /// Publication keeps them in the evidence-gap callout Rust renders beneath the synthesis.
+    /// The open reviews of the concept, by address, whose question the synthesis leaves
+    /// open; publication references each in a callout Rust renders beneath the synthesis and
+    /// records them on the concept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_refs: Option<Vec<String>>,
+    /// The defining claims a referenced evidence-gap review names, one line each. Publication
+    /// keeps them in the evidence-gap callout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap_claims: Option<Vec<String>>,
 }

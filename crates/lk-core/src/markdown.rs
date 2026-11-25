@@ -249,6 +249,27 @@ pub fn root_headings(markdown: &str) -> Vec<MarkdownHeading> {
     headings
 }
 
+/// The byte ranges of the block quotes at the document root, in order. A quote's line
+/// prefixes are inside its range; a `>` line inside a code block or HTML is no quote.
+pub fn root_block_quotes(markdown: &str) -> Vec<std::ops::Range<usize>> {
+    let mut quotes = Vec::new();
+    let mut depth = 0;
+    let input = MarkdownInput::from_text(markdown);
+    for (event, range) in input.offset_events(OPTIONS) {
+        match event {
+            Event::Start(tag) => {
+                if depth == 0 && matches!(tag, Tag::BlockQuote(_)) {
+                    quotes.push(range);
+                }
+                depth += 1;
+            }
+            Event::End(_) => depth -= 1,
+            _ => {}
+        }
+    }
+    quotes
+}
+
 /// Whether appending a sibling section leaves its heading outside the fragment.
 /// This checks the parser's actual termination rules, including EOF-closed blocks.
 pub fn has_sibling_boundary(fragment: &str) -> bool {
@@ -1692,5 +1713,13 @@ mod tests {
         // reported line number is stable regardless of encoding quirks.
         let page = "\u{feff}# Page\r\n\r\nintro\r\n![x](data:text/plain,a)\r\n";
         assert_eq!(scan_defects(page), vec![(4, TextDefect::InlineDataUri)]);
+    }
+
+    #[test]
+    fn only_root_quotes_outside_code_are_block_quotes() {
+        let markdown = "> [!gap] Lead\n> - Claim\n\n```\n> [!gap] Example\n```\n\n- > nested\n";
+        let quotes = root_block_quotes(markdown);
+        assert_eq!(quotes.len(), 1);
+        assert!(markdown[quotes[0].clone()].starts_with("> [!gap] Lead"));
     }
 }
