@@ -143,6 +143,12 @@ mod native {
         stages: Vec<ExecutionStage>,
         execution: Option<RequestedExecution>,
         host_failure: Option<execution::diagnostic::HostFailure>,
+        #[serde(skip)]
+        channel: HostChannel,
+        /// The failed invocation is retried under its request's own allowance, so it is not yet
+        /// a repeat that points at the host.
+        #[serde(skip)]
+        retried: bool,
         work_id: Option<String>,
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
@@ -171,6 +177,8 @@ mod native {
                 },
                 execution: None,
                 host_failure: None,
+                channel: HostChannel::Observation,
+                retried: false,
                 work_id: None,
                 node_id: None,
                 node_kind: None,
@@ -288,7 +296,7 @@ mod native {
         Deferred(String),
         /// The Work's inputs changed while its host ran; the reply is discarded unrecorded.
         InputsChanged(miette::Report),
-        InvocationFailed(HostKey),
+        InvocationFailed,
         Failed,
     }
 
@@ -383,14 +391,23 @@ mod native {
         Failed,
     }
 
-    /// The host configuration a call ran on, by role and execution profile: a failure of one
-    /// configuration says nothing about another.
-    type HostKey = (WorkRole, Option<String>);
+    /// The host a call ran through: tool-free observation, or the structured tool-result host
+    /// that bounded finalizers use.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum HostChannel {
+        Observation,
+        Result,
+    }
 
-    /// Consecutive invocation failures of one host configuration, with no answered call on it
-    /// between them, that end a run. One failure is usually its own request's and is held or replanned while the run
-    /// continues; a repeat points at a fault shared by every request, which further calls
-    /// would only spend.
+    /// The host configuration a call ran on, by role, host and execution profile: a failure of
+    /// one configuration says nothing about another.
+    type HostKey = (WorkRole, HostChannel, Option<String>);
+
+    /// Consecutive unretried invocation failures of one host configuration, with no answered call
+    /// on it between them, that end a run. One failure is usually its own request's and is held
+    /// or replanned while the run continues; a repeat points at a fault shared by every
+    /// request, which further calls would only spend.
     const HOST_FAILURE_LIMIT: usize = 2;
 
     const FINALIZATION_CHANGED_AGAIN: &str =
@@ -585,6 +602,7 @@ mod native {
         fn host(&self) -> HostKey {
             (
                 self.role,
+                self.channel,
                 self.execution
                     .as_ref()
                     .map(|execution| execution.profile.clone()),
@@ -796,6 +814,8 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
+        /// Set once a host configuration reaches `HOST_FAILURE_LIMIT`; no call is admitted after.
+        host_fault: bool,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -905,7 +925,15 @@ mod native {
             {
                 step.outcome = WorkOutcome::Cancelled;
             }
-            if step.agent_duration_ms.is_some()
+            if step
+                .host_failure
+                .as_ref()
+                .is_some_and(execution::diagnostic::HostFailure::is_invocation)
+            {
+                if !step.retried {
+                    self.count_host_failure(step.host());
+                }
+            } else if step.agent_duration_ms.is_some()
                 && step.host_failure.is_none()
                 && !matches!(
                     step.outcome,
@@ -917,37 +945,35 @@ mod native {
             self.result.work_telemetry.record(step);
         }
 
-        /// Counts invocations that ended without an answer, one per entry of `failed`. While
-        /// every host configuration stays below `HOST_FAILURE_LIMIT` consecutive failures the
-        /// run continues with its other work and replans without the failed requests; at the
-        /// limit it ends, recording which configuration failed.
-        fn continues_after_host_failures(
-            &mut self,
-            failed: impl IntoIterator<Item = HostKey>,
-        ) -> bool {
-            let mut exhausted = None;
-            for host in failed {
-                let count = self.host_failures.entry(host.clone()).or_default();
-                *count += 1;
-                if *count >= HOST_FAILURE_LIMIT {
-                    exhausted = Some((host, *count));
-                }
+        /// Counts an invocation that ended without an answer and was not retried. At
+        /// `HOST_FAILURE_LIMIT` for one host configuration the run admits no further call, on
+        /// any route, and retains unfinished work as a spent budget does.
+        fn count_host_failure(&mut self, host: HostKey) {
+            let count = self.host_failures.entry(host.clone()).or_default();
+            *count += 1;
+            if *count < HOST_FAILURE_LIMIT || self.host_fault {
+                return;
             }
-            let Some(((role, profile), count)) = exhausted else {
-                self.queue_replan = QueueReplan::Invalidate;
-                self.queue_admitted.clear();
-                return true;
-            };
-            let role = serde_json::to_value(role).expect("role serializes");
+            let count = *count;
+            self.host_fault = true;
+            let (role, channel, profile) = host;
+            let name = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
             self.deferred(
                 "host failures",
                 format!(
-                    "{count} consecutive {} invocations on profile {} failed without an answer; the run ends so a shared host fault spends no further calls",
-                    role.as_str().unwrap_or_default(),
+                    "{count} consecutive {} invocations through the {} host on profile {} failed without an answer; the run admits no further call so a shared host fault spends nothing more, and unfinished work is retained",
+                    name(serde_json::to_value(role).expect("role serializes")),
+                    name(serde_json::to_value(channel).expect("channel serializes")),
                     profile.as_deref().unwrap_or("unknown")
                 ),
             );
-            false
+        }
+
+        /// Discards queue planning after a held invocation failure: the next plan skips the held
+        /// request.
+        fn replan_after_host_failure(&mut self) {
+            self.queue_replan = QueueReplan::Invalidate;
+            self.queue_admitted.clear();
         }
 
         fn deferred(&mut self, name: &str, detail: impl std::fmt::Display) -> bool {
@@ -2080,11 +2106,12 @@ mod native {
                             "{node}: {reason}; use lore work retry {id} {node} after diagnosis"
                         ),
                     );
-                    ObservationStep::InvocationFailed(metrics.host())
+                    ObservationStep::InvocationFailed
                 }
                 Ok(InspectionRecordOutcome::TimedOut { remaining }) => {
                     metrics.outcome = WorkOutcome::Failed;
                     if remaining > 0 {
+                        metrics.retried = true;
                         self.record("bounded inspection timeout", StageState::Skipped, Some(format!("{node}: session timed out; {remaining} automatic retry remains; no observation recorded")));
                         ObservationStep::Retry
                     } else {
@@ -2237,6 +2264,9 @@ mod native {
         }
 
         fn call_limit_available(&mut self) -> bool {
+            if self.host_fault {
+                return false;
+            }
             if let Some(control) = &mut self.automation {
                 if !control.check_duration() {
                     return self.record_automation_stop();
@@ -2751,7 +2781,7 @@ mod native {
                 mut returned,
             } = decoded;
             let mut usable = false;
-            let mut failed = Vec::new();
+            let mut failed = false;
             let mut replanned = false;
             if !returned.is_empty() {
                 match recorded {
@@ -2790,11 +2820,9 @@ mod native {
                                 }
                                 usable |= !matches!(
                                     step,
-                                    ObservationStep::InvocationFailed(_) | ObservationStep::Failed
+                                    ObservationStep::InvocationFailed | ObservationStep::Failed
                                 );
-                                if let ObservationStep::InvocationFailed(host) = step {
-                                    failed.push(host);
-                                }
+                                failed |= matches!(step, ObservationStep::InvocationFailed);
                             }
                             self.record_work_step(turn.metrics);
                         }
@@ -2813,13 +2841,10 @@ mod native {
                     }
                 }
             }
-            if usable && !failed.is_empty() {
-                self.queue_replan = QueueReplan::Invalidate;
+            if failed {
+                self.replan_after_host_failure();
             }
-            if accepted && !usable && !replanned && !failed.is_empty() {
-                return self.continues_after_host_failures(failed);
-            }
-            accepted && (usable || replanned)
+            accepted && (usable || replanned || failed)
         }
         async fn settle_observation_attempts(
             &mut self,
@@ -2981,6 +3006,7 @@ mod native {
             if !self.reserve_calls(1) {
                 return None;
             }
+            metrics.channel = HostChannel::Result;
             let started = Instant::now();
             let child = self
                 .supervisor
@@ -3301,11 +3327,8 @@ mod native {
                     return WorkStep::Failed;
                 }
             };
-            if self.continues_after_host_failures([metrics.host()]) {
-                step
-            } else {
-                WorkStep::Failed
-            }
+            self.replan_after_host_failure();
+            step
         }
 
         async fn selected_result_step(
@@ -3607,11 +3630,8 @@ mod native {
                     return match result {
                         Ok(reason) => {
                             self.deferred("whole-section invocation held", &reason);
-                            if self.continues_after_host_failures([metrics.host()]) {
-                                WorkStep::Deferred(reason)
-                            } else {
-                                WorkStep::Failed
-                            }
+                            self.replan_after_host_failure();
+                            WorkStep::Deferred(reason)
                         }
                         Err(error) => {
                             self.failure("whole-section attempt recording", error);
@@ -3813,12 +3833,9 @@ mod native {
                     | ObservationStep::Retry => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::InputsChanged(error) => self.work_inputs_changed(stage, error),
-                    ObservationStep::InvocationFailed(host) => {
-                        if self.continues_after_host_failures([host]) {
-                            WorkStep::Deferred(format!("{id}: inspection invocation held"))
-                        } else {
-                            WorkStep::Failed
-                        }
+                    ObservationStep::InvocationFailed => {
+                        self.replan_after_host_failure();
+                        WorkStep::Deferred(format!("{id}: inspection invocation held"))
                     }
                     ObservationStep::Failed => WorkStep::Failed,
                 },
@@ -4683,7 +4700,7 @@ mod native {
                 mut metrics,
             } = decoded;
             let mut usable = false;
-            let mut failed = Vec::new();
+            let mut failed = false;
             if let Some((recorded, total_duration_ms)) = recorded {
                 match recorded {
                     Ok(recorded) => {
@@ -4708,7 +4725,7 @@ mod native {
                                     ),
                                 ) => {
                                     step.outcome = WorkOutcome::Failed;
-                                    failed.push(step.host());
+                                    failed = true;
                                     self.queue_admitted.clear();
                                     self.deferred("candidate invocation held", reason);
                                 }
@@ -4759,13 +4776,10 @@ mod native {
                 }
                 self.record_work_step(step);
             }
-            if usable && !failed.is_empty() {
-                self.queue_replan = QueueReplan::Invalidate;
+            if failed {
+                self.replan_after_host_failure();
             }
-            if accepted && !usable && !failed.is_empty() {
-                return self.continues_after_host_failures(failed);
-            }
-            accepted && usable
+            accepted && (usable || failed)
         }
         async fn record_screening_batch(
             &mut self,
@@ -7132,6 +7146,7 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
+            host_fault: false,
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,

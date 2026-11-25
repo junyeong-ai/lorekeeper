@@ -103,6 +103,11 @@ impl HostFailure {
         failure
     }
 
+    /// Whether the host ended without an answer, rather than answering with an unusable one.
+    pub fn is_invocation(&self) -> bool {
+        matches!(self.phase, Phase::Invocation)
+    }
+
     pub fn from_response(engine: AgentEngine, bytes: &[u8]) -> Self {
         Self::from_output(
             engine,

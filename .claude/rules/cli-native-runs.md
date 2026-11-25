@@ -149,12 +149,16 @@ paths:
   process-group cleanup, holds only its exact request: each queue task's input in its
   native generation receipt, each audit subject's context as an audit-assessment
   preparation attempt. Inputs the host changed before failing are not held; they are
-  prepared afresh. Preserve valid wave peers. An invocation failure counts against its
-  host configuration (role and execution profile); an answered call on that
-  configuration clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive failures of
-  one configuration the run replans without the held requests and continues its
-  independent work; at the limit it ends without pausing the scheduled operation or
-  counting semantic progress, because a repeat points at a shared host fault. Signal exits,
+  prepared afresh. Preserve valid wave peers. Every invocation that ends without an
+  answer, on any route and in mixed waves, counts against its host configuration (role,
+  observation or tool-result host, and execution profile) when the run records its step;
+  a timeout retried under its request's own allowance does not, and an answered call on
+  that configuration clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive
+  failures of one configuration the run replans without the held requests and continues
+  its independent work; at the limit the run admits no further call, through the same
+  gate as a spent call budget, for every later stage and drain, without pausing the
+  scheduled operation or counting semantic progress, because a repeat points at a shared
+  host fault. Signal exits,
   process cleanup failure, local I/O, unusable tool-enabled replies and unknown errors
   remain fatal.
   `work retry` clears only a current operational hold or exhausted timeout allowance;
