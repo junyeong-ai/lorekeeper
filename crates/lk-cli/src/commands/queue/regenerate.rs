@@ -295,6 +295,13 @@ fn plan_pending_retirement(
         }
         index += 1;
     }
+    // Processed history keeps only rows its reader accepts, as queue retirement does; a row it
+    // would refuse stays where it is rather than becoming history that blocks later cleanup.
+    if !super::rejections::is_retainable(&archived) {
+        return Err(miette::miette!(
+            "the superseded request carries fields processed history does not keep; it cannot be archived, so regeneration is refused"
+        ));
+    }
     // Archive exact historical bytes before withdrawing the superseded request.
     // Keep them guarded after retirement and throughout interrupted publication.
     plan.create(&archive_path, archived.clone());
@@ -355,6 +362,32 @@ mod tests {
     }
 
     #[test]
+    fn regeneration_archives_only_rows_processed_history_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let pending = root.join(".lorekeeper/queue/retained.jsonl");
+        let mut row = serde_json::json!({"task_id":"retained", "kind":"summarize", "created_at":"2026-10-16T00:00:00Z", "cache_hash":"0123456789abcdef0123456789abcdef", "input":{"text":"Retained source.","max_sentences":3,"locale":"en"}, "target":{"vault_path":"page.md","kind":"document-summary","anchor":"## Summary"}});
+        let archive = PathBuf::from(".lorekeeper/queue/processed/retained.jsonl");
+        let mut plan = lk_vault::MutationPlan::default();
+        plan_pending_retirement(
+            &mut plan,
+            root,
+            &pending,
+            row.to_string(),
+            0,
+            archive.clone(),
+        )
+        .unwrap();
+        row["extension"] = serde_json::json!({"kept": true});
+        let mut refused = lk_vault::MutationPlan::default();
+        assert!(
+            plan_pending_retirement(&mut refused, root, &pending, row.to_string(), 0, archive)
+                .is_err()
+        );
+        assert!(!refused.has_changes(), "a refused row plans nothing");
+    }
+
+    #[test]
     fn interrupted_regeneration_retains_archive_guards_after_pending_retirement() {
         for missing in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -362,7 +395,7 @@ mod tests {
             let queue = root.join(".lorekeeper/queue");
             std::fs::create_dir_all(queue.join("processed")).unwrap();
             let pending = queue.join("retained.jsonl");
-            let original = serde_json::json!({"task_id":"retained", "kind":"summarize", "created_at":"2026-10-16T00:00:00Z", "cache_hash":"captured", "input":{"text":"Retained source.","max_sentences":3,"locale":"en"}, "target":{"vault_path":"page.md","kind":"document-summary","anchor":"## Summary"}}).to_string();
+            let original = serde_json::json!({"task_id":"retained", "kind":"summarize", "created_at":"2026-10-16T00:00:00Z", "cache_hash":"0123456789abcdef0123456789abcdef", "input":{"text":"Retained source.","max_sentences":3,"locale":"en"}, "target":{"vault_path":"page.md","kind":"document-summary","anchor":"## Summary"}}).to_string();
             std::fs::write(&pending, &original).unwrap();
             std::fs::write(root.join("page.md"), "before").unwrap();
             let archive = PathBuf::from(".lorekeeper/queue/processed/retained.jsonl");

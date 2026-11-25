@@ -31,8 +31,10 @@ paths:
 - Pending input retains full current typed validation. Processed history protects exact task/cache references through a strict known JSON
   envelope; its unique-key input object is opaque historical data, never current semantic
   authority. Do not reconstruct it with today's request, supply a policy, rehash, rewrite or
-  publish it. Unknown envelopes, duplicate fields and unreadable records refuse cleanup. Preserve original history bytes and live
-  staged references; a missing historical field never grants current semantic authority.
+  publish it. Unknown envelopes, duplicate fields and unreadable records refuse cleanup, so
+  every writer archives only rows that envelope reads: retirement keeps another row pending
+  and regeneration refuses it. Preserve original history bytes and live staged references;
+  a missing historical field never grants current semantic authority.
 
 ## Native queue scheduling
 

@@ -3243,6 +3243,7 @@ fn pending_regeneration_preserves_exact_siblings_and_rejects_corrupt_runs() {
         let mut sibling = old.clone();
         sibling["task_id"] = "sibling".into();
         sibling["target"]["vault_path"] = "daily/source/sibling.md".into();
+        old.as_object_mut().unwrap().remove("historical_note");
         old["input"]["generation_policy"] = "previous-policy-v0".into();
         let sibling_lines = format!("\t{} \r\n\r\n", sibling);
         let old_line = old.to_string();
@@ -3295,6 +3296,26 @@ fn pending_regeneration_preserves_exact_siblings_and_rejects_corrupt_runs() {
             );
         }
     }
+}
+
+#[test]
+fn regeneration_refuses_a_row_processed_history_cannot_read() {
+    let ws = Workspace::new();
+    let input = serde_json::json!({"text":"Retained source.","max_sentences":3,"locale":"en"});
+    let hash = lk_queue::cache_hash(input.as_object().unwrap());
+    let page = format!(
+        "---\ntype: daily\nllm_inputs:\n  summary: {hash}\n---\n## Summary\nAuthored body.\n"
+    );
+    ws.write("daily/source/page.md", &page);
+    let row = serde_json::json!({"task_id":"extended","kind":"summarize","created_at":"2026-10-16T00:00:00Z","cache_hash":hash,"input":input,"target":{"vault_path":"daily/source/page.md","kind":"daily-summary","anchor":"## Summary"},"historical_note":"kept"}).to_string();
+    let pending = ".lorekeeper/queue/extended.jsonl";
+    ws.write(pending, &row);
+    let output = ws.run(&["queue", "regenerate", "--task-id", "extended"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("processed history does not keep"));
+    assert_eq!(ws.read(pending), row);
+    assert_eq!(ws.read("daily/source/page.md"), page);
+    assert!(!ws.vault().join(".lorekeeper/queue/processed").exists());
 }
 
 #[test]
