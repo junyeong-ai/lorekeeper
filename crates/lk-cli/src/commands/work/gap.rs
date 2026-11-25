@@ -163,24 +163,22 @@ fn callout_references(concept: &str, body: &str) -> Vec<PathBuf> {
     references
 }
 
-/// Whether the callout published on `concept` (whose page is `raw`) references a review that is
-/// no longer an open evidence-gap review of the concept: resolved, of another kind, about other
-/// subjects or removed. That callout no longer matches its reviews, so the synthesis is owed
-/// again. A review that cannot be read or parsed is left to review health, not counted.
+/// Whether the callout in the synthesis section `synthesis` of `concept` references a review
+/// that is no longer an open evidence-gap review of the concept: resolved, of another kind or
+/// about other subjects. That callout no longer matches its reviews, so the synthesis is owed
+/// again. A review that is removed, unreadable or not a review is left to review health: a
+/// synthesis whose scoped reviews cannot be read cannot be prepared either.
 pub(in crate::commands) fn references_closed_review(
     root: &Path,
     concept: &str,
-    raw: &str,
+    synthesis: &str,
 ) -> miette::Result<bool> {
-    let Ok(page) = lk_core::frontmatter::parse_page(raw) else {
-        return Ok(false);
-    };
     let owner = |address: &Path| lk_vault::resolve_page_owner(root, address).ok();
     let concept_owner = owner(Path::new(concept));
-    for reference in callout_references(concept, &page.body) {
+    for reference in callout_references(concept, synthesis) {
         let raw = match std::fs::read_to_string(root.join(&reference)) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(miette::miette!("read {}: {error}", reference.display())),
         };
         let Some(review) = lk_core::frontmatter::parse_page(&raw)
@@ -245,10 +243,7 @@ mod tests {
             citations_changed: false,
         };
         let claims = ["See [the old question](../explorations/closed.md).".to_owned()];
-        let page = format!(
-            "---\ntype: concept\n---\n## Synthesis\nBody.\n\n{}",
-            render(Locale::Ko, concept, &[gap], &claims)
-        );
+        let page = format!("Body.\n\n{}", render(Locale::Ko, concept, &[gap], &claims));
         std::fs::write(
             root.join("wiki/explorations/closed.md"),
             review("evidence-gap", "resolved", concept),
@@ -271,11 +266,11 @@ mod tests {
         write("open", "conflict");
         assert!(references_closed_review(root, concept, &page).unwrap());
         std::fs::remove_file(root.join("wiki/explorations/gap.md")).unwrap();
-        assert!(references_closed_review(root, concept, &page).unwrap());
         assert!(
-            !references_closed_review(root, concept, "---\ntype: concept\n---\nNo callout.\n")
-                .unwrap()
+            !references_closed_review(root, concept, &page).unwrap(),
+            "a removed review is left to review health"
         );
+        assert!(!references_closed_review(root, concept, "No callout.\n").unwrap());
     }
 
     #[test]

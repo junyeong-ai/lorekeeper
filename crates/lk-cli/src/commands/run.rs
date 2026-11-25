@@ -1193,10 +1193,16 @@ mod native {
                     .filter(|owed| !owed.discarding.is_empty())
                     .count()
             );
-            if !closed_gaps.is_empty() {
+            if !closed_gaps.requested.is_empty() {
                 detail.push_str(&format!(
                     "; {} synthesis request(s) for evidence-gap callouts whose review closed",
-                    closed_gaps.len()
+                    closed_gaps.requested.len()
+                ));
+            }
+            if !closed_gaps.unresynthesizable.is_empty() {
+                detail.push_str(&format!(
+                    "; {} evidence-gap callout(s) on concepts that cannot be resynthesized (no current citations or synthesis heading)",
+                    closed_gaps.unresynthesizable.len()
                 ));
             }
             let skipped = &report.sync.skipped;

@@ -747,6 +747,15 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
                     .contains("The source reports a proposal; its deployment remains unknown."),
             "a closed review's callout is resynthesized away: {concept}"
         );
+        let report = fixture.run();
+        assert!(
+            !report["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["detail"].as_str().is_some_and(|detail| {
+                    detail.contains("evidence-gap callouts whose review closed")
+                })
+            }),
+            "a rewritten synthesis owes nothing further: {report}"
+        );
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();

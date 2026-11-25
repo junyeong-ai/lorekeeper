@@ -57,6 +57,8 @@ pub enum GraphError {
         configured: PathBuf,
         on_disk: PathBuf,
     },
+    #[error(transparent)]
+    Unresynthesizable(#[from] backlinks::Unresynthesizable),
     #[error("I/O error: {0}")]
     Io(String),
 }

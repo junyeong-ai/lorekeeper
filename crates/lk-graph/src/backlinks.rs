@@ -684,6 +684,15 @@ pub fn capture_concept_citations(
 
 /// Derive one exact concept's current evidence and replacement sections without writes.
 /// This does not depend on retained queue history or an unanswered completion marker.
+/// Why a concept page cannot take a resynthesis request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Unresynthesizable {
+    #[error("concept has no current citations")]
+    NoCurrentCitations,
+    #[error("concept lacks synthesis heading")]
+    MissingSynthesisHeading,
+}
+
 pub fn concept_resynthesis(
     pages: &[ScannedPage],
     vault_root: &Path,
@@ -700,7 +709,7 @@ pub fn concept_resynthesis(
     let evidence = CitationGraph::build(pages, vault_root, dirs)?;
     let sources = evidence.sources_for(page);
     if sources.is_empty() {
-        return Err(fail("concept has no current citations"));
+        return Err(Unresynthesizable::NoCurrentCitations.into());
     }
     let raw = std::fs::read_to_string(
         lk_vault::page_path(vault_root, path).map_err(|e| fail(&e.to_string()))?,
@@ -708,7 +717,7 @@ pub fn concept_resynthesis(
     .map_err(|e| fail(&e.to_string()))?;
     frontmatter::parse_page(&raw).map_err(|e| fail(&e.to_string()))?;
     let section = resolve_section(&raw, |s| s.concept_synthesis)
-        .ok_or_else(|| fail("concept lacks synthesis heading"))?;
+        .ok_or(Unresynthesizable::MissingSynthesisHeading)?;
     let related = resolve_section(&raw, |s| s.related);
     Ok(ConceptResynthesis {
         path: path.to_path_buf(),

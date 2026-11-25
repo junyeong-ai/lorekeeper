@@ -129,9 +129,13 @@ paths:
   citations; otherwise it publishes no callout and leaves the review to reassessment, so
   recovered evidence never holds the request. A published callout follows its reviews:
   when one it references is no longer an open evidence gap of the concept (resolved,
-  another kind, other subjects or removed), the run's backlink reconciliation requests that
+  another kind or other subjects), the run's backlink reconciliation requests that
   concept's resynthesis through `graph resynthesize`, reusing a pending request; only the
-  reference lines Rust renders count, never a link inside a claim. Observers record a
+  reference lines Rust renders inside the synthesis section a resynthesis rewrites count,
+  never a link inside a claim. A removed or unreadable review is left to review health, as
+  a synthesis whose scoped reviews cannot be read cannot be prepared; alias addresses are
+  skipped for their owner; a concept that cannot take a request (`Unresynthesizable`: no
+  current citations or synthesis heading) is reported and keeps its callout. Observers record a
   disagreement as a finding or source question, never as an `unresolved` processing
   blocker, so bounded Work reaches this finalizer.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
