@@ -2151,10 +2151,12 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
 
 #[test]
 fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout() {
-    for claims in [
-        None,
-        Some(None),
-        Some(Some("Retention is a legal obligation.")),
+    for (claims, judged) in [
+        (None, false),
+        (Some(None), false),
+        (Some(Some("Retention is a legal obligation.")), false),
+        (Some(None), true),
+        (Some(Some("Retention is a legal obligation.")), true),
     ] {
         let ws = Workspace::new();
         let source_path = "wiki/documents/policy.md";
@@ -2174,7 +2176,13 @@ fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout()
             "wiki/explorations/retention-gap.md",
             &format!(
                 "---\ntype: exploration\ntitle: Retention gap\nreview: {}\n---\n## Judgment\nThe legal basis is unsupported.\n",
-                serde_json::json!({"status":"open","kind":"evidence-gap","subjects":[target],"evidence":[citation],"resolution":null})
+                {
+                    let mut review = serde_json::json!({"status":"open","kind":"evidence-gap","subjects":[target],"evidence":[citation],"resolution":null});
+                    if judged {
+                        review["judged_citation_digest"] = hash.clone().into();
+                    }
+                    review
+                }
             ),
         );
         let task = serde_json::json!({"task_id":"gap", "kind":"synthesize-concept", "created_at":"2026-10-16T00:00:00Z", "cache_hash":hash,
@@ -2197,6 +2205,14 @@ fn an_open_evidence_gap_review_publishes_its_claims_in_a_rust_rendered_callout()
         );
         let output = ws.run(&["queue", "apply"]);
         let published = ws.read(target);
+        if judged && claims == Some(None) {
+            assert!(
+                !output.status.success(),
+                "the citations a gap was judged against cannot answer it"
+            );
+            assert_eq!(published, body, "the concept is unchanged");
+            continue;
+        }
         let Some(claim) = claims else {
             assert!(
                 !output.status.success(),

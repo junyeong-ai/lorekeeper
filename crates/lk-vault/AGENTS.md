@@ -115,6 +115,8 @@ canonical; SQLite navigation is derived.
 - A review may declare `kind` (`conflict`, `evidence-gap`); undeclared reviews stay valid.
   An open evidence-gap review obliges its subject's synthesis to keep the named defining
   claims in the evidence-gap callout the CLI renders from a result's structured claims.
+  An evidence gap may record `judged_citation_digest`, the subject's 32-digit citation
+  digest it was judged against; another kind or form is invalid.
 - Before reassessment archive the review itself; read changed evidence and record a
   dated judgment, preserving archive paths/revisions. Explicitly replace current
   evidence after review. Never retag stale prose, delete history or count a review

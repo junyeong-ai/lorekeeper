@@ -35,6 +35,11 @@ pub struct KnowledgeReview {
     pub subjects: Vec<String>,
     pub evidence: Vec<Citation>,
     pub resolution: Option<String>,
+    /// For an evidence gap a synthesis proposed, the digest of the concept's citations it was
+    /// judged against (`lk_core::concept::citation_digest`). Until the citations change, the
+    /// gap cannot have been answered by new evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judged_citation_digest: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for KnowledgeReview {
@@ -50,6 +55,8 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             #[serde(deserialize_with = "deserialize_evidence")]
             evidence: Vec<Citation>,
             resolution: Option<String>,
+            #[serde(default)]
+            judged_citation_digest: Option<String>,
         }
         let mapping = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let fields: Fields = serde_json::from_value(serde_json::Value::Object(mapping))
@@ -60,6 +67,7 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             subjects: fields.subjects,
             evidence: fields.evidence,
             resolution: fields.resolution,
+            judged_citation_digest: fields.judged_citation_digest,
         })
     }
 }
@@ -202,6 +210,18 @@ impl KnowledgeReview {
             {
                 errors.push(error.to_string());
             }
+        }
+        if let Some(digest) = &self.judged_citation_digest
+            && (self.kind != Some(ReviewKind::EvidenceGap)
+                || digest.len() != 32
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+        {
+            errors.push(
+                "judged_citation_digest is an evidence gap's 32-digit lowercase citation digest"
+                    .into(),
+            );
         }
         errors
     }

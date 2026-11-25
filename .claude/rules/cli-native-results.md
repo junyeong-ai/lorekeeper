@@ -121,9 +121,13 @@ paths:
   (`work/gap.rs`). A synthesis result carries the defining claims in structured
   `gap_claims`; after the context revision check, publication refuses claims that do not
   match that scope and renders the callout beneath the synthesis from the same capture, so
-  reply and result bytes carry only the claims. An empty list answers that recovered
-  citations support every claim, publishes no callout and leaves the review to
-  reassessment, so recovered evidence never holds the request. A completed synthesis is not
+  reply and result bytes carry only the claims. An evidence-gap review Rust publishes
+  records `judged_citation_digest`, the concept citations it was judged against, and the
+  capture marks each gap `citations_changed` when the request's citations differ (always,
+  for a review without that record). An empty list answers that recovered citations
+  support every claim, so it is refused while any gap was judged against these exact
+  citations; otherwise it publishes no callout and leaves the review to reassessment, so
+  recovered evidence never holds the request. A completed synthesis is not
   rewritten when its review is later resolved; that takes an explicit resynthesis. Observers record a disagreement as a finding or source
   question, never as an `unresolved` processing blocker, so bounded Work reaches this
   finalizer.

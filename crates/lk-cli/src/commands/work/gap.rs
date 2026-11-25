@@ -10,21 +10,26 @@ use std::path::{Path, PathBuf};
 use lk_core::i18n::Locale;
 use serde::{Deserialize, Serialize};
 
-/// An open evidence-gap review of the synthesized concept, by address and title.
+/// An open evidence-gap review of the synthesized concept, by address and title, and whether
+/// the concept's citations changed since the review judged them. A review that records no
+/// judged citations counts as changed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct EvidenceGap {
     pub path: String,
     pub title: String,
+    pub citations_changed: bool,
 }
 
-/// The open evidence-gap reviews of `concept` among a synthesis capture's scoped `reviews`. Each
-/// review is read from the bytes that capture stored under its verified owner, and names the
-/// concept when one of its subjects has the concept's owner. A review of another kind, resolved,
-/// unreadable or about other subjects is not one.
+/// The open evidence-gap reviews of `concept` among a synthesis capture's scoped `reviews`, for a
+/// request answering the citations `citation_digest` names. Each review is read from the bytes
+/// that capture stored under its verified owner, and names the concept when one of its subjects
+/// has the concept's owner. A review of another kind, resolved, unreadable or about other
+/// subjects is not one.
 pub(super) fn open_reviews(
     root: &Path,
     concept: &str,
+    citation_digest: &str,
     reviews: &[String],
     pages: &BTreeMap<PathBuf, String>,
 ) -> miette::Result<Vec<EvidenceGap>> {
@@ -65,6 +70,8 @@ pub(super) fn open_reviews(
             gaps.push(EvidenceGap {
                 path: path.clone(),
                 title,
+                citations_changed: review.judged_citation_digest.as_deref()
+                    != Some(citation_digest),
             });
         }
     }
@@ -73,8 +80,17 @@ pub(super) fn open_reviews(
 
 /// Check the claims a result carries against the gaps its scope holds: a list exactly when an
 /// open evidence-gap review is in scope, each claim one nonblank line. An empty list answers that
-/// the citations now support every claim those reviews name; the reviews await reassessment.
+/// the citations now support every claim those reviews name, so it needs citations that changed
+/// since every one of them was judged; the reviews then await reassessment.
 pub(super) fn check_claims(gaps: &[EvidenceGap], claims: Option<&[String]>) -> Result<(), String> {
+    if claims.is_some_and(<[String]>::is_empty)
+        && let Some(unchanged) = gaps.iter().find(|gap| !gap.citations_changed)
+    {
+        return Err(format!(
+            "the citations are those the evidence-gap review {} judged; no new evidence answers it, so return the defining claims it names in gap_claims",
+            unchanged.path
+        ));
+    }
     match (gaps.is_empty(), claims) {
         (true, None) => Ok(()),
         (true, Some(_)) => {
@@ -178,12 +194,14 @@ mod tests {
             scoped.push(path);
         }
         let root = root.path().canonicalize().unwrap();
-        let gaps = open_reviews(&root, concept, &scoped, &pages).unwrap();
+        let digest = "0123456789abcdef0123456789abcdef";
+        let gaps = open_reviews(&root, concept, digest, &scoped, &pages).unwrap();
         assert_eq!(
             gaps,
             [EvidenceGap {
                 path: "wiki/explorations/gap.md".into(),
                 title: "Definition gap".into(),
+                citations_changed: true,
             }],
             "a subject alias names the concept's owner, and the title renders on one line"
         );
@@ -196,6 +214,33 @@ mod tests {
         assert!(check_claims(&[], Some(&["claim".to_owned()])).is_err());
         let claims = ["A protocol is a mutual agreement.".to_owned()];
         assert!(check_claims(&gaps, Some(&claims)).is_ok());
+        let judged = |citations: &str| {
+            let raw = review("evidence-gap", "open", concept).replace(
+                "  resolution: null\n",
+                &format!("  resolution: null\n  judged_citation_digest: {citations}\n"),
+            );
+            let path = PathBuf::from("wiki/explorations/gap.md");
+            std::fs::write(root.join(&path), &raw).unwrap();
+            let pages = BTreeMap::from([(path.clone(), raw)]);
+            open_reviews(
+                &root,
+                concept,
+                digest,
+                &[path.to_string_lossy().into_owned()],
+                &pages,
+            )
+            .unwrap()
+        };
+        let unchanged = judged(digest);
+        assert!(!unchanged[0].citations_changed);
+        assert!(
+            check_claims(&unchanged, Some(&[])).is_err(),
+            "the citations the gap was judged against cannot answer it"
+        );
+        assert!(check_claims(&unchanged, Some(&claims)).is_ok());
+        let changed = judged("fedcba9876543210fedcba9876543210");
+        assert!(changed[0].citations_changed);
+        assert!(check_claims(&changed, Some(&[])).is_ok());
         assert_eq!(
             render(Locale::En, concept, &gaps, &claims),
             "> [!gap] These defining claims await supporting evidence.\n> - A protocol is a mutual agreement.\n>\n> Evidence gap review: [Definition gap](../explorations/gap.md)\n"

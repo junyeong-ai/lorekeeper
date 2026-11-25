@@ -122,8 +122,11 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; answer the synthesis with that review in scope"
         )));
     }
-    let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
+    let mut metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null});
+    if proposal.kind == lk_vault::ReviewKind::EvidenceGap {
+        metadata["judged_citation_digest"] = task.cache_hash.clone().into();
+    }
     let content = format!(
         "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
         serde_json::to_string(title).into_diagnostic()?,

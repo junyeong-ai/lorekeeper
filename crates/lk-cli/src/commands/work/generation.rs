@@ -367,7 +367,13 @@ pub(super) fn minimum_reply(
         TaskKind::SynthesizeConcept => json!({
             "synthesis":"x",
             "related":(task.anchors().len() == 2).then_some(""),
-            "gap_claims":(!gaps.is_empty()).then(|| json!([])),
+            "gap_claims":(!gaps.is_empty()).then(|| {
+                if gaps.iter().all(|gap| gap.citations_changed) {
+                    json!([])
+                } else {
+                    json!(["x"])
+                }
+            }),
         }),
         _ => return Err(miette::miette!("task uses section response bounds")),
     };
@@ -380,7 +386,7 @@ const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discov
 /// The synthesis-only reply that proposes the durable review its contract requires.
 const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no scoped review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. An open review of this concept about a different question does not record this one. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
 
-const GAP_REPLY: &str = "When context.purpose.parameters.evidence_gaps names open evidence-gap reviews of this concept, return the defining claims they name that the citations still do not support, one line each, in gap_claims, or an empty list when the citations now support every such claim; Rust appends the evidence-gap callout with its marker and a reference to each review, so never write that callout in synthesis. Without evidence_gaps, gap_claims is null.";
+const GAP_REPLY: &str = "When context.purpose.parameters.evidence_gaps names open evidence-gap reviews of this concept, return the defining claims they name that the citations still do not support, one line each, in gap_claims, or an empty list when the citations now support every such claim. An empty list is accepted only when every entry has citations_changed: true; an entry with citations_changed: false was judged against these exact citations, so its claims remain unsupported; Rust appends the evidence-gap callout with its marker and a reference to each review, so never write that callout in synthesis. Without evidence_gaps, gap_claims is null.";
 
 pub(super) fn instruction(kinds: impl IntoIterator<Item = TaskKind>) -> String {
     let kinds = kinds.into_iter().collect::<Vec<_>>();

@@ -1158,6 +1158,7 @@ fn capture_task_with_audit_controlled(
         let gaps = super::gap::open_reviews(
             root,
             &task.target.vault_path,
+            &task.cache_hash,
             &scoped_reviews,
             &captured.pages,
         )?;

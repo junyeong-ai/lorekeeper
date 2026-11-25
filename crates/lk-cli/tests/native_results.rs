@@ -679,12 +679,14 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
                 .join("vault/wiki/explorations/deployment-status-disagreement.md"),
         )
         .unwrap();
+        let metadata = &lk_core::frontmatter::parse_page(&review)
+            .unwrap()
+            .frontmatter
+            .fields["review"];
+        assert_eq!(metadata["kind"], "evidence-gap");
         assert_eq!(
-            lk_core::frontmatter::parse_page(&review)
-                .unwrap()
-                .frontmatter
-                .fields["review"]["kind"],
-            "evidence-gap"
+            metadata["judged_citation_digest"], task.cache_hash,
+            "the gap records the citations it was judged against"
         );
         let concept =
             std::fs::read_to_string(fixture.root().join("vault").join(&task.target.vault_path))
