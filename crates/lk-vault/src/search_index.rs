@@ -81,6 +81,41 @@ fn invalid(message: impl Into<String>) -> VaultError {
     std::io::Error::other(message.into()).into()
 }
 
+/// Typed drift for a page the inventory read, so a refresh tells an external edit from
+/// a failure. `None` is a page absent on that side.
+fn page_changed(path: &Path, expected: Option<&str>, current: Option<&str>) -> VaultError {
+    let state = |revision: Option<&str>| {
+        revision.map_or(crate::CaptureFileState::Absent, |revision| {
+            crate::CaptureFileState::Revision {
+                revision: revision.into(),
+            }
+        })
+    };
+    Box::new(crate::CitationCaptureError::SearchPage {
+        path: crate::CapturePath::build(path),
+        expected: state(expected),
+        current: state(current),
+    })
+    .into()
+}
+
+/// The page's current bytes, or its drift when an external editor removed it after the
+/// inventory read it.
+fn reread_page(root: &Path, path: &Path, expected: &str) -> Result<String, VaultError> {
+    match std::fs::read_to_string(crate::page_path(root, path)?) {
+        Ok(raw) if lk_core::concept::file_revision(&raw) == expected => Ok(raw),
+        Ok(raw) => Err(page_changed(
+            path,
+            Some(expected),
+            Some(&lk_core::concept::file_revision(&raw)),
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(page_changed(path, Some(expected), None))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Refresh a reconstructible search snapshot in one SQLite transaction. The source
 /// files are read under the cooperating writer lock; external editors are not frozen.
 /// This lexical-only entry point captures no graph evidence; citation queries refuse it.
@@ -293,10 +328,7 @@ fn prepare_search_inner(
                 .get(lk_core::rss_evidence::CONCEPT_EVIDENCE_FIELD)
                 .is_some()
             {
-                let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
-                if lk_core::concept::file_revision(&raw) != page.file_revision {
-                    return Err(invalid("evidence source changed during snapshot"));
-                }
+                let raw = reread_page(root, &page.rel_path, &page.file_revision)?;
                 crate::rss_concept_citations(root, &page.rel_path, &raw)?;
                 crate::rss_link_previews(root, &page.rel_path, &raw)?
             } else {
@@ -331,10 +363,7 @@ fn prepare_search_inner(
                     .ok_or_else(|| invalid("page ID overflow"))?;
                 next_id
             };
-            let raw = std::fs::read_to_string(crate::page_path(root, &page.rel_path)?)?;
-            if lk_core::concept::file_revision(&raw) != page.file_revision {
-                return Err(invalid("page changed during snapshot preparation"));
-            }
+            let raw = reread_page(root, &page.rel_path, &page.file_revision)?;
             let mut page = page.clone();
             page.page = crate::parse_page(&raw).map_err(VaultError::Frontmatter)?;
             page.page.original = None;
@@ -574,14 +603,25 @@ fn verify_selected_capture_with(
             if current.file_revision != *expected
                 || crate::find_page_owner(root, path)?.as_ref() != Some(&current.owner)
             {
-                return Err(invalid(
-                    "selected search inputs changed during citation snapshot",
+                return Err(page_changed(
+                    path,
+                    Some(expected),
+                    Some(&current.file_revision),
                 ));
             }
             remaining.remove(path);
             return Ok(());
         }
-        let raw = read(full)?;
+        let raw = match read(full) {
+            Err(VaultError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(page_changed(
+                    path,
+                    remaining.get(path).map(String::as_str),
+                    None,
+                ));
+            }
+            read => read?,
+        };
         let revision = lk_core::concept::file_revision(&raw);
         if remaining.get(path) == Some(&revision) {
             remaining.remove(path);
@@ -597,16 +637,16 @@ fn verify_selected_capture_with(
             .and_then(|value| value.as_str())
             != Some("task-board")
         {
-            return Err(invalid(
-                "selected search inputs changed during citation snapshot",
+            return Err(page_changed(
+                path,
+                remaining.get(path).map(String::as_str),
+                Some(&revision),
             ));
         }
         Ok(())
     })?;
-    if !remaining.is_empty() {
-        return Err(invalid(
-            "selected search inputs changed during citation snapshot",
-        ));
+    if let Some((path, expected)) = remaining.first_key_value() {
+        return Err(page_changed(path, Some(expected), None));
     }
     Ok(())
 }
@@ -2641,9 +2681,12 @@ mod tests {
                 "invalid-utf8" => std::fs::write(root.path().join(hidden), [0xff]).unwrap(),
                 _ => unreachable!(),
             }
-            assert!(
-                verify_selected_capture(root.path(), &dirs, &selected, &verified).is_err(),
-                "{change}"
+            let refused = verify_selected_capture(root.path(), &dirs, &selected, &verified)
+                .expect_err(change);
+            assert_eq!(
+                matches!(refused, VaultError::CitationCapture(_)),
+                !change.starts_with("invalid"),
+                "{change}: {refused}"
             );
         }
     }
@@ -2676,7 +2719,7 @@ mod tests {
                 write(root.path(), hidden, &raw.replace("Original", "Late edit"));
                 Ok(verified)
             });
-        assert!(result.is_err());
+        assert!(matches!(result, Err(VaultError::CitationCapture(_))));
         assert_eq!(database_rows(root.path()), rows);
         assert_eq!(
             inspect_search_snapshot(root.path(), &dirs)

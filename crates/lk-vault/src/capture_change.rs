@@ -118,6 +118,13 @@ pub enum CitationCaptureError {
         examples: Vec<CaptureChange>,
         omitted: usize,
     },
+    /// A page the search inventory read was added, removed or rewritten before the
+    /// snapshot was written.
+    SearchPage {
+        path: CapturePath,
+        expected: CaptureFileState,
+        current: CaptureFileState,
+    },
 }
 
 impl std::fmt::Display for CitationCaptureError {
