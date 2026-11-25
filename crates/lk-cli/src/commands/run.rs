@@ -953,7 +953,7 @@ mod native {
                 return false;
             }
             self.configure_child(&mut command);
-            let completed = match self
+            let completed = self
                 .supervisor
                 .run_request(
                     command,
@@ -962,8 +962,16 @@ mod native {
                     input,
                     execution::ChildOutput::Forward,
                 )
-                .await
-            {
+                .await;
+            self.settle_child(name, completed)
+        }
+
+        fn settle_child(
+            &mut self,
+            name: &str,
+            completed: miette::Result<execution::ChildResult>,
+        ) -> bool {
+            let completed = match completed {
                 Ok(result) if result.cancelled => {
                     self.record(name, StageState::Cancelled, result.detail)
                 }
@@ -1004,16 +1012,49 @@ mod native {
             if args == ["queue", "check"] {
                 return self.check_queue(name);
             }
+            if args == ["wiki", "refresh"] {
+                return self.refresh_navigation(name).await;
+            }
             let mut command_args = args.to_vec();
-            if args == ["schema"]
-                || args == ["wiki", "refresh"]
-                || args.starts_with(&["wiki", "audit-record"])
-            {
+            if args == ["schema"] || args.starts_with(&["wiki", "audit-record"]) {
                 command_args.push("--wait-for-vault");
             }
             match execution::lore_command(self.opts, &command_args) {
                 Ok(command) => self.child(name, command, None).await,
                 Err(error) => self.failure(name, error),
+            }
+        }
+
+        /// Navigation refresh stays a child process so cancellation can stop its long capture.
+        /// An external edit during that capture defers it: the previous snapshot stays, a later
+        /// run refreshes, and independent work continues without halting or pausing.
+        async fn refresh_navigation(&mut self, name: &str) -> bool {
+            let mut command = match execution::lore_command(
+                self.opts,
+                &["wiki", "refresh", "--wait-for-vault"],
+            ) {
+                Ok(command) => command,
+                Err(error) => return self.failure(name, error),
+            };
+            self.configure_child(&mut command);
+            let completed = self
+                .supervisor
+                .run_request(command, None, None, None, execution::ChildOutput::Forward)
+                .await;
+            match completed {
+                Ok(result)
+                    if !result.cancelled
+                        && result.exit_code
+                            == Some(crate::commands::wiki::REFRESH_CAPTURE_CHANGED_EXIT) =>
+                {
+                    self.record(
+                        name,
+                        StageState::Failed,
+                        Some("the vault changed while navigation was captured; the previous snapshot stays and a later run refreshes it".into()),
+                    );
+                    self.configuration_is_current()
+                }
+                completed => self.settle_child(name, completed),
             }
         }
 

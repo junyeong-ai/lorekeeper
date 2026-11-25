@@ -245,7 +245,8 @@ pub enum WikiCommand {
         #[arg(long)]
         revision: Option<String>,
     },
-    /// Refresh SQLite navigation and the small entry guide
+    /// Refresh SQLite navigation and the small entry guide. Exits 75 when the vault changed
+    /// while it was captured: nothing was published, so run it again
     Refresh {
         /// Vault root override (default: vault.root from config)
         #[arg(long)]
@@ -872,7 +873,8 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
                 &session,
                 &config.vault.dirs,
                 config.graph.scope.follow_links,
-            )?;
+            )
+            .map_err(|error| miette::miette!("prepare discovery snapshot: {error}"))?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&snapshot)
@@ -1300,6 +1302,11 @@ pub(super) fn refuse_navigation_inbox_overlap(
     Ok(())
 }
 
+/// Exit status of a refresh whose capture saw the vault change while it read (sysexits
+/// `EX_TEMPFAIL`): nothing was published, the previous snapshot stays, and a later
+/// refresh repeats the capture. Native runs defer on it rather than halting.
+pub(crate) const REFRESH_CAPTURE_CHANGED_EXIT: i32 = 75;
+
 /// Refresh derived SQLite discovery and its small entry guide. A failed capture
 /// never publishes the guide, and refresh does not manage other Markdown files.
 pub async fn run_refresh(
@@ -1328,13 +1335,21 @@ pub async fn run_refresh_with_wait(
     let session = super::publication::acquire_mutation(&root, wait_for_vault, &pin).await?;
     let plan = lk_vault::plan_navigation_entry(session.root(), locale, &dirs)
         .map_err(|error| miette::miette!("validate navigation entry: {error}"))?;
-    let snapshot = prepare_discovery_snapshot(
+    let snapshot = match prepare_discovery_snapshot(
         &session,
         &dirs,
         config
             .as_ref()
             .is_some_and(|config| config.graph.scope.follow_links),
-    )?;
+    ) {
+        Ok(snapshot) => snapshot,
+        Err(error @ lk_vault::VaultError::CitationCapture(_)) => {
+            drop(session);
+            eprintln!("Error: prepare discovery snapshot: {error}");
+            std::process::exit(REFRESH_CAPTURE_CHANGED_EXIT);
+        }
+        Err(error) => return Err(miette::miette!("prepare discovery snapshot: {error}")),
+    };
     eprintln!("Prepared navigation snapshot {}", snapshot.snapshot);
     pin.validate()?;
     super::workflow::validate_root(session.root())?;
@@ -1349,10 +1364,10 @@ fn prepare_discovery_snapshot(
     session: &lk_vault::MutationSession,
     dirs: &lk_core::config::VaultDirs,
     follow_links: bool,
-) -> miette::Result<lk_vault::SearchSnapshot> {
+) -> Result<lk_vault::SearchSnapshot, lk_vault::VaultError> {
     let captured =
         lk_graph::backlinks::capture_concept_citations(session.root(), dirs, follow_links)
-            .map_err(|error| miette::miette!("capture concept citations: {error}"))?;
+            .map_err(lk_graph::GraphError::into_vault_error)?;
     lk_vault::prepare_search_with_verified_citations(
         session,
         dirs,
@@ -1363,7 +1378,6 @@ fn prepare_discovery_snapshot(
                 .map_err(lk_graph::GraphError::into_vault_error)
         },
     )
-    .map_err(|error| miette::miette!("prepare discovery snapshot: {error}"))
 }
 
 async fn run_concepts(opts: &super::GlobalOptions, json: bool) -> miette::Result<()> {

@@ -71,6 +71,9 @@ paths:
   owners and the run's read control. A concept page reconciliation skips and a lint
   violation name their pages: they keep completion nonzero without halting or pausing.
   Failed reads, publication conflicts and checks that could not complete stay fatal.
+  Navigation refresh stays a child process so cancellation can stop its capture; its
+  capture-changed exit (`wiki refresh`, 75) records the stage failed and continues
+  without halting or pausing, keeping the previous snapshot for a later run.
   Their stage records carry the counts and the first skipped pages; `lore graph lint`
   and `lore graph backlinks-sync --dry-run` report the rest.
   Queue retirement runs inside the run under its own writer claim, after the first
