@@ -3164,6 +3164,9 @@ fn build_extraction_behavior(whole_input_handler: &str) -> String {
 if '\nNative request:\n' in prompt:
     prepared=json.loads(prompt.split('\nNative request:\n',1)[1])
     if prepared.get('kind')=='extraction-discovery':
+        failing=root/'fail-discovery'
+        if failing.exists() and prepared['subjects'][0]['path']==failing.read_text():
+            raise SystemExit(7)
         if (root/'require-unplanned-discovery').exists():
             assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
         assert (root/'vault'/prepared['subjects'][0]['path']).is_file()
@@ -3279,6 +3282,63 @@ fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
                 .contains("concepts_done:")
         );
     }
+}
+
+#[test]
+fn a_held_extraction_discovery_leaves_independent_extraction_running() {
+    let fixture = Fixture::new("codex", 30, &build_extraction_behavior(""));
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "  default_profile: primary\n",
+        "  default_profile: primary\n  work: {max_input_bytes: 65536, max_result_bytes: 1024, max_calls: 64}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    let root = fixture.root().join("vault");
+    let queue = root.join(".lorekeeper/queue");
+    std::fs::create_dir_all(root.join("wiki/documents")).unwrap();
+    std::fs::create_dir_all(&queue).unwrap();
+    let source = "Transactional outbox commits an event with its state change.\n\n".repeat(2000);
+    let mut lines = String::new();
+    for name in ["failing", "steady"] {
+        let path = format!("wiki/documents/{name}.md");
+        let request = lk_queue::ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            rss_original: None,
+            text: source.clone(),
+            source_id: "notes".into(),
+            source_type: lk_core::config::SourceType::Manual,
+            date: jiff::civil::date(2026, 10, 20),
+            focus: None,
+            locale: lk_core::i18n::Locale::En,
+            categories: Vec::new(),
+            target: lk_queue::TaskTarget {
+                vault_path: path.clone(),
+                kind: lk_queue::TargetKind::DocumentConcepts,
+                anchor: "## Related Concepts".into(),
+            },
+        };
+        let task = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
+            "ext",
+            lk_queue::TaskKind::ExtractConcepts,
+            request,
+        );
+        std::fs::write(root.join(&path), format!("---\ntype: document\ntitle: {name}\nllm_inputs:\n  concepts: {}\n---\n## Summary\nSource observation.\n\n## Content\n{source}\n\n## Related Concepts\n", task.cache_hash)).unwrap();
+        lines.push_str(&(serde_json::to_string(&task).unwrap() + "\n"));
+    }
+    std::fs::write(queue.join("fixture.jsonl"), lines).unwrap();
+    std::fs::write(
+        fixture.root().join("fail-discovery"),
+        "wiki/documents/failing.md",
+    )
+    .unwrap();
+    let (_, result) = fixture.run("process");
+    let read = |name: &str| {
+        std::fs::read_to_string(root.join(format!("wiki/documents/{name}.md"))).unwrap()
+    };
+    assert!(
+        read("steady").contains("concepts_done:"),
+        "independent extraction finishes after another discovery is held: {result}"
+    );
+    assert!(!read("failing").contains("concepts_done:"), "{result}");
 }
 
 #[test]

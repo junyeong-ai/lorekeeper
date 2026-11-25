@@ -976,9 +976,9 @@ mod native {
             );
         }
 
-        /// Discards queue planning after a held invocation failure: the next plan skips the held
-        /// request.
-        fn replan_after_host_failure(&mut self) {
+        /// Discards queue planning after a request was held: the next plan skips it and
+        /// continues with independent work.
+        fn replan_after_hold(&mut self) {
             self.queue_replan = QueueReplan::Invalidate;
             self.queue_admitted.clear();
         }
@@ -2855,7 +2855,7 @@ mod native {
                 }
             }
             if failed {
-                self.replan_after_host_failure();
+                self.replan_after_hold();
             }
             accepted && (usable || replanned || failed)
         }
@@ -3340,7 +3340,7 @@ mod native {
                     return WorkStep::Failed;
                 }
             };
-            self.replan_after_host_failure();
+            self.replan_after_hold();
             step
         }
 
@@ -3643,7 +3643,7 @@ mod native {
                     return match result {
                         Ok(Some(reason)) => {
                             self.deferred("whole-section invocation held", &reason);
-                            self.replan_after_host_failure();
+                            self.replan_after_hold();
                             WorkStep::Deferred(reason)
                         }
                         Ok(None) => {
@@ -3651,7 +3651,7 @@ mod native {
                                 "whole-section inputs changed",
                                 "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
                             );
-                            self.replan_after_host_failure();
+                            self.replan_after_hold();
                             WorkStep::Replan
                         }
                         Err(error) => {
@@ -3855,7 +3855,7 @@ mod native {
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::InputsChanged(error) => self.work_inputs_changed(stage, error),
                     ObservationStep::InvocationFailed => {
-                        self.replan_after_host_failure();
+                        self.replan_after_hold();
                         WorkStep::Deferred(format!("{id}: inspection invocation held"))
                     }
                     ObservationStep::Failed => WorkStep::Failed,
@@ -4798,7 +4798,7 @@ mod native {
                 self.record_work_step(step);
             }
             if failed {
-                self.replan_after_host_failure();
+                self.replan_after_hold();
             }
             accepted && (usable || failed)
         }

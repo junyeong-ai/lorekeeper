@@ -305,8 +305,12 @@ impl Runner<'_> {
         let queries = match outcome {
             Ok(queries) => queries,
             Err(disposition) => {
-                self.hold_discovery(&subject, &binding, Some(task), disposition, &mut metrics)
-                    .await;
+                if self
+                    .hold_discovery(&subject, &binding, Some(task), disposition, &mut metrics)
+                    .await
+                {
+                    self.replan_after_hold();
+                }
                 self.record_work_step(metrics);
                 return false;
             }
