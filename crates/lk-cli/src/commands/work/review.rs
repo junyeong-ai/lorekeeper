@@ -4,9 +4,12 @@
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
 //!
 //! Whether a question is already recorded is the finalizer's judgment over every scoped review
-//! it reads, so an open review never blocks a distinct question about the same concept. The run
-//! bounds the outcome instead: a target publishes at most one review per run, and a further
-//! proposal waits unrecorded for a later run, whose request then scopes the reviews published.
+//! it reads, so an open review never blocks a distinct question about the same concept. A
+//! proposal repeating a scoped review exactly (kind, title, judgment and evidence) is that
+//! review, not a new one: it publishes nothing and holds the task while its inputs stay
+//! current. The run bounds the rest: a target publishes at most one review per run, and a
+//! further proposal waits unrecorded for a later run, whose request then scopes the reviews
+//! published.
 
 use std::path::{Path, PathBuf};
 
@@ -114,6 +117,11 @@ pub(in crate::commands) fn admit(
         citations.push(citation);
         guards.insert(guard.path.clone(), guard);
     }
+    if let Some(recorded) = recorded(prepared, title, proposal.kind, &proposal.body, &citations)? {
+        return Ok(Err(format!(
+            "the proposal repeats the scoped review {recorded}; answer the synthesis with that review in scope"
+        )));
+    }
     let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null});
     let content = format!(
@@ -141,6 +149,40 @@ pub(in crate::commands) fn admit(
         Err(lk_vault::VaultError::Io(error)) => Err(error).into_diagnostic(),
         Err(error) => Ok(Err(format!("the review cannot be published: {error}"))),
     }
+}
+
+/// The scoped review this Work read that records the same question: the same kind, title,
+/// judgment and evidence, whatever its status.
+fn recorded(
+    prepared: &Prepared,
+    title: &str,
+    kind: lk_vault::ReviewKind,
+    body: &str,
+    evidence: &[Value],
+) -> miette::Result<Option<String>> {
+    let kind = serde_json::to_value(kind).into_diagnostic()?;
+    let evidence = Value::Array(evidence.to_vec());
+    for resource in &prepared.resources {
+        if resource.authority != SemanticAuthority::Review {
+            continue;
+        }
+        let Some(page) = prepared
+            .captured_page(&resource.address)
+            .and_then(|raw| lk_vault::parse_page(raw).ok())
+        else {
+            continue;
+        };
+        let fields = &page.frontmatter.fields;
+        let review = fields.get("review");
+        if fields.get("title").and_then(Value::as_str) == Some(title)
+            && review.and_then(|review| review.get("kind")) == Some(&kind)
+            && review.and_then(|review| review.get("evidence")) == Some(&evidence)
+            && page.body.trim() == body.trim()
+        {
+            return Ok(Some(resource.address.clone()));
+        }
+    }
+    Ok(None)
 }
 
 /// A read source page as page evidence: its source revision, guarded by its exact bytes.

@@ -109,11 +109,14 @@ paths:
   fault. The run then replans; the review enters the concept's scope through `subjects`,
   so the next finalization drafts against it. Whether a question is already recorded is
   the finalizer's judgment over every scoped review it reads; an open review about a
-  different question never refuses a proposal. A target publishes at most one review per
-  run, spent when it publishes: a further proposal in that run publishes and records
-  nothing and defers only that target, so a distinct question waits for a later run, whose
-  request scopes the reviews already published, and a repeating finalizer cannot loop
-  through paid calls. The published review records its `kind`. A synthesis capture names
+  different question never refuses a proposal. A proposal repeating a scoped review exactly
+  (kind, title, judgment and evidence, whatever its status) is that review: it publishes
+  nothing and records a refusal that holds the task while its inputs stay current, so a
+  finalizer that repeats a recorded question cannot add a file per run. A target publishes
+  at most one review per run, spent when it publishes: a further proposal in that run
+  publishes and records nothing and defers only that target, so a distinct question waits
+  for a later run, whose request scopes the reviews already published, and a repeating
+  finalizer cannot loop through paid calls. The published review records its `kind`. A synthesis capture names
   each open `evidence-gap` review whose subject owner is the concept in `evidence_gaps`
   (`work/gap.rs`). A synthesis result carries the defining claims in structured
   `gap_claims`; after the context revision check, publication refuses claims that do not

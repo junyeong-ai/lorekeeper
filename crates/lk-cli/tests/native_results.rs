@@ -645,24 +645,42 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             ),
         )
         .unwrap();
-        for (run, published) in [(1, 2), (2, 3)] {
-            let report = fixture.run();
-            assert!(!fixture.done(&task), "{planned}: {report}");
-            assert_eq!(report["halted"], false, "{report}");
-            assert_eq!(
-                report["retained_progress"]["synthesis_reviews"], 1,
-                "{run}: {report}"
-            );
-            assert_eq!(
-                report["retained_progress"]["action_receipts"], 0,
-                "a further proposal waits unrecorded instead of holding its task: {report}"
-            );
-            assert_eq!(
-                explorations.read_dir().unwrap().count(),
-                published,
-                "a distinct open question never refuses a new review; each run publishes one"
-            );
-        }
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{planned}: {report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(
+            explorations.read_dir().unwrap().count(),
+            2,
+            "a distinct open question never refuses a new review"
+        );
+        let report = fixture.run();
+        assert!(!fixture.done(&task), "{planned}: {report}");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 0,
+            "{report}"
+        );
+        assert_eq!(
+            report["retained_progress"]["action_receipts"], 1,
+            "a proposal repeating its scoped review holds the task: {report}"
+        );
+        assert_eq!(
+            explorations.read_dir().unwrap().count(),
+            2,
+            "the repeated proposal converges on the review it repeats"
+        );
+        let calls = fixture.calls();
+        let report = fixture.run();
+        assert_eq!(
+            fixture.calls(),
+            calls,
+            "the held request spends no call: {report}"
+        );
+        assert_eq!(explorations.read_dir().unwrap().count(), 2);
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();
