@@ -386,10 +386,9 @@ fn closed_gap_callouts(
     }
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
         .map_err(|e| format!("{e}"))?;
-    let concepts = lk_core::vault_path::concepts_dir(&rc.vault_dirs);
     for page in &views.scanned {
         if page.format.as_deref() != Some("concept")
-            || !page.path.starts_with(&concepts)
+            || !lk_core::vault_path::is_concept_page(&page.path, &rc.vault_dirs)
             || page.outgoing.is_empty()
         {
             continue;
