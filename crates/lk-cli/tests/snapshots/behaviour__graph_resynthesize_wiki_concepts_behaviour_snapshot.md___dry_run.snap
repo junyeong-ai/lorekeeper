@@ -5,4 +5,4 @@ expression: "observe(staged.path(), argv)"
 exit: 2
 --- stdout ---
 --- stderr ---
-error: I/O error: concept has no current citations
+error: concept has no current citations
