@@ -3628,10 +3628,18 @@ mod native {
                         Some(started.elapsed().as_millis() as u64);
                     metrics.outcome = WorkOutcome::Failed;
                     return match result {
-                        Ok(reason) => {
+                        Ok(Some(reason)) => {
                             self.deferred("whole-section invocation held", &reason);
                             self.replan_after_host_failure();
                             WorkStep::Deferred(reason)
+                        }
+                        Ok(None) => {
+                            self.deferred(
+                                "whole-section inputs changed",
+                                "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
+                            );
+                            self.replan_after_host_failure();
+                            WorkStep::Replan
                         }
                         Err(error) => {
                             self.failure("whole-section attempt recording", error);

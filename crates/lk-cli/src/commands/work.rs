@@ -4069,7 +4069,11 @@ pub(super) fn hold_result(
     prepared.guard_pages(&mut plan);
     match &prepared.subject {
         Subject::Queue { task_id, .. } => {
-            let task = super::queue::current_task(root, task_id)?;
+            let task = match super::queue::current_task(root, task_id) {
+                Ok(task) => task,
+                Err(error) if is_work_input_changed(&error) => return Ok(None),
+                Err(error) => return Err(error),
+            };
             let reason = generation::rejection::plan_record(
                 root,
                 generation::rejection::Binding {
@@ -4134,7 +4138,11 @@ pub(super) fn hold_section(
             "section finalization requires a queue subject"
         ));
     };
-    let task = super::queue::current_task(root, task_id)?;
+    let task = match super::queue::current_task(root, task_id) {
+        Ok(task) => task,
+        Err(error) if is_work_input_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let mut plan = lk_vault::MutationPlan::default();
     prepared.guard_pages(&mut plan);
     section.scope.guard_pages(&mut plan);

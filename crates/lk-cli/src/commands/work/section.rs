@@ -168,25 +168,20 @@ pub(in crate::commands) fn hold(
     config_revision: &str,
     section: Section,
     failure: super::state::InvocationFailure,
-) -> miette::Result<String> {
+) -> miette::Result<Option<String>> {
     let read = section.prepared.read_control().clone();
-    let Preparation::Ready(current) = prepare_controlled(
+    let current = match prepare_controlled(
         session,
         config,
         config_revision,
         &section.result.task_id,
         &read,
-    )?
-    else {
-        return Err(miette::miette!(
-            "section needs fresh preparation before retaining its invocation failure"
-        ));
+    ) {
+        Ok(Preparation::Ready(current)) if current.request == section.request => current,
+        Ok(_) => return Ok(None),
+        Err(error) if super::is_work_input_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
     };
-    if current.request != section.request {
-        return Err(miette::miette!(
-            "section inputs changed before retaining its invocation failure"
-        ));
-    }
     let mut plan = current.binding.plan_record(
         session.root(),
         super::preparation::Disposition::InvocationFailed { failure },
@@ -194,17 +189,22 @@ pub(in crate::commands) fn hold(
     current.prepared.guard_pages(&mut plan);
     let _queue =
         crate::commands::queue::claim_writer(&session.root().join(".lorekeeper/queue"), false)?;
-    let task = crate::commands::queue::current_task_controlled(
+    let task = match crate::commands::queue::current_task_controlled(
         session.root(),
         &section.result.task_id,
         &read,
-    )?;
+    ) {
+        Ok(task) => task,
+        Err(error) if super::is_work_input_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     crate::commands::queue::guard_current_task(session.root(), &task, &mut plan)?;
     read.check().into_diagnostic()?;
     session.apply(plan).into_diagnostic()?;
     current
         .binding
         .held(session.root())?
+        .map(Some)
         .ok_or_else(|| miette::miette!("section hold changed after recording"))
 }
 

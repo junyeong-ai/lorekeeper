@@ -492,7 +492,11 @@ pub(super) fn current_selected(
     let task_id = input["task"]["task_id"]
         .as_str()
         .ok_or_else(|| miette::miette!("missing selected task"))?;
-    let task = crate::commands::queue::current_task_controlled(root, task_id, read)?;
+    let task = match crate::commands::queue::current_task_controlled(root, task_id, read) {
+        Ok(task) => task,
+        Err(error) if super::is_work_input_changed(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     if task.kind == TaskKind::ExtractConcepts {
         let queries = input_queries(input)?;
         if super::discovery::current(root, &task)?.is_some_and(|current| current != queries) {
