@@ -156,7 +156,8 @@ paths:
   that configuration clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive
   failures of one configuration the run replans without the held requests and continues
   its independent work; at the limit the run admits no further call, through the same
-  gate as a spent call budget, for every later stage and drain, without pausing the
+  gate as a spent call budget, for every later stage and drain, and its campaign stops
+  (`host-fault`) instead of starting another batch, without pausing the
   scheduled operation or counting semantic progress, because a repeat points at a shared
   host fault. Signal exits,
   process cleanup failure, local I/O, unusable tool-enabled replies and unknown errors

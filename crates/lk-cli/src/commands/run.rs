@@ -651,6 +651,10 @@ mod native {
         semantic_calls: usize,
         recovered_section_proposals: usize,
         budget_exhausted: bool,
+        /// A host configuration reached `HOST_FAILURE_LIMIT`; no further call is admitted, in
+        /// this job or a later batch of its campaign.
+        #[serde(skip)]
+        host_fault: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         yield_reason: Option<YieldReason>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -682,6 +686,7 @@ mod native {
         Cancelled,
         AutomationLimit,
         Yielded,
+        HostFault,
     }
 
     impl JobResult {
@@ -698,6 +703,7 @@ mod native {
                 semantic_calls: 0,
                 recovered_section_proposals: 0,
                 budget_exhausted: false,
+                host_fault: false,
                 yield_reason: None,
                 automation: None,
                 work_telemetry: WorkTelemetry::default(),
@@ -722,6 +728,9 @@ mod native {
         fn campaign_stop(&self) -> CampaignStop {
             if self.cancelled {
                 return CampaignStop::Cancelled;
+            }
+            if self.host_fault {
+                return CampaignStop::HostFault;
             }
             if !self.is_halted()
                 && let Some(stop) = self.automation.as_ref().and_then(|report| report.stop)
@@ -814,8 +823,6 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
-        /// Set once a host configuration reaches `HOST_FAILURE_LIMIT`; no call is admitted after.
-        host_fault: bool,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -951,11 +958,11 @@ mod native {
         fn count_host_failure(&mut self, host: HostKey) {
             let count = self.host_failures.entry(host.clone()).or_default();
             *count += 1;
-            if *count < HOST_FAILURE_LIMIT || self.host_fault {
+            if *count < HOST_FAILURE_LIMIT || self.result.host_fault {
                 return;
             }
             let count = *count;
-            self.host_fault = true;
+            self.result.host_fault = true;
             let (role, channel, profile) = host;
             let name = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
             self.deferred(
@@ -2270,7 +2277,7 @@ mod native {
         }
 
         fn call_limit_available(&mut self) -> bool {
-            if self.host_fault {
+            if self.result.host_fault {
                 return false;
             }
             if let Some(control) = &mut self.automation {
@@ -7160,7 +7167,6 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
-            host_fault: false,
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
@@ -7310,6 +7316,19 @@ mod native {
             assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
             result.ok = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Settled);
+        }
+
+        #[test]
+        fn a_host_fault_ends_the_campaign_even_after_progress_or_a_yield() {
+            for operation in [Operation::Process, Operation::Knowledge] {
+                let mut result = JobResult::new(operation);
+                result.ok = false;
+                result.budget_exhausted = true;
+                result.work_telemetry.retained_progress.action_receipts = 1;
+                result.yield_reason = Some(YieldReason::WorkflowContention);
+                result.host_fault = true;
+                assert_eq!(result.campaign_stop(), CampaignStop::HostFault);
+            }
         }
 
         #[test]
