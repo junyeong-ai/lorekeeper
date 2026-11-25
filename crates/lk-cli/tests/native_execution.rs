@@ -3167,6 +3167,8 @@ if '\nNative request:\n' in prompt:
         failing=root/'fail-discovery'
         if failing.exists() and prepared['subjects'][0]['path']==failing.read_text():
             raise SystemExit(7)
+        if (root/'discovery-without-result').exists():
+            raise SystemExit()
         if (root/'require-unplanned-discovery').exists():
             assert not (root/'vault/.lorekeeper/work').exists(), 'discovery must precede bounded planning'
         assert (root/'vault'/prepared['subjects'][0]['path']).is_file()
@@ -3284,8 +3286,7 @@ fn oversized_extraction_records_discovery_before_planning_on_both_hosts() {
     }
 }
 
-#[test]
-fn a_held_extraction_discovery_leaves_independent_extraction_running() {
+fn oversized_extraction_fixture(names: &[&str]) -> (Fixture, PathBuf) {
     let fixture = Fixture::new("codex", 30, &build_extraction_behavior(""));
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
         "  default_profile: primary\n",
@@ -3298,7 +3299,7 @@ fn a_held_extraction_discovery_leaves_independent_extraction_running() {
     std::fs::create_dir_all(&queue).unwrap();
     let source = "Transactional outbox commits an event with its state change.\n\n".repeat(2000);
     let mut lines = String::new();
-    for name in ["failing", "steady"] {
+    for name in names {
         let path = format!("wiki/documents/{name}.md");
         let request = lk_queue::ExtractConceptsRequest {
             concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
@@ -3325,6 +3326,12 @@ fn a_held_extraction_discovery_leaves_independent_extraction_running() {
         lines.push_str(&(serde_json::to_string(&task).unwrap() + "\n"));
     }
     std::fs::write(queue.join("fixture.jsonl"), lines).unwrap();
+    (fixture, root)
+}
+
+#[test]
+fn a_held_extraction_discovery_leaves_independent_extraction_running() {
+    let (fixture, root) = oversized_extraction_fixture(&["failing", "steady"]);
     std::fs::write(
         fixture.root().join("fail-discovery"),
         "wiki/documents/failing.md",
@@ -3339,6 +3346,23 @@ fn a_held_extraction_discovery_leaves_independent_extraction_running() {
         "independent extraction finishes after another discovery is held: {result}"
     );
     assert!(!read("failing").contains("concepts_done:"), "{result}");
+}
+
+#[test]
+fn discoveries_returning_no_terminal_result_trip_the_breaker_like_failed_exits() {
+    let (fixture, _) = oversized_extraction_fixture(&["first", "second", "third"]);
+    std::fs::write(fixture.root().join("discovery-without-result"), "").unwrap();
+    let (_, result) = fixture.run("process");
+    let count = |name: &str| {
+        result["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stage| stage["name"] == name)
+            .count()
+    };
+    assert_eq!(count("host failures"), 1, "{result}");
+    assert_eq!(count("discovery input held"), 2, "{result}");
 }
 
 #[test]

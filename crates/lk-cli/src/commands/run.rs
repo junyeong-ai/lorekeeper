@@ -145,8 +145,12 @@ mod native {
         host_failure: Option<execution::diagnostic::HostFailure>,
         #[serde(skip)]
         channel: HostChannel,
-        /// The failed invocation is retried under its request's own allowance, so it is not yet
-        /// a repeat that points at the host.
+        /// The host ended without an answer (a timeout, a failed exit, or no terminal result),
+        /// as distinct from answering with an unusable one.
+        #[serde(skip)]
+        unanswered: bool,
+        /// The unanswered invocation is retried under its request's own allowance, so it is not
+        /// yet a repeat that points at the host.
         #[serde(skip)]
         retried: bool,
         work_id: Option<String>,
@@ -178,6 +182,7 @@ mod native {
                 execution: None,
                 host_failure: None,
                 channel: HostChannel::Observation,
+                unanswered: false,
                 retried: false,
                 work_id: None,
                 node_id: None,
@@ -932,11 +937,7 @@ mod native {
             {
                 step.outcome = WorkOutcome::Cancelled;
             }
-            if step
-                .host_failure
-                .as_ref()
-                .is_some_and(execution::diagnostic::HostFailure::is_invocation)
-            {
+            if step.unanswered {
                 if !step.retried {
                     self.count_host_failure(step.host());
                 }
@@ -1869,6 +1870,7 @@ mod native {
                     && self.configuration_is_current()
                 {
                     metrics.outcome = WorkOutcome::Failed;
+                    metrics.unanswered = true;
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
                         invocation.engine,
                         execution::diagnostic::Phase::Invocation,
@@ -1888,6 +1890,7 @@ mod native {
                     && self.configuration_is_current()
                 {
                     metrics.outcome = WorkOutcome::Failed;
+                    metrics.unanswered = true;
                     metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
                         invocation.engine,
                         execution::diagnostic::Phase::Invocation,
@@ -3059,11 +3062,13 @@ mod native {
                 ));
                 let engine = self.agent_profile(metrics).engine();
                 if let Some(code) = child.failed_exit() {
+                    metrics.unanswered = true;
                     return Some(ResultReply::InvocationFailed(
                         crate::commands::work::state::InvocationFailure::Exited { engine, code },
                     ));
                 }
                 if child.termination == execution::ChildTermination::TimedOut {
+                    metrics.unanswered = true;
                     return Some(ResultReply::InvocationFailed(
                         crate::commands::work::state::InvocationFailure::TimedOut { engine },
                     ));
@@ -3103,6 +3108,7 @@ mod native {
                     if matches!(access, execution::AgentAccess::ReadOnly)
                         && let execution::result::ResponseError::Remote { failure, .. } = error
                     {
+                        metrics.unanswered = true;
                         return Some(ResultReply::InvocationFailed(failure));
                     }
                     self.failure("native result response", error);
@@ -4651,6 +4657,7 @@ mod native {
                                 || child.termination == execution::ChildTermination::TimedOut =>
                         {
                             step.outcome = WorkOutcome::Failed;
+                            step.unanswered = true;
                             step.host_failure =
                                 Some(execution::diagnostic::HostFailure::from_child(
                                     engine,
