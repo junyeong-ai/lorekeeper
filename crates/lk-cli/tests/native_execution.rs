@@ -3179,6 +3179,11 @@ result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv 
 if result_role:
     prepared=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
     if prepared['schema'] in ['native-finalize-results-v5','native-finalize-frontier-v5']:
+        removal=root/'remove-selected-then-fail'
+        if removal.exists():
+            removal.unlink()
+            (root/'vault/wiki/documents/candidate-000.md').rename(root/'removed-candidate.md')
+            raise SystemExit(1)
         failure=root/'fail-next-finalizer'
         if failure.exists():
             failure.unlink()
@@ -4717,9 +4722,9 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         "full selected bodies remain guards after card screening"
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
-    std::fs::write(selected, selected_before).unwrap();
-    let failure = fixture.root().join("fail-next-finalizer");
-    std::fs::write(&failure, "").unwrap();
+    std::fs::write(&selected, selected_before).unwrap();
+    std::fs::write(fixture.root().join("remove-selected-then-fail"), "").unwrap();
+    let mut replaced = false;
     let mut held = false;
     let mut published = false;
     for _ in 0..24 {
@@ -4727,6 +4732,20 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         if output.status.success() {
             published = true;
             break;
+        }
+        let stages = report["stages"].as_array().unwrap();
+        if stages
+            .iter()
+            .any(|stage| stage["name"] == "native result inputs changed")
+        {
+            assert_eq!(
+                report["halted"], false,
+                "a selected candidate removed while its finalizer failed is changed scope: {report}"
+            );
+            std::fs::rename(fixture.root().join("removed-candidate.md"), &selected).unwrap();
+            std::fs::write(fixture.root().join("fail-next-finalizer"), "").unwrap();
+            replaced = true;
+            continue;
         }
         if let Some(stage) = report["stages"]
             .as_array()
@@ -4767,6 +4786,10 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         assert!(!consumption.exists());
     }
     assert!(published, "admitted bounded work must finish and publish");
+    assert!(
+        replaced,
+        "the failed finalizer of a removed candidate held nothing"
+    );
     assert!(held, "the failed finalizer was held before its retry");
     assert!(
         std::fs::read_to_string(target)

@@ -501,7 +501,7 @@ pub(super) fn current_selected(
         read,
     ) {
         Ok(prepared) => prepared,
-        Err(error) if super::is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) if super::is_work_input_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let mut prepared =

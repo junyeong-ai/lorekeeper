@@ -46,8 +46,7 @@ pub(in crate::commands) use selection::{
 use state::{Work, WorkLimits, WorkOutput};
 
 use super::queue::application::{
-    RejectionKind, is_citations_changed, is_semantic_context_changed,
-    rejection as publication_rejection,
+    RejectionKind, is_citations_changed, is_work_input_changed, rejection as publication_rejection,
 };
 
 #[derive(clap::Subcommand)]
@@ -4040,7 +4039,7 @@ pub(super) fn hold_result(
     let root = session.root();
     let (work, prepared) = match load_controlled(root, config, config_revision, id, read) {
         Ok(loaded) => loaded,
-        Err(error) if is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) if is_work_input_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let prepared = match with_current_roster(root, config, config_revision, &prepared, read)? {
@@ -4109,7 +4108,7 @@ pub(super) fn hold_section(
     let root = session.root();
     let (work, prepared) = match load_controlled(root, config, config_revision, id, read) {
         Ok(loaded) => loaded,
-        Err(error) if is_semantic_context_changed(&error) => return Ok(None),
+        Err(error) if is_work_input_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
     let Some((work, prepared)) =
@@ -5871,7 +5870,7 @@ mod tests {
             resources::ContextReading::Semantic
         );
         assert!(
-            is_semantic_context_changed(
+            super::super::queue::application::is_semantic_context_changed(
                 &load(&root, &config, &revision, &work.plan.id)
                     .err()
                     .unwrap()
