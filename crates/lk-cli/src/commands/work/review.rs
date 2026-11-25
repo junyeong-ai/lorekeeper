@@ -117,7 +117,15 @@ pub(in crate::commands) fn admit(
         citations.push(citation);
         guards.insert(guard.path.clone(), guard);
     }
-    if let Some(recorded) = recorded(prepared, title, proposal.kind, &proposal.body, &citations)? {
+    if let Some(recorded) = recorded(
+        root,
+        prepared,
+        &task.target.vault_path,
+        title,
+        proposal.kind,
+        &proposal.body,
+        &citations,
+    )? {
         return Ok(Err(format!(
             "the proposal repeats the scoped review {recorded}; answer the synthesis with that review in scope"
         )));
@@ -154,17 +162,26 @@ pub(in crate::commands) fn admit(
     }
 }
 
-/// The scoped review this Work read that records the same question: the same kind, title,
-/// judgment and evidence, whatever its status.
+/// The scoped review of `concept` this Work read that records the same question: the same
+/// kind, title, judgment and evidence set, whatever its status and evidence order.
 fn recorded(
+    root: &Path,
     prepared: &Prepared,
+    concept: &str,
     title: &str,
     kind: lk_vault::ReviewKind,
     body: &str,
     evidence: &[Value],
 ) -> miette::Result<Option<String>> {
     let kind = serde_json::to_value(kind).into_diagnostic()?;
-    let evidence = Value::Array(evidence.to_vec());
+    let evidence_set = |values: &[Value]| {
+        let mut set = values.iter().map(Value::to_string).collect::<Vec<_>>();
+        set.sort_unstable();
+        set
+    };
+    let evidence = evidence_set(evidence);
+    let owner = |address: &str| lk_vault::resolve_page_owner(root, Path::new(address)).ok();
+    let concept_owner = owner(concept);
     for resource in &prepared.resources {
         if resource.authority != SemanticAuthority::Review {
             continue;
@@ -177,9 +194,22 @@ fn recorded(
         };
         let fields = &page.frontmatter.fields;
         let review = fields.get("review");
+        let names_concept = review
+            .and_then(|review| review.get("subjects"))
+            .and_then(Value::as_array)
+            .is_some_and(|subjects| {
+                subjects
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|subject| owner(subject) == concept_owner)
+            });
         if fields.get("title").and_then(Value::as_str) == Some(title)
             && review.and_then(|review| review.get("kind")) == Some(&kind)
-            && review.and_then(|review| review.get("evidence")) == Some(&evidence)
+            && review
+                .and_then(|review| review.get("evidence"))
+                .and_then(Value::as_array)
+                .is_some_and(|recorded| evidence_set(recorded) == evidence)
+            && names_concept
             && page.body.trim() == body.trim()
         {
             return Ok(Some(resource.address.clone()));
