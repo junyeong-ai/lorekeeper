@@ -2166,7 +2166,11 @@ mod tests {
             };
         let work = persist(&tasks[0]);
         let original = std::fs::read_to_string(root.join(context)).unwrap();
-        let resynthesized = format!("{original}\nA resynthesized neighbor body.\n");
+        let resynthesized = lk_vault::replace_section(
+            &original,
+            "Synthesis",
+            "Context with a distinct authority.\nA resynthesized neighbor body.",
+        );
         write(&root, context, &resynthesized);
 
         let (continued, prepared) = resumed(&tasks[0]).unwrap();
@@ -2179,6 +2183,22 @@ mod tests {
             Some(resynthesized.as_str()),
             "publication still guards the live page"
         );
+        write(
+            &root,
+            context,
+            &format!("{resynthesized}\n## Notes\nThe limit is 9.\n"),
+        );
+        let (read_now, prepared) = resumed(&tasks[0]).unwrap();
+        assert_ne!(
+            read_now, work,
+            "an authored correction is read as it is now"
+        );
+        assert!(prepared.resources.iter().any(|resource| {
+            resource.address == context
+                && resource.text.contains("The limit is 9.")
+                && !resource.text.contains("A resynthesized neighbor body.")
+        }));
+        write(&root, context, &resynthesized);
         let (unsnapshotted, _) = resumed(&tasks[1]).unwrap();
         assert!(
             !unsnapshotted.is_planned(&root).unwrap(),

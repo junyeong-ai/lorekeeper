@@ -1,7 +1,8 @@
 //! A synthesis request's context snapshot: the exact bytes of each context-only page (a
 //! direct link or ranked discovery match) its Work read. A later preparation of the same
-//! request reads a page the snapshot holds from those bytes, so a neighbor's resynthesis
-//! does not replan the request; its subject, citations and reviews stay current reads, and
+//! request reads the sections Lore owns on such a page from those bytes and everything else
+//! as it is now, so a neighbor's resynthesis does not replan the request while an authored
+//! correction is read at once. Its subject, citations and reviews stay current reads, and
 //! live page bytes still guard publication. A page that joins the request's context is read
 //! as it is now; one that leaves it is dropped at the next record.
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,16 +76,17 @@ impl ContextSnapshot {
         })
     }
 
-    /// Binds the context pages captured now; an address the snapshot holds keeps its bytes.
+    /// Binds the context pages captured now; on an address the snapshot holds, the sections
+    /// Lore owns keep their recorded bodies.
     pub(super) fn bind(&mut self, captured: BTreeMap<String, String>) {
         let stored = self.stored.as_ref().map(|(_, pages)| pages);
         self.pages = captured
             .into_iter()
             .map(|(address, raw)| {
-                let raw = stored
-                    .and_then(|pages| pages.get(&address))
-                    .cloned()
-                    .unwrap_or(raw);
+                let raw = match stored.and_then(|pages| pages.get(&address)) {
+                    Some(stored) => compose(stored, &raw),
+                    None => raw,
+                };
                 (address, raw)
             })
             .collect();
@@ -181,6 +183,48 @@ pub(super) fn plan_prune(
     Ok(removed)
 }
 
+/// The sections Lore writes on a context page: a concept's synthesis, related concepts and
+/// sources list, and a document's summary and related concepts. Their bodies are derived and a
+/// later run rewrites them, so an edit there is not an authored correction.
+const OWNED_SECTIONS: [fn(&'static lk_core::i18n::Strings) -> &'static str; 5] = [
+    |s| s.concept_synthesis,
+    |s| s.related,
+    |s| s.concept_sources,
+    |s| s.summary,
+    |s| s.related_concepts,
+];
+
+/// `current` with the body of each section Lore owns taken from `stored`, byte for byte, where
+/// both pages carry that section once. Frontmatter and every other section stay current, so an
+/// authored correction is read at once while a neighbor's rewrite of its derived sections is
+/// not; equal pages compose to themselves.
+fn compose(stored: &str, current: &str) -> String {
+    let span = |content: &str, heading: &str| {
+        lk_vault::section_body(content, heading).map(|body| {
+            let start = body.as_ptr() as usize - content.as_ptr() as usize;
+            start..start + body.len()
+        })
+    };
+    let mut spans = Vec::new();
+    for section in OWNED_SECTIONS {
+        for heading in lk_vault::section_headings(section) {
+            if let (Some(old), Some(new)) = (span(stored, heading), span(current, heading)) {
+                spans.push((new, &stored[old]));
+            }
+        }
+    }
+    spans.sort_by_key(|(range, _)| range.start);
+    let mut composed = String::with_capacity(current.len());
+    let mut cursor = 0;
+    for (range, body) in spans {
+        composed.push_str(&current[cursor..range.start]);
+        composed.push_str(body);
+        cursor = range.end;
+    }
+    composed.push_str(&current[cursor..]);
+    composed
+}
+
 fn path(task_id: &str, cache_hash: &str) -> PathBuf {
     let digest = lk_core::rss_original::digest(
         &serde_json::to_vec(&(task_id, cache_hash)).expect("identity serializes"),
@@ -208,6 +252,30 @@ fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
 mod tests {
     use super::*;
 
+    fn page(synthesis: &str, note: &str) -> String {
+        format!(
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n\n{synthesis}\n\n## Notes\n\n{note}\n\n## Related\n\n## Sources\n"
+        )
+    }
+
+    #[test]
+    fn only_sections_lore_owns_keep_their_recorded_bodies() {
+        let stored = page("Limit is 5.", "Owner: platform.");
+        assert_eq!(compose(&stored, &stored), stored);
+        assert_eq!(
+            compose(&stored, &page("Limit is 7.", "Owner: platform.")),
+            stored
+        );
+        assert_eq!(
+            compose(&stored, &page("Limit is 7.", "Owner: data.")),
+            page("Limit is 5.", "Owner: data."),
+            "an authored correction beside a rewrite is read as it is now"
+        );
+        let renamed = stored.replace("title: Neighbor", "title: Renamed");
+        assert_eq!(compose(&stored, &renamed), renamed);
+        assert_eq!(compose(&stored, "not a page"), "not a page");
+    }
+
     #[test]
     fn a_recorded_snapshot_guards_its_bytes_and_retention_keeps_unrelated_files() {
         let directory = tempfile::tempdir().unwrap();
@@ -215,8 +283,10 @@ mod tests {
         let session = lk_vault::MutationSession::acquire(&root).unwrap();
         let read = lk_vault::ReadControl::default();
         let neighbor = "wiki/concepts/neighbor.md";
+        let first = page("Prior answer.", "Operational note.");
+        let second = page("Resynthesized answer.", "Operational note.");
         let mut snapshot = ContextSnapshot::load(&root, &read, "task", "hash").unwrap();
-        snapshot.bind(BTreeMap::from([(neighbor.into(), "first".into())]));
+        snapshot.bind(BTreeMap::from([(neighbor.into(), first.clone())]));
         let mut plan = lk_vault::MutationPlan::default();
         assert!(snapshot.plan_record(&root, &mut plan).unwrap());
         session.apply(plan).unwrap();
@@ -224,8 +294,8 @@ mod tests {
         assert!(!snapshot.plan_record(&root, &mut unchanged).unwrap());
 
         let mut reloaded = ContextSnapshot::load(&root, &read, "task", "hash").unwrap();
-        reloaded.bind(BTreeMap::from([(neighbor.into(), "second".into())]));
-        assert_eq!(reloaded.page(neighbor), Some("first"));
+        reloaded.bind(BTreeMap::from([(neighbor.into(), second)]));
+        assert_eq!(reloaded.page(neighbor), Some(first.as_str()));
 
         let file = root.join(path("task", "hash"));
         let raw = std::fs::read_to_string(&file).unwrap();
