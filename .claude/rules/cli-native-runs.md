@@ -144,14 +144,18 @@ paths:
   observations and semantic actions through the mutation journal; they are not retained
   semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
   tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
-  Preserve valid wave peers; a wave with only invocation failures, in any native role,
-  ends the current run without pausing the scheduled operation or counting semantic
-  progress. A confirmed timeout or numeric nonzero exit of a tool-enabled finalizer,
-  after completed process-group cleanup, holds only its exact request and ends the run the same way: each
-  queue task's input in its native generation receipt, each audit subject's context as an
-  audit-assessment preparation attempt. Inputs the host changed before failing are not
-  held; they are prepared afresh. Signal exits, process cleanup failure, local I/O,
-  unusable tool-enabled replies and unknown errors remain fatal.
+  A confirmed timeout or numeric nonzero exit of a tool-enabled finalizer, after completed
+  process-group cleanup, holds only its exact request: each queue task's input in its
+  native generation receipt, each audit subject's context as an audit-assessment
+  preparation attempt. Inputs the host changed before failing are not held; they are
+  prepared afresh. Preserve valid wave peers. An invocation failure counts against its
+  host configuration (role and execution profile); an answered call on that
+  configuration clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive failures of
+  one configuration the run replans without the held requests and continues its
+  independent work; at the limit it ends without pausing the scheduled operation or
+  counting semantic progress, because a repeat points at a shared host fault. Signal exits,
+  process cleanup failure, local I/O, unusable tool-enabled replies and unknown errors
+  remain fatal.
   `work retry` clears only a current operational hold or exhausted timeout allowance;
   `work hold` suspends an exact ready node without invoking a host or granting refinement.
   Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.

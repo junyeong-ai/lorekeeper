@@ -25,6 +25,8 @@ def encode(output):
     return encoded
 if mode=='host-exit' and (request.get('kind')=='finalize-section' or request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']):
     raise SystemExit(7)
+if mode=='host-exit-target' and request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5'] and 'concepts/failing.md' in raw:
+    raise SystemExit(7)
 if mode in ['host-failure','host-envelope-error']:
     print(json.dumps({'type':'result','subtype':'error_during_execution','is_error':True,'errors':['PRIVATE_CANARY_ERROR']}))
     raise SystemExit(1 if mode=='host-failure' else 0)
@@ -157,6 +159,70 @@ struct Fixture {
     directory: tempfile::TempDir,
     config: PathBuf,
     engine: String,
+}
+
+#[test]
+fn a_failed_finalizer_is_held_while_independent_work_publishes_in_the_same_run() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 64"),
+    )
+    .unwrap();
+    let (failing, _) = fixture.add("failing", lk_queue::TaskKind::SynthesizeConcept, true);
+    let (steady, _) = fixture.add("steady", lk_queue::TaskKind::SynthesizeConcept, true);
+    std::fs::write(fixture.root().join("mode"), "host-exit-target").unwrap();
+    let report = fixture.run();
+    let stages = |name: &str| {
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stage| stage["name"] == name)
+            .count()
+    };
+    assert_eq!(report["halted"], false, "{report}");
+    assert!(!fixture.done(&failing), "{report}");
+    assert!(
+        fixture.done(&steady),
+        "independent work publishes after another target's host failure: {report}"
+    );
+    assert_eq!(stages("native result invocation held"), 1, "{report}");
+    assert_eq!(stages("host failures"), 0, "{report}");
+}
+
+#[test]
+fn consecutive_host_failures_end_the_run_without_spending_further_calls() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 64"),
+    )
+    .unwrap();
+    let tasks = ["first", "second", "third"].map(|name| {
+        fixture
+            .add(name, lk_queue::TaskKind::SynthesizeConcept, true)
+            .0
+    });
+    std::fs::write(fixture.root().join("mode"), "host-exit").unwrap();
+    let report = fixture.run();
+    let names = report["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| stage["name"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let count = |name: &str| names.iter().filter(|stage| *stage == name).count();
+    assert_eq!(report["halted"], false, "{report}");
+    assert!(tasks.iter().all(|task| !fixture.done(task)));
+    assert_eq!(
+        count("native result invocation held"),
+        2,
+        "the second consecutive finalizer failure ends the run: {report}"
+    );
+    assert_eq!(count("host failures"), 1, "{report}");
 }
 
 #[test]

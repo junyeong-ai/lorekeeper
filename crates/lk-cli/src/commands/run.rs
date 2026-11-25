@@ -107,7 +107,7 @@ mod native {
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
-    #[derive(Clone, Copy, Serialize)]
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum WorkRole {
         Discovery,
@@ -288,7 +288,7 @@ mod native {
         Deferred(String),
         /// The Work's inputs changed while its host ran; the reply is discarded unrecorded.
         InputsChanged(miette::Report),
-        InvocationFailed,
+        InvocationFailed(HostKey),
         Failed,
     }
 
@@ -382,6 +382,16 @@ mod native {
         Replan,
         Failed,
     }
+
+    /// The host configuration a call ran on, by role and execution profile: a failure of one
+    /// configuration says nothing about another.
+    type HostKey = (WorkRole, Option<String>);
+
+    /// Consecutive invocation failures of one host configuration, with no answered call on it
+    /// between them, that end a run. One failure is usually its own request's and is held or replanned while the run
+    /// continues; a repeat points at a fault shared by every request, which further calls
+    /// would only spend.
+    const HOST_FAILURE_LIMIT: usize = 2;
 
     const FINALIZATION_CHANGED_AGAIN: &str =
         "finalizer inputs changed again after fresh replanning; retained for a later run";
@@ -569,6 +579,17 @@ mod native {
         host: RequestedExecution,
         policy_profile: String,
         work: lk_core::execution::SemanticWorkConfig,
+    }
+
+    impl WorkStepMetrics {
+        fn host(&self) -> HostKey {
+            (
+                self.role,
+                self.execution
+                    .as_ref()
+                    .map(|execution| execution.profile.clone()),
+            )
+        }
     }
 
     #[derive(Clone, Serialize)]
@@ -774,6 +795,7 @@ mod native {
         project_protection: Option<crate::commands::installation::Protection>,
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
+        host_failures: std::collections::BTreeMap<HostKey, usize>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -883,7 +905,49 @@ mod native {
             {
                 step.outcome = WorkOutcome::Cancelled;
             }
+            if step.agent_duration_ms.is_some()
+                && step.host_failure.is_none()
+                && !matches!(
+                    step.outcome,
+                    WorkOutcome::Failed | WorkOutcome::Cancelled | WorkOutcome::Yielded
+                )
+            {
+                self.host_failures.remove(&step.host());
+            }
             self.result.work_telemetry.record(step);
+        }
+
+        /// Counts invocations that ended without an answer, one per entry of `failed`. While
+        /// every host configuration stays below `HOST_FAILURE_LIMIT` consecutive failures the
+        /// run continues with its other work and replans without the failed requests; at the
+        /// limit it ends, recording which configuration failed.
+        fn continues_after_host_failures(
+            &mut self,
+            failed: impl IntoIterator<Item = HostKey>,
+        ) -> bool {
+            let mut exhausted = None;
+            for host in failed {
+                let count = self.host_failures.entry(host.clone()).or_default();
+                *count += 1;
+                if *count >= HOST_FAILURE_LIMIT {
+                    exhausted = Some((host, *count));
+                }
+            }
+            let Some(((role, profile), count)) = exhausted else {
+                self.queue_replan = QueueReplan::Invalidate;
+                self.queue_admitted.clear();
+                return true;
+            };
+            let role = serde_json::to_value(role).expect("role serializes");
+            self.deferred(
+                "host failures",
+                format!(
+                    "{count} consecutive {} invocations on profile {} failed without an answer; the run ends so a shared host fault spends no further calls",
+                    role.as_str().unwrap_or_default(),
+                    profile.as_deref().unwrap_or("unknown")
+                ),
+            );
+            false
         }
 
         fn deferred(&mut self, name: &str, detail: impl std::fmt::Display) -> bool {
@@ -2002,7 +2066,7 @@ mod native {
                             "{node}: {reason}; use lore work retry {id} {node} after diagnosis"
                         ),
                     );
-                    ObservationStep::InvocationFailed
+                    ObservationStep::InvocationFailed(metrics.host())
                 }
                 Ok(InspectionRecordOutcome::TimedOut { remaining }) => {
                     metrics.outcome = WorkOutcome::Failed;
@@ -2673,7 +2737,7 @@ mod native {
                 mut returned,
             } = decoded;
             let mut usable = false;
-            let mut held = false;
+            let mut failed = Vec::new();
             let mut replanned = false;
             if !returned.is_empty() {
                 match recorded {
@@ -2712,9 +2776,11 @@ mod native {
                                 }
                                 usable |= !matches!(
                                     step,
-                                    ObservationStep::InvocationFailed | ObservationStep::Failed
+                                    ObservationStep::InvocationFailed(_) | ObservationStep::Failed
                                 );
-                                held |= matches!(step, ObservationStep::InvocationFailed);
+                                if let ObservationStep::InvocationFailed(host) = step {
+                                    failed.push(host);
+                                }
                             }
                             self.record_work_step(turn.metrics);
                         }
@@ -2733,8 +2799,11 @@ mod native {
                     }
                 }
             }
-            if usable && held {
+            if usable && !failed.is_empty() {
                 self.queue_replan = QueueReplan::Invalidate;
+            }
+            if accepted && !usable && !replanned && !failed.is_empty() {
+                return self.continues_after_host_failures(failed);
             }
             accepted && (usable || replanned)
         }
@@ -3199,23 +3268,30 @@ mod native {
             let held = hold(self, &session);
             drop(session);
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
-            match held {
+            let step = match held {
                 Ok(reasons) if reasons.is_empty() => {
                     self.deferred(
                         "native result inputs changed",
                         "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
                     );
+                    WorkStep::Replan
                 }
                 Ok(reasons) => {
-                    for reason in reasons {
+                    for reason in &reasons {
                         self.deferred("native result invocation held", reason);
                     }
+                    WorkStep::Deferred(reasons.join("; "))
                 }
                 Err(error) => {
                     self.failure("native result invocation hold", error);
+                    return WorkStep::Failed;
                 }
+            };
+            if self.continues_after_host_failures([metrics.host()]) {
+                step
+            } else {
+                WorkStep::Failed
             }
-            WorkStep::Failed
         }
 
         async fn selected_result_step(
@@ -3514,15 +3590,20 @@ mod native {
                     metrics.revalidation_record_duration_ms =
                         Some(started.elapsed().as_millis() as u64);
                     metrics.outcome = WorkOutcome::Failed;
-                    match result {
+                    return match result {
                         Ok(reason) => {
-                            self.deferred("whole-section invocation held", reason);
+                            self.deferred("whole-section invocation held", &reason);
+                            if self.continues_after_host_failures([metrics.host()]) {
+                                WorkStep::Deferred(reason)
+                            } else {
+                                WorkStep::Failed
+                            }
                         }
                         Err(error) => {
                             self.failure("whole-section attempt recording", error);
+                            WorkStep::Failed
                         }
-                    }
-                    return WorkStep::Failed;
+                    };
                 }
             };
             let result = crate::commands::work::section::finish(
@@ -3718,7 +3799,13 @@ mod native {
                     | ObservationStep::Retry => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::InputsChanged(error) => self.work_inputs_changed(stage, error),
-                    ObservationStep::InvocationFailed => WorkStep::Failed,
+                    ObservationStep::InvocationFailed(host) => {
+                        if self.continues_after_host_failures([host]) {
+                            WorkStep::Deferred(format!("{id}: inspection invocation held"))
+                        } else {
+                            WorkStep::Failed
+                        }
+                    }
                     ObservationStep::Failed => WorkStep::Failed,
                 },
                 crate::commands::work::NativeStep::Finalization {
@@ -4582,7 +4669,7 @@ mod native {
                 mut metrics,
             } = decoded;
             let mut usable = false;
-            let mut held = false;
+            let mut failed = Vec::new();
             if let Some((recorded, total_duration_ms)) = recorded {
                 match recorded {
                     Ok(recorded) => {
@@ -4607,7 +4694,7 @@ mod native {
                                     ),
                                 ) => {
                                     step.outcome = WorkOutcome::Failed;
-                                    held = true;
+                                    failed.push(step.host());
                                     self.queue_admitted.clear();
                                     self.deferred("candidate invocation held", reason);
                                 }
@@ -4658,8 +4745,11 @@ mod native {
                 }
                 self.record_work_step(step);
             }
-            if usable && held {
+            if usable && !failed.is_empty() {
                 self.queue_replan = QueueReplan::Invalidate;
+            }
+            if accepted && !usable && !failed.is_empty() {
+                return self.continues_after_host_failures(failed);
             }
             accepted && usable
         }
@@ -7027,6 +7117,7 @@ mod native {
             project_protection: None,
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
+            host_failures: std::collections::BTreeMap::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,

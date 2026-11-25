@@ -39,7 +39,7 @@ paths:
   confirmed timeout/numeric exit after completed process-group cleanup. Their
   latest per-parent attempts stay separate from semantic actions and paid decisions;
   unchanged input holds survive instruction-contract changes. Only semantic needs-action
-  earns action progress; an all-failed invocation wave ends the run as cli-native-runs.md
+  earns action progress; repeated invocation failures end the run as cli-native-runs.md
   states. Queue pruning retains pending task/cache attempts; maintenance removes audit
   attempts only for absent subjects under workflow coordination.
   `work retry-preparation` requires its stage, task/path selector and exact reported input

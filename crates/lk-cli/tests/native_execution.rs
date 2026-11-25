@@ -6332,7 +6332,13 @@ BATCH"#;
         }
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 1, "{report}");
-        assert_eq!(report["queue_planning"]["attempts"], 1, "{report}");
+        // A failed summary invocation is held and the run replans for its other work, which
+        // the exhausted call budget then retains.
+        assert_eq!(
+            report["queue_planning"]["attempts"],
+            if start_at_summary { 2 } else { 1 },
+            "{report}"
+        );
         assert_eq!(
             report["queue_planning"]["prepared_targets"],
             if start_at_summary { 1 } else { 2 },
