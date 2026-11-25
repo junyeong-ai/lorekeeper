@@ -1138,16 +1138,24 @@ mod native {
                 &self.config,
                 &session,
                 self.supervisor.read_control(),
-            );
+            )
+            .and_then(|report| {
+                crate::commands::graph::request_closed_gap_resyntheses_in_session(
+                    &self.config,
+                    &session,
+                    self.supervisor.read_control(),
+                )
+                .map(|closed| (report, closed))
+            });
             drop(session);
             if !self.configuration_is_current() {
                 return false;
             }
-            let report = match synchronized {
-                Ok(report) => report,
+            let (report, closed_gaps) = match synchronized {
+                Ok(synchronized) => synchronized,
                 Err(error) => return self.failure(name, error),
             };
-            let detail = format!(
+            let mut detail = format!(
                 "{} updated, {} queued, {} owed a synthesis ({} replacing written sections)",
                 report.changed,
                 report.queued,
@@ -1159,6 +1167,12 @@ mod native {
                     .filter(|owed| !owed.discarding.is_empty())
                     .count()
             );
+            if !closed_gaps.is_empty() {
+                detail.push_str(&format!(
+                    "; {} synthesis request(s) for evidence-gap callouts whose review closed",
+                    closed_gaps.len()
+                ));
+            }
             let skipped = &report.sync.skipped;
             if skipped.is_empty() {
                 return self.record(name, StageState::Completed, Some(detail));

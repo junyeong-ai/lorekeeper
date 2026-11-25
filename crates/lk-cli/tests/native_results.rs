@@ -695,6 +695,35 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             concept.contains("> [!gap] These defining claims await supporting evidence.\n> - The protocol is deployed in production.\n>\n> Evidence gap review: [Deployment status disagreement](../explorations/deployment-status-disagreement.md)"),
             "Rust renders the callout with the claims and an exact review reference: {concept}"
         );
+        let review_path = fixture
+            .root()
+            .join("vault/wiki/explorations/deployment-status-disagreement.md");
+        let resolved = review
+            .replace("\"status\":\"open\"", "\"status\":\"resolved\"")
+            .replace(
+                "\"resolution\":null",
+                "\"resolution\":\"The operator confirmed the deployment.\"",
+            );
+        assert_ne!(resolved, review);
+        std::fs::write(&review_path, resolved).unwrap();
+        let report = fixture.run();
+        assert!(
+            report["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["detail"].as_str().is_some_and(|detail| {
+                    detail.contains("evidence-gap callouts whose review closed")
+                })
+            }),
+            "{report}"
+        );
+        let concept =
+            std::fs::read_to_string(fixture.root().join("vault").join(&task.target.vault_path))
+                .unwrap();
+        assert!(
+            !concept.contains("[!gap]")
+                && concept
+                    .contains("The source reports a proposal; its deployment remains unknown."),
+            "a closed review's callout is resynthesized away: {concept}"
+        );
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();

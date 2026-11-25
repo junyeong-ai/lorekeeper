@@ -351,6 +351,48 @@ pub(crate) fn backlinks_sync_in_session(
     synchronize_backlinks(&rc, &views.scanned, false, Some(session), read)
 }
 
+/// Requests a resynthesis of every concept whose published evidence-gap callout references a
+/// review that is no longer an open evidence gap of that concept, so the callout follows the
+/// review's state. A request already pending for the same citations is reused. Returns the
+/// concepts newly requested.
+pub(crate) fn request_closed_gap_resyntheses_in_session(
+    config: &lk_core::config::Config,
+    session: &lk_vault::MutationSession,
+    read: &lk_vault::ReadControl,
+) -> Result<Vec<PathBuf>, String> {
+    let rc = ResolvedConfig::from_config(session.root().to_path_buf(), Some(config));
+    if rc.llm.provider != lk_core::config::LlmProvider::Queue {
+        return Ok(Vec::new());
+    }
+    let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
+        .map_err(|e| format!("{e}"))?;
+    let concepts = lk_core::vault_path::concepts_dir(&rc.vault_dirs);
+    let mut requested = Vec::new();
+    for page in &views.scanned {
+        if page.format.as_deref() != Some("concept")
+            || !page.path.starts_with(&concepts)
+            || page.outgoing.is_empty()
+        {
+            continue;
+        }
+        let (raw, _) = read
+            .page_text(&rc.root.join(&page.path))
+            .map_err(|e| format!("{}: {e}", page.path.display()))?;
+        let concept = page.path.to_string_lossy();
+        if !super::work::references_closed_review(&rc.root, &concept, &raw)
+            .map_err(|e| e.to_string())?
+        {
+            continue;
+        }
+        let response =
+            resynthesize::request(&rc, &views.scanned, &page.path, false, Some(session))?;
+        if response["data"]["already_pending"] == false {
+            requested.push(page.path.clone());
+        }
+    }
+    Ok(requested)
+}
+
 async fn run_inner(
     opts: &GlobalOptions,
     cmd: GraphCommand,

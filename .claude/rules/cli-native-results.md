@@ -127,10 +127,13 @@ paths:
   for a review without that record). An empty list answers that recovered citations
   support every claim, so it is refused while any gap was judged against these exact
   citations; otherwise it publishes no callout and leaves the review to reassessment, so
-  recovered evidence never holds the request. A completed synthesis is not
-  rewritten when its review is later resolved; that takes an explicit resynthesis. Observers record a disagreement as a finding or source
-  question, never as an `unresolved` processing blocker, so bounded Work reaches this
-  finalizer.
+  recovered evidence never holds the request. A published callout follows its reviews:
+  when one it references is no longer an open evidence gap of the concept (resolved,
+  another kind, other subjects or removed), the run's backlink reconciliation requests that
+  concept's resynthesis through `graph resynthesize`, reusing a pending request; only the
+  reference lines Rust renders count, never a link inside a claim. Observers record a
+  disagreement as a finding or source question, never as an `unresolved` processing
+  blocker, so bounded Work reaches this finalizer.
 - Native extraction reuse replies select a task-local `owner_ref` from its complete
   admitted-owner roster, which presents references and paths, never revisions. Rust
   expands it to the unchanged canonical path/file-revision contract with the file revision

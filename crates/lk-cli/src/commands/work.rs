@@ -11,6 +11,7 @@ mod action;
 pub(super) mod audit;
 mod discovery;
 mod gap;
+pub(in crate::commands) use gap::references_closed_review;
 #[cfg(unix)]
 pub(super) mod generation;
 #[cfg(unix)]

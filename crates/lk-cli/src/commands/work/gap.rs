@@ -133,6 +133,77 @@ pub(super) fn render(
     callout
 }
 
+/// The reviews a published callout in `body` references, as vault addresses resolved from
+/// `concept`. Only the reference lines `render` writes count, never a link inside a claim.
+fn callout_references(concept: &str, body: &str) -> Vec<PathBuf> {
+    let labels = Locale::ALL
+        .iter()
+        .map(|locale| format!("> {}: ", locale.strings().evidence_gap_review))
+        .collect::<Vec<_>>();
+    let mut references = Vec::new();
+    let mut inside = false;
+    for line in lk_core::markdown::lines_with_endings(body) {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.starts_with("> [!gap] ") {
+            inside = true;
+            continue;
+        }
+        inside &= line.starts_with('>');
+        let Some(reference) = labels
+            .iter()
+            .filter(|_| inside)
+            .find_map(|label| line.strip_prefix(label.as_str()))
+            .and_then(lk_core::link::parse_standalone_page_link)
+            .and_then(|link| lk_core::link::resolve_dest(Path::new(concept), &link.dest))
+        else {
+            continue;
+        };
+        references.push(reference);
+    }
+    references
+}
+
+/// Whether the callout published on `concept` (whose page is `raw`) references a review that is
+/// no longer an open evidence-gap review of the concept: resolved, of another kind, about other
+/// subjects or removed. That callout no longer matches its reviews, so the synthesis is owed
+/// again. A review that cannot be read or parsed is left to review health, not counted.
+pub(in crate::commands) fn references_closed_review(
+    root: &Path,
+    concept: &str,
+    raw: &str,
+) -> miette::Result<bool> {
+    let Ok(page) = lk_core::frontmatter::parse_page(raw) else {
+        return Ok(false);
+    };
+    let owner = |address: &Path| lk_vault::resolve_page_owner(root, address).ok();
+    let concept_owner = owner(Path::new(concept));
+    for reference in callout_references(concept, &page.body) {
+        let raw = match std::fs::read_to_string(root.join(&reference)) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error) => return Err(miette::miette!("read {}: {error}", reference.display())),
+        };
+        let Some(review) = lk_core::frontmatter::parse_page(&raw)
+            .ok()
+            .and_then(|page| page.frontmatter.get("review").cloned())
+            .and_then(|value| serde_json::from_value::<lk_vault::KnowledgeReview>(value).ok())
+        else {
+            continue;
+        };
+        let names_concept = review
+            .subjects
+            .iter()
+            .any(|subject| owner(Path::new(subject)) == concept_owner);
+        if review.status != lk_vault::ReviewStatus::Open
+            || review.kind != Some(lk_vault::ReviewKind::EvidenceGap)
+            || !names_concept
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// The open evidence-gap reviews a synthesis context captured.
 pub(super) fn from_context(context: &serde_json::Value) -> miette::Result<Vec<EvidenceGap>> {
     match context["purpose"]["parameters"].get("evidence_gaps") {
@@ -158,6 +229,53 @@ mod tests {
         format!(
             "---\ntype: exploration\ntitle: |-\n  Definition\n  gap\nreview:\n  status: {status}\n  kind: {kind}\n  subjects: [{subject}]\n  evidence: []\n  resolution: null\n---\nThe definition lacks support.\n"
         )
+    }
+
+    #[test]
+    fn a_callout_follows_only_its_reference_lines_to_each_review_state() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
+        std::fs::create_dir_all(root.join("wiki/explorations")).unwrap();
+        let concept = "wiki/concepts/topic.md";
+        std::fs::write(root.join(concept), "---\ntype: concept\n---\n").unwrap();
+        let gap = EvidenceGap {
+            path: "wiki/explorations/gap.md".into(),
+            title: "Gap".into(),
+            citations_changed: false,
+        };
+        let claims = ["See [the old question](../explorations/closed.md).".to_owned()];
+        let page = format!(
+            "---\ntype: concept\n---\n## Synthesis\nBody.\n\n{}",
+            render(Locale::Ko, concept, &[gap], &claims)
+        );
+        std::fs::write(
+            root.join("wiki/explorations/closed.md"),
+            review("evidence-gap", "resolved", concept),
+        )
+        .unwrap();
+        let write = |status: &str, kind: &str| {
+            std::fs::write(
+                root.join("wiki/explorations/gap.md"),
+                review(kind, status, concept),
+            )
+            .unwrap()
+        };
+        write("open", "evidence-gap");
+        assert!(
+            !references_closed_review(root, concept, &page).unwrap(),
+            "an open gap keeps its callout, and a link inside a claim is no reference"
+        );
+        write("resolved", "evidence-gap");
+        assert!(references_closed_review(root, concept, &page).unwrap());
+        write("open", "conflict");
+        assert!(references_closed_review(root, concept, &page).unwrap());
+        std::fs::remove_file(root.join("wiki/explorations/gap.md")).unwrap();
+        assert!(references_closed_review(root, concept, &page).unwrap());
+        assert!(
+            !references_closed_review(root, concept, "---\ntype: concept\n---\nNo callout.\n")
+                .unwrap()
+        );
     }
 
     #[test]
