@@ -2223,8 +2223,14 @@ fn frontier_finalization_keeps_exact_action_and_fresh_scope_guards() {
             .join(plan["work_id"].as_str().unwrap());
         std::fs::write(fixture.root().join("mode"), mode).unwrap();
         let report = fixture.run();
-        assert!(!fixture.done(&task), "{mode}: {report}");
         assert!(!directory.join("frontier-seal.json").exists());
+        // A target the host keeps changing never settles. A newly scoped review replans the
+        // Work, whose unchanged inspections are reused, so it publishes within the budget.
+        assert_eq!(
+            fixture.done(&task),
+            mode == "changed-review",
+            "{mode}: {report}"
+        );
         // Changed scope replans without halting; the host's changed review is itself invalid,
         // which review health treats as fatal.
         assert_eq!(

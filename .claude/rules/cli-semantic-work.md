@@ -42,7 +42,10 @@ paths:
 - A newly persisted Work reuses, through the attributed reuse path and its page guards,
   the observation of each unrefined inspection whose content revision (partition policy,
   semantic purpose and exact assigned evidence) another stored Work recorded fresh.
-  `.lorekeeper/cache/observations/` maps a content revision to that origin; only fresh
+  The semantic purpose is the Work context without its subject and without the inventory
+  of its other resources (selected owners, scoped review set, audit screening state): an
+  inspection reads only its assigned ranges, so a changed roster around identical evidence
+  keeps the observation. `.lorekeeper/cache/observations/` maps a content revision to that origin; only fresh
   unrefined inspection records enter it, inside their own journal. A missing origin is a
   miss. The index is disposable: maintenance rebuilds it from stored Work and drops
   entries whose origin is gone. Existing Works, reductions and refined nodes are never

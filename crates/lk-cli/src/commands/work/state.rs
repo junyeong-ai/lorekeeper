@@ -677,6 +677,21 @@ fn encoded(value: &impl Serialize) -> miette::Result<String> {
     serde_json::to_string(value).map_err(fail)
 }
 
+/// Removes the resource inventory a Work purpose records beside what it reads for.
+fn without_inventory(purpose: &mut Value) {
+    let Some(purpose) = purpose.as_object_mut() else {
+        return;
+    };
+    purpose.remove("review_dependencies");
+    purpose.remove("audit_selection");
+    if let Some(scope) = purpose
+        .get_mut("extraction_scope")
+        .and_then(Value::as_object_mut)
+    {
+        scope.remove("selected");
+    }
+}
+
 fn revision(value: &impl Serialize) -> miette::Result<String> {
     let value = serde_json::to_value(value).map_err(fail)?;
     fn sort(value: Value) -> Value {
@@ -998,14 +1013,22 @@ impl Work {
         Ok(())
     }
 
+    /// What this Work reads its evidence for: its context without the subject and without the
+    /// inventory of other resources it holds (selected owners, the scoped review set, the
+    /// audit screening state). An inspection reads only its assigned ranges, which its part
+    /// binds exactly, so the inventory around it does not change what it observes.
     fn semantic_purpose(&self) -> miette::Result<Value> {
         let mut context = self
             .context
             .as_object()
             .cloned()
             .ok_or_else(|| fail("invalid work context"))?;
-        if !context.contains_key("purpose") {
-            return Err(fail("work has no semantic purpose"));
+        let purpose = context
+            .get_mut("purpose")
+            .ok_or_else(|| fail("work has no semantic purpose"))?;
+        without_inventory(purpose);
+        if let Some(scope) = purpose.pointer_mut("/parameters/knowledge_scope") {
+            without_inventory(scope);
         }
         context.remove("subject");
         Ok(Value::Object(context))

@@ -315,6 +315,59 @@ mod tests {
     }
 
     #[test]
+    fn resource_inventory_beside_the_purpose_keeps_identical_inspections_reusable() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = sources();
+        let scoped = |subject: &str, selected: &[&str], inventory: &str| {
+            let mut context = context(subject);
+            context["purpose"]["extraction_scope"] =
+                json!({"policy": "screened", "selected": selected});
+            context["purpose"]["review_dependencies"] = json!({"revision": inventory});
+            context["purpose"]["audit_selection"] = json!({"revision": inventory});
+            context["purpose"]["parameters"] = json!({"knowledge_scope": {
+                "path": "wiki/concepts/owner.md",
+                "review_dependencies": {"revision": inventory},
+                "audit_selection": {"revision": inventory},
+            }});
+            context
+        };
+        let old = Work::create(
+            &session,
+            &source,
+            "old",
+            scoped("old", &["wiki/concepts/a.md"], "first"),
+            limits(),
+        )
+        .unwrap();
+        observe_all(&old, &session, &source);
+
+        let moved = Work::create(
+            &session,
+            &source,
+            "new",
+            scoped("new", &["wiki/concepts/b.md"], "secnd"),
+            limits(),
+        )
+        .unwrap();
+        assert_ne!(moved.plan.id, old.plan.id);
+        assert_eq!(
+            moved.reuse_recorded(&session, &source, |_| {}).unwrap(),
+            moved.plan.parts.len()
+        );
+
+        let mut policy = scoped("policy", &["wiki/concepts/a.md"], "first");
+        policy["purpose"]["extraction_scope"]["policy"] = "full-context".into();
+        let policy = Work::create(&session, &source, "policy", policy, limits()).unwrap();
+        assert_eq!(policy.reuse_recorded(&session, &source, |_| {}).unwrap(), 0);
+
+        let mut scope = scoped("scope", &["wiki/concepts/a.md"], "first");
+        scope["purpose"]["parameters"]["knowledge_scope"]["path"] = "wiki/concepts/other.md".into();
+        let scope = Work::create(&session, &source, "scope", scope, limits()).unwrap();
+        assert_eq!(scope.reuse_recorded(&session, &source, |_| {}).unwrap(), 0);
+    }
+
+    #[test]
     fn maintenance_rebuilds_the_index_and_drops_origins_that_are_gone() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
