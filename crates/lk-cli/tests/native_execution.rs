@@ -3179,6 +3179,10 @@ result_role='--output-last-message' in sys.argv or ('--json-schema' in sys.argv 
 if result_role:
     prepared=json.loads(Path(os.environ['TEST_INTERACTIVE_INPUT']).read_text().split('\nNative request:\n',1)[1])
     if prepared['schema'] in ['native-finalize-results-v5','native-finalize-frontier-v5']:
+        failure=root/'fail-next-finalizer'
+        if failure.exists():
+            failure.unlink()
+            raise SystemExit(1)
         output={'results':[{'status':'complete','value':{'concepts':[]},'reason':None}]}
         with (root/'bounded-calls.jsonl').open('a') as stream:
             stream.write(json.dumps({'action':'finish','work_id':(prepared.get('completed') or prepared['frontier'])['work_id']})+'\n')
@@ -4714,12 +4718,44 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
     );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), before);
     std::fs::write(selected, selected_before).unwrap();
+    let failure = fixture.root().join("fail-next-finalizer");
+    std::fs::write(&failure, "").unwrap();
+    let mut held = false;
     let mut published = false;
     for _ in 0..24 {
         let (output, report) = fixture.run("process");
         if output.status.success() {
             published = true;
             break;
+        }
+        if let Some(stage) = report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["name"] == "native result invocation held")
+        {
+            assert_eq!(
+                report["halted"], false,
+                "a failed finalizer of screened evidence is held, not a stopped job: {report}"
+            );
+            let detail = stage["detail"].as_str().unwrap();
+            let revision = detail
+                .split_once("retained native generation input ")
+                .and_then(|(_, rest)| rest.split(';').next())
+                .unwrap();
+            execution_json(
+                &fixture,
+                &[
+                    "work",
+                    "retry-generation",
+                    "--task-id",
+                    &task.task_id,
+                    "--input-revision",
+                    revision,
+                ],
+            );
+            held = true;
+            continue;
         }
         assert!(
             report["stages"].as_array().unwrap().iter().any(|stage| {
@@ -4731,6 +4767,7 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         assert!(!consumption.exists());
     }
     assert!(published, "admitted bounded work must finish and publish");
+    assert!(held, "the failed finalizer was held before its retry");
     assert!(
         std::fs::read_to_string(target)
             .unwrap()

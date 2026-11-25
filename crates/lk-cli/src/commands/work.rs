@@ -4043,6 +4043,10 @@ pub(super) fn hold_result(
         Err(error) if is_semantic_context_changed(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
+    let prepared = match with_current_roster(root, config, config_revision, &prepared, read)? {
+        RosterAdmission::Bound(prepared) => *prepared,
+        RosterAdmission::Changed(_) => return Ok(None),
+    };
     let Some(completed) =
         current_result_finalization(root, config, &work, &prepared, &result.request, result.kind)?
     else {
