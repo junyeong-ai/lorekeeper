@@ -6378,6 +6378,15 @@ fn native_queue_preserves_interactive_batching_and_stops_at_capability_boundarie
                 r#"{"queue":"wiki/documents/source-002.md","audit":null}"#,
             )
             .unwrap();
+            // The summary host reads its whole request before answering nothing, so the
+            // failure is an unanswered invocation on every platform's pipe capacity.
+            let agent = fixture.root().join("agent executable");
+            let script = std::fs::read_to_string(&agent).unwrap();
+            std::fs::write(
+                agent,
+                script.replacen("exit 0", "/bin/cat > /dev/null\nexit 0", 1),
+            )
+            .unwrap();
         } else {
             let agent = fixture.root().join("agent executable");
             let script = std::fs::read_to_string(&agent).unwrap();
