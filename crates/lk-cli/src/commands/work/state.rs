@@ -932,10 +932,16 @@ impl Work {
     ) -> miette::Result<Self> {
         let work = Self::build(resources, subject_revision, context, limits)?
             .with_saved_policy(session.root())?;
-        work.persist(session)
+        work.persist(session, MutationPlan::default())
     }
 
-    pub fn persist(self, session: &MutationSession) -> miette::Result<Self> {
+    /// Persists this Work and `companion`, the records that describe it, in one journal;
+    /// an already stored Work journals only `companion`.
+    pub fn persist(
+        self,
+        session: &MutationSession,
+        companion: MutationPlan,
+    ) -> miette::Result<Self> {
         require_settled(session.root())?;
         let path = work_path(&self.plan.id, "plan.json")?;
         let before = read_optional(session.root(), &path)?;
@@ -947,14 +953,16 @@ impl Work {
                 "work id is occupied by a different manifest or context",
             ));
         }
-        if before.is_some() {
-            return Ok(self);
-        }
         let mut mutation = MutationPlan::default();
-        mutation
-            .publish_expected(session.root(), path, before, after)
-            .map_err(fail)?;
-        session.apply(mutation).map_err(fail)?;
+        if before.is_none() {
+            mutation
+                .publish_expected(session.root(), path, before, after)
+                .map_err(fail)?;
+        }
+        mutation.extend(companion);
+        if mutation.has_changes() {
+            session.apply(mutation).map_err(fail)?;
+        }
         Ok(self)
     }
 

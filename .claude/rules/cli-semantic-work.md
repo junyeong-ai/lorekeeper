@@ -39,17 +39,29 @@ paths:
   with `read_as` before comparing it (roster admission). A stored Work continues through the
   Work protocol whatever its part count. 0.144.0's line projection is not reconstructed: its
   Work replans, and a hold bound only to an input revision follows the semantic reading.
+- A synthesis request reads its context-only pages (direct links and ranked discovery
+  matches no subject, citation or review evidence also reads) from its context snapshot
+  (`work/snapshot.rs`, `.lorekeeper/queue/context/`): the exact page bytes its Work first
+  read, recorded in the journal that persists its Work and guarded wherever the request is
+  staged or published; a request that never persisted Work has none and reads its pages as
+  they are now. A neighbor's resynthesis therefore does not replan the request, which would
+  otherwise rarely finish while its neighbors keep changing; a published synthesis is
+  likewise not refreshed when a neighbor later changes.
+  Membership still binds: a page that joins the context is read as it is now, one that
+  leaves is dropped at the next record. Live bytes stay in `Prepared.pages`, so publication
+  still guards every page as it is. Extraction owners and audit related pages read current
+  bytes: reuse publication writes an owner, and audit currency has its own contract.
 - A newly persisted Work reuses, through the attributed reuse path and its page guards,
   the observation of each unrefined inspection whose content revision (partition policy,
   semantic purpose and exact assigned evidence) another stored Work recorded fresh.
   The semantic purpose is the Work context without its subject and without the inventory
   of its other resources (selected owners, scoped review set, audit screening state): an
   inspection reads only its assigned ranges, so a changed roster around identical evidence
-  keeps the observation. `.lorekeeper/cache/observations/` maps a content revision to that origin; only fresh
-  unrefined inspection records enter it, inside their own journal. A missing origin is a
-  miss. The index is disposable: maintenance rebuilds it from stored Work and drops
-  entries whose origin is gone. Existing Works, reductions and refined nodes are never
-  seeded.
+  keeps the observation. `.lorekeeper/cache/observations/` maps a content revision to that
+  origin; only fresh unrefined inspection records enter it, inside their own journal. A
+  missing origin is a miss. The index is disposable: maintenance rebuilds it from stored
+  Work and drops entries whose origin is gone. Existing Works, reductions and refined
+  nodes are never seeded.
 - `work source` reuses fresh Work capture to page one planned resource: `--resource`
   selects it by roster index, and its default is the unique retained task input. A queue
   Work's native finalizer can therefore reread a cited page or selected owner that a lossy

@@ -447,7 +447,7 @@ mod tests {
         let work =
             Work::build_with_inspection(&source, "subject", context("subject"), limits(), policy)
                 .unwrap()
-                .persist(&session)
+                .persist(&session, lk_vault::MutationPlan::default())
                 .unwrap();
         let (_, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
         let request = &requests[0];

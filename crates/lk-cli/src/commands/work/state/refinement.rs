@@ -789,7 +789,7 @@ mod tests {
                 Some(lk_core::semantic::INSPECTION_CHARACTERS),
             )
             .unwrap()
-            .persist(&session)
+            .persist(&session, lk_vault::MutationPlan::default())
             .unwrap();
             let first = &work.plan.parts[0].id;
             work.record(
@@ -1608,7 +1608,7 @@ mod tests {
                 Some(lk_core::semantic::INSPECTION_CHARACTERS),
             )
             .unwrap()
-            .persist(&session)
+            .persist(&session, lk_vault::MutationPlan::default())
             .unwrap();
             let original = std::fs::read(
                 root.path()

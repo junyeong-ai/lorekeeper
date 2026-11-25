@@ -312,6 +312,10 @@ fn prepare_with_classifier(
             "extraction discovery recipe(s)",
             super::super::work::plan_prune_discovery(root, &retained_pending, &mut plan)?,
         ));
+        removed.push((
+            "synthesis context snapshot(s)",
+            super::super::work::plan_prune_context_snapshots(root, &retained_pending, &mut plan)?,
+        ));
         let screening = super::super::work::plan_prune_screening(
             root,
             &pending,

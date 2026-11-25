@@ -10,9 +10,9 @@ paths:
 
 ## Queue retirement
 
-- Prepare queue retirement and related rejection/action/discovery/screening cleanup before
-  publishing one guarded mutation plan. Preview validates the same plan without recovery
-  or canonical writes. Skip guard-only journals; empty screening-directory cleanup follows
+- Prepare queue retirement and related rejection/action/discovery/screening/context-snapshot
+  cleanup before publishing one guarded mutation plan. Preview validates the same plan
+  without recovery or canonical writes. Skip guard-only journals; empty screening-directory cleanup follows
   successful publication and can resume separately.
 - Retirement classifications retain their same-read target and cited-source dependencies,
   including absence and RSS membership snapshots. Guard only classifications that retire
@@ -176,7 +176,8 @@ paths:
   `max_query_candidates`, so the roster does not depend on the execution profile; byte
   limits and the other configuration still shape the request and its Work. A page matched
   through several spellings is read through its own address when a query matched it.
-  It never waits for audit screening decisions.
+  It never waits for audit screening decisions. Its context-only pages come from the
+  request's context snapshot (cli-semantic-work.md).
 - A synthesis request answers the citation set it was made for. Drafting, preparation
   and publication refuse it (`citations-changed`) once the concept's graph citations
   captured with its context differ, whatever order reconciliation and application run

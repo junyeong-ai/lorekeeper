@@ -24,6 +24,7 @@ mod review;
 #[cfg(unix)]
 pub(super) mod section;
 mod selection;
+mod snapshot;
 mod source;
 pub(crate) mod state;
 pub(super) mod workload;
@@ -404,7 +405,9 @@ fn persist_prepared(
 ) -> miette::Result<Work> {
     let work = expected(session.root(), prepared, config, config_revision)?;
     let created = !work.is_planned(session.root())?;
-    let work = work.persist(session)?;
+    let mut snapshot = lk_vault::MutationPlan::default();
+    prepared.plan_snapshot(session.root(), &mut snapshot)?;
+    let work = work.persist(session, snapshot)?;
     if created {
         work.reuse_recorded(session, &prepared.resources, |mutation| {
             prepared.guard_pages(mutation)
@@ -429,6 +432,7 @@ fn guard_prepared(
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound && expected.plan.parts.len() == 1 =>
         {
+            prepared.guard_snapshot(mutation);
             return Ok(false);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -1024,6 +1028,14 @@ pub(super) fn plan_prune_discovery(
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
     discovery::plan_prune(root, pending, plan)
+}
+
+pub(super) fn plan_prune_context_snapshots(
+    root: &Path,
+    pending: &std::collections::BTreeSet<(String, String)>,
+    plan: &mut lk_vault::MutationPlan,
+) -> miette::Result<usize> {
+    snapshot::plan_prune(root, pending, plan)
 }
 
 pub(super) fn plan_prune_screening(
@@ -5479,7 +5491,7 @@ mod tests {
                 policy,
             )
             .unwrap()
-            .persist(&session)
+            .persist(&session, lk_vault::MutationPlan::default())
             .unwrap();
             let (_, requests) = work
                 .prepare_inspections(root.path(), &resources, 2)

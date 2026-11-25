@@ -2370,7 +2370,7 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
             let should_apply = matches!(
                 scenario,
                 "current" | "unrelated-review" | "config-formatting" | "operational-config-changed"
-            );
+            ) || (bounded && scenario == "related-changed");
             for dry in [true, false] {
                 let out = if dry {
                     ws.run(&["queue", "apply", "--dry-run"])

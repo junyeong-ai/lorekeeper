@@ -554,7 +554,7 @@ mod tests {
             Some(lk_core::semantic::INSPECTION_CHARACTERS),
         )
         .unwrap()
-        .persist(&session)
+        .persist(&session, lk_vault::MutationPlan::default())
         .unwrap();
         let (progress, requests) = work.prepare_inspections(root.path(), &source, 2).unwrap();
         assert_eq!(requests.len(), 2);
@@ -615,7 +615,7 @@ mod tests {
             Some(lk_core::semantic::INSPECTION_CHARACTERS),
         )
         .unwrap()
-        .persist(&session)
+        .persist(&session, lk_vault::MutationPlan::default())
         .unwrap();
         let manifest = std::fs::read(
             root.path()

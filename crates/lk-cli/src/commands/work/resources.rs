@@ -57,6 +57,11 @@ pub(super) struct Prepared {
     pub context: Value,
     pub resources: Vec<SemanticResource>,
     pub pages: BTreeMap<PathBuf, String>,
+    /// Addresses read under an authority other than context: a subject, citation or review
+    /// evidence stays a current read even where the same page is also context.
+    strict_reads: BTreeSet<String>,
+    /// A synthesis request's context snapshot, which its context-only pages are read from.
+    snapshot: Option<super::snapshot::ContextSnapshot>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
     pub(super) selected_owners: Option<BTreeSet<String>>,
     /// The current candidate roster that admits this screened evidence. Result completion
@@ -157,6 +162,61 @@ impl Prepared {
         self.captured_page(address).map(file_revision)
     }
 
+    /// The bytes a context resource is read from: its snapshot bytes when the request holds a
+    /// snapshot of it, otherwise the captured page.
+    fn context_page(&self, address: &str) -> Option<&str> {
+        self.snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.page(address))
+            .or_else(|| self.captured_page(address))
+    }
+
+    /// Reads every context-only page from `snapshot`, which binds them as captured now
+    /// unless it already holds them.
+    fn with_snapshot(
+        mut self,
+        mut snapshot: super::snapshot::ContextSnapshot,
+    ) -> miette::Result<Self> {
+        let mut captured = BTreeMap::new();
+        for resource in &self.resources {
+            if resource.authority != SemanticAuthority::Context
+                || self.strict_reads.contains(&resource.address)
+            {
+                continue;
+            }
+            let raw = self.captured_page(&resource.address).ok_or_else(|| {
+                miette::miette!("context page was not captured: {}", resource.address)
+            })?;
+            captured.insert(resource.address.clone(), raw.to_owned());
+        }
+        snapshot.bind(captured);
+        self.snapshot = Some(snapshot);
+        let reading = self.reading;
+        for resource in &mut self.resources {
+            if let Some(raw) = self
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.page(&resource.address))
+            {
+                resource.text = reading.text(raw);
+                resource.revision = file_revision(&resource.text);
+            }
+        }
+        Ok(self)
+    }
+
+    /// Records this request's context snapshot unless it already holds these pages.
+    pub(super) fn plan_snapshot(
+        &mut self,
+        root: &Path,
+        plan: &mut lk_vault::MutationPlan,
+    ) -> miette::Result<bool> {
+        match &mut self.snapshot {
+            Some(snapshot) => snapshot.plan_record(root, plan),
+            None => Ok(false),
+        }
+    }
+
     /// The exact bytes captured for a page, whatever reading its resource presents.
     pub(super) fn captured_page(&self, address: &str) -> Option<&str> {
         self.pages
@@ -181,7 +241,7 @@ impl Prepared {
             if resource.authority != SemanticAuthority::Context {
                 continue;
             }
-            let raw = self.captured_page(&resource.address).ok_or_else(|| {
+            let raw = self.context_page(&resource.address).ok_or_else(|| {
                 miette::miette!("context page was not captured: {}", resource.address)
             })?;
             resource.text = reading.text(raw);
@@ -275,9 +335,17 @@ impl Prepared {
         Ok(lk_core::rss_original::digest(&bytes))
     }
 
+    /// Guards every captured page and the context snapshot the preparation read.
     pub fn guard_pages(&self, plan: &mut lk_vault::MutationPlan) {
         for (path, content) in &self.pages {
             plan.require_unchanged(path, content.clone());
+        }
+        self.guard_snapshot(plan);
+    }
+
+    pub(super) fn guard_snapshot(&self, plan: &mut lk_vault::MutationPlan) {
+        if let Some(snapshot) = &self.snapshot {
+            snapshot.guard(plan);
         }
     }
 }
@@ -289,6 +357,7 @@ struct Capture<'a> {
     root: &'a Path,
     pages: BTreeMap<PathBuf, String>,
     resources: BTreeMap<String, SemanticResource>,
+    strict_reads: BTreeSet<String>,
 }
 
 impl<'a> Capture<'a> {
@@ -300,6 +369,7 @@ impl<'a> Capture<'a> {
             reading: ContextReading::Semantic,
             pages: BTreeMap::new(),
             resources: BTreeMap::new(),
+            strict_reads: BTreeSet::new(),
         }
     }
 
@@ -317,6 +387,7 @@ impl<'a> Capture<'a> {
                 .cloned()
                 .map(|resource| (resource.address.clone(), resource))
                 .collect(),
+            strict_reads: prepared.strict_reads.clone(),
         }
     }
 
@@ -362,6 +433,9 @@ impl<'a> Capture<'a> {
             ));
         }
         let address = lk_core::vault_path::address(&relative);
+        if authority != SemanticAuthority::Context {
+            self.strict_reads.insert(address.clone());
+        }
         let text = match authority {
             SemanticAuthority::Context => self.reading.text(&raw),
             _ => raw.clone(),
@@ -456,6 +530,8 @@ impl<'a> Capture<'a> {
             context,
             resources: self.resources.into_values().collect(),
             pages: self.pages,
+            strict_reads: self.strict_reads,
+            snapshot: None,
             audit_reviews: None,
             selected_owners: None,
             roster: None,
@@ -1060,6 +1136,7 @@ fn capture_task_with_audit_controlled(
         };
         graph_citations = Some(lk_core::concept::citation_digest(&candidate.evidence));
         let scoped = knowledge_candidate_controlled(root, config, candidate, read)?;
+        captured.strict_reads.extend(scoped.strict_reads);
         for resource in scoped.resources {
             captured
                 .resources
@@ -1096,6 +1173,11 @@ fn capture_task_with_audit_controlled(
     });
     let mut prepared = captured.finish(subject, context, config);
     prepared.graph_citations = graph_citations;
+    if task.kind == lk_queue::TaskKind::SynthesizeConcept {
+        let snapshot =
+            super::snapshot::ContextSnapshot::load(root, read, &task.task_id, &task.cache_hash)?;
+        prepared = prepared.with_snapshot(snapshot)?;
+    }
     Ok(prepared)
 }
 
@@ -1774,6 +1856,8 @@ mod tests {
             context: json!({"purpose":{"review_dependencies":[review]}}),
             resources: Vec::new(),
             pages: BTreeMap::new(),
+            strict_reads: BTreeSet::new(),
+            snapshot: None,
             roster: None,
             graph_citations: None,
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
@@ -2063,6 +2147,97 @@ mod tests {
             &refresh(&root, &config, "config-revision", &prepared.context).unwrap(),
         );
     }
+    #[test]
+    fn a_synthesis_request_reads_context_from_its_snapshot_and_everything_else_current() {
+        let (directory, config, tasks, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let (context, source, revision) = ("wiki/concepts/context.md", "daily/source.md", "config");
+        let persist = |task: &lk_queue::QueueTask| {
+            let mut prepared = task_with_audit(&root, &config, &task.task_id, None).unwrap();
+            let session = lk_vault::MutationSession::acquire(&root).unwrap();
+            super::super::persist_prepared(&session, &config, revision, &mut prepared).unwrap()
+        };
+        let resumed =
+            |task: &lk_queue::QueueTask| -> miette::Result<(super::super::Work, Prepared)> {
+                let mut prepared = task_with_audit(&root, &config, &task.task_id, None)?;
+                let work = super::super::expected(&root, &mut prepared, &config, revision)?;
+                Ok((work, prepared))
+            };
+        let work = persist(&tasks[0]);
+        let original = std::fs::read_to_string(root.join(context)).unwrap();
+        let resynthesized = format!("{original}\nA resynthesized neighbor body.\n");
+        write(&root, context, &resynthesized);
+
+        let (continued, prepared) = resumed(&tasks[0]).unwrap();
+        assert_eq!(
+            continued, work,
+            "a neighbor's resynthesis keeps the request's Work"
+        );
+        assert_eq!(
+            prepared.captured_page(context),
+            Some(resynthesized.as_str()),
+            "publication still guards the live page"
+        );
+        let (unsnapshotted, _) = resumed(&tasks[1]).unwrap();
+        assert!(
+            !unsnapshotted.is_planned(&root).unwrap(),
+            "a request without a snapshot reads the page as it is now"
+        );
+
+        let cited = std::fs::read_to_string(root.join(source)).unwrap();
+        write(
+            &root,
+            source,
+            &format!("{cited}\nA changed source claim.\n"),
+        );
+        assert!(
+            !resumed(&tasks[0]).is_ok_and(|(current, _)| current == work),
+            "a changed citation is a current read"
+        );
+        write(&root, source, &cited);
+        assert_eq!(resumed(&tasks[0]).unwrap().0, work);
+
+        let citation = lk_core::concept::Citation::new(
+            Path::new(context),
+            &lk_vault::parse_page(&resynthesized).unwrap(),
+        );
+        write(
+            &root,
+            "wiki/explorations/neighbor.md",
+            &format!(
+                "---\ntype: exploration\ntitle: Neighbor assessment\nreview:\n  status: open\n  subjects: [wiki/concepts/a.md]\n  evidence: [{{path: {context}, revision: {}}}]\n---\n## Question\nDoes the neighbor hold?\n",
+                citation.revision
+            ),
+        );
+        let (strict, prepared) = resumed(&tasks[0]).unwrap();
+        assert_ne!(
+            strict, work,
+            "review evidence is a current read even where it is context"
+        );
+        assert!(prepared.resources.iter().any(|resource| {
+            resource.address == context && resource.text.contains("A resynthesized neighbor body.")
+        }));
+        std::fs::remove_file(root.join("wiki/explorations/neighbor.md")).unwrap();
+
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        let pending = |task: &lk_queue::QueueTask| {
+            BTreeSet::from([(task.task_id.clone(), task.cache_hash.clone())])
+        };
+        let mut plan = lk_vault::MutationPlan::default();
+        let kept =
+            super::super::snapshot::plan_prune(&root, &pending(&tasks[0]), &mut plan).unwrap();
+        assert_eq!(kept, 0);
+        let removed =
+            super::super::snapshot::plan_prune(&root, &pending(&tasks[1]), &mut plan).unwrap();
+        assert_eq!(removed, 1);
+        session.apply(plan).unwrap();
+        drop(session);
+        assert!(
+            !resumed(&tasks[0]).unwrap().0.is_planned(&root).unwrap(),
+            "without its snapshot the request reads the neighbor as it is now"
+        );
+    }
+
     #[test]
     fn synthesis_reads_a_fixed_ranked_roster_and_only_its_own_audit_records() {
         let (directory, config, tasks, _) = synthesis_batch_fixture();
