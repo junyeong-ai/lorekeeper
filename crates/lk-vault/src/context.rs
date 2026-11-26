@@ -1,7 +1,7 @@
 use std::path::{Component, Path};
 
 use lk_core::config::VaultDirs;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde::Serialize;
 
 use crate::{
@@ -108,7 +108,7 @@ pub fn inspect_page_context(
         .to_str()
         .ok_or_else(|| std::io::Error::other("page address is not UTF-8"))?;
     let database = crate::page_path(root, Path::new(search_index::INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = crate::search_index::open_read_only(&database)?;
     let transaction = connection.transaction()?;
     search_index::verify_snapshot(&transaction, root, dirs, options.snapshot)?;
     let capture = search_index::read_snapshot(&transaction)?;

@@ -238,7 +238,10 @@ Cards and guard bytes exist only for roster members; `discover_queries` stays co
   scheduled refresh must commit beside them rather than fail on their lock. Converting an
   older rollback-journal index still needs the database alone; that and any other busy
   index is `VaultError::is_search_index_busy`, which refresh reports like a changed capture
-  (retry later, previous snapshot kept).
+  (retry later, previous snapshot kept). Every read-only open goes through
+  `search_index::open_read_only`: when SQLite cannot create the WAL sidecars (a
+  read-only directory) and no `-wal` file exists, the main database holds every commit
+  and is read `immutable=1`; a leftover `-wal` keeps the read-only error.
   Final graph verification may supply exact file revisions and verified page owners
   for overlapping search inputs. Enumerate the complete search inventory independently,
   check owners and read uncovered paths; never reuse initial or prior-phase proofs.

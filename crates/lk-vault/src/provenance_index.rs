@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use lk_core::config::VaultDirs;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -210,10 +210,10 @@ pub(super) fn inspect(
     options: &ProvenanceOptions<'_>,
     snapshot: &str,
 ) -> Result<ProvenanceReport, VaultError> {
-    let mut connection = Connection::open_with_flags(
-        crate::page_path(root, Path::new(crate::search_index::INDEX_PATH))?,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let mut connection = crate::search_index::open_read_only(&crate::page_path(
+        root,
+        Path::new(crate::search_index::INDEX_PATH),
+    )?)?;
     let transaction = connection.transaction()?;
     crate::search_index::verify_snapshot(&transaction, root, dirs, snapshot)?;
     inspect_captured(&transaction, path, options, snapshot)

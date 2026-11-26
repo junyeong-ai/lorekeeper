@@ -3,7 +3,7 @@
 use std::path::{Component, Path};
 
 use lk_core::{config::VaultDirs, frontmatter::KnowledgeStatus};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 
 use crate::{VaultError, search_index};
@@ -85,7 +85,7 @@ pub fn inspect_indexed_neighbors(
         .to_str()
         .ok_or_else(|| std::io::Error::other("page address is not UTF-8"))?;
     let database = crate::page_path(root, Path::new(search_index::INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = crate::search_index::open_read_only(&database)?;
     let transaction = connection.transaction()?;
     search_index::verify_snapshot(&transaction, root, dirs, options.snapshot)?;
     let revision: Option<String> = transaction

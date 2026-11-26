@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use lk_core::concept::{Citation, citation_digest};
 use lk_core::config::VaultDirs;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
 use crate::{VaultError, search_index};
@@ -151,7 +151,7 @@ pub fn inspect_concept_citations(
         .to_str()
         .ok_or_else(|| invalid("concept address is not UTF-8"))?;
     let database = crate::page_path(root, Path::new(search_index::INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = crate::search_index::open_read_only(&database)?;
     let transaction = connection.transaction()?;
     search_index::verify_snapshot(&transaction, root, dirs, options.snapshot)?;
     inspect_captured(&transaction, path, options)

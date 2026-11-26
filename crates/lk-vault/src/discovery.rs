@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rayon::prelude::*;
-use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
 use lk_core::concept::{Citation, file_revision, identity_key, source_revision};
@@ -1220,7 +1219,7 @@ fn indexed_queries(
         Err(_) => return Ok(None),
     };
     let path = crate::page_path(root, Path::new(crate::search_index::INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = crate::search_index::open_read_only(&path)?;
     let transaction = connection.transaction()?;
     crate::search_index::verify_snapshot(&transaction, root, dirs, &snapshot.snapshot)?;
     read.check()?;
@@ -2254,7 +2253,8 @@ mod tests {
         };
         let session = crate::MutationSession::acquire(root.path()).unwrap();
         crate::prepare_search(&session, &dirs).unwrap();
-        let database = Connection::open(root.path().join(crate::search_index::INDEX_PATH)).unwrap();
+        let database =
+            rusqlite::Connection::open(root.path().join(crate::search_index::INDEX_PATH)).unwrap();
         database.execute_batch("DROP TABLE terms").unwrap();
         drop(database);
         assert!(

@@ -11,6 +11,53 @@ use crate::{MutationSession, VaultError, VerifiedFileRevision};
 pub(super) const INDEX_PATH: &str = ".lorekeeper/search.sqlite";
 const VERSION: i32 = 31;
 
+/// Opens the prepared index at `path` for reading. Write-ahead logging reads through a
+/// shared-memory file SQLite creates beside the database; a clean close removes it, and a
+/// read-only directory cannot create it again. With no log beside it the database file holds
+/// every commit, so the index is then read as immutable. A log that exists may hold commits
+/// the file lacks, and its error stands.
+pub(super) fn open_read_only(path: &Path) -> Result<Connection, VaultError> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    match connection.query_row("PRAGMA schema_version", [], |_| Ok(())) {
+        Ok(()) => Ok(connection),
+        Err(rusqlite::Error::SqliteFailure(failure, _))
+            if failure.code == rusqlite::ErrorCode::ReadOnly
+                && !write_ahead_log(path).try_exists()? =>
+        {
+            drop(connection);
+            Ok(Connection::open_with_flags(
+                format!("file:{}?immutable=1", uri_path(path)),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_ahead_log(path: &Path) -> PathBuf {
+    let mut log = path.as_os_str().to_owned();
+    log.push("-wal");
+    PathBuf::from(log)
+}
+
+/// `path` as the path of a SQLite `file:` URI: every byte outside the unreserved set and the
+/// separator is percent-encoded, so spaces, `?`, `#` and `%` keep their literal meaning.
+fn uri_path(path: &Path) -> String {
+    #[cfg(unix)]
+    let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()).to_vec();
+    #[cfg(not(unix))]
+    let bytes = format!("/{}", path.to_string_lossy().replace('\\', "/")).into_bytes();
+    bytes
+        .iter()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                char::from(*byte).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 #[derive(Serialize)]
 pub struct SearchSnapshot {
     pub snapshot: String,
@@ -27,7 +74,7 @@ pub fn inspect_search_snapshot(
     dirs: &VaultDirs,
 ) -> Result<SearchSnapshot, VaultError> {
     let path = crate::page_path(root, Path::new(INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = open_read_only(&path)?;
     let transaction = connection.transaction()?;
     let expected: String =
         transaction.query_row("SELECT id FROM snapshot", [], |row| row.get(0))?;
@@ -661,7 +708,7 @@ pub(super) fn search(
     expected: &str,
 ) -> Result<SearchResult, VaultError> {
     let path = crate::page_path(root, Path::new(INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = open_read_only(&path)?;
     let transaction = connection.transaction()?;
     verify_snapshot(&transaction, root, dirs, expected)?;
     if options.query.is_none() {
@@ -1173,7 +1220,7 @@ pub(super) fn visit_body_pages(
     mut visit: impl FnMut(Page, usize) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
     let path = crate::page_path(root, Path::new(INDEX_PATH))?;
-    let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut connection = open_read_only(&path)?;
     let transaction = connection.transaction()?;
     verify_snapshot(&transaction, root, dirs, expected)?;
     let (filter, arguments) = scalar_filter(options);
@@ -2614,6 +2661,63 @@ mod tests {
         );
         let converted = prepare_search(&session, &dirs).unwrap();
         assert_ne!(converted.snapshot, first.snapshot);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cleanly_closed_index_in_a_read_only_directory_serves_pinned_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/topic.md";
+        write(
+            root.path(),
+            concept,
+            "---\ntype: concept\ntitle: Topic\n---\nPinned knowledge.\n",
+        );
+        let prepared = {
+            let session = MutationSession::acquire(root.path()).unwrap();
+            prepare_search(&session, &dirs).unwrap()
+        };
+        let index = root.path().join(INDEX_PATH);
+        let directory = index.parent().unwrap();
+        assert!(!write_ahead_log(&index).exists());
+        let pinned_reads = || -> Result<(), VaultError> {
+            let found = crate::search(
+                root.path(),
+                &dirs,
+                &SearchOptions {
+                    query: Some("Pinned"),
+                    snapshot: Some(&prepared.snapshot),
+                    limit: 10,
+                    ..Default::default()
+                },
+            )?;
+            assert_eq!(found.total, 1);
+            crate::inspect_page_context(
+                root.path(),
+                &dirs,
+                Path::new(concept),
+                &crate::ContextOptions {
+                    snapshot: &prepared.snapshot,
+                    limit: 10,
+                    offset: 0,
+                },
+            )?;
+            Ok(())
+        };
+        let set_mode = |mode| {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        set_mode(0o555);
+        let clean = pinned_reads();
+        set_mode(0o755);
+        clean.unwrap();
+        std::fs::write(write_ahead_log(&index), b"").unwrap();
+        set_mode(0o555);
+        let leftover = pinned_reads();
+        set_mode(0o755);
+        assert!(leftover.is_err());
     }
 
     #[test]
