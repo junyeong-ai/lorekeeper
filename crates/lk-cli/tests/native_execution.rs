@@ -2188,12 +2188,18 @@ fn bounded_telemetry_reports_missing_finalizer_response_without_inventing_a_resu
     let step = steps.last().unwrap();
     assert_eq!(step["role"], "finalizer");
     assert_eq!(step["outcome"], "failed");
-    assert_eq!(report["halted"], true);
+    assert_eq!(
+        report["halted"], false,
+        "an answerless finalizer holds its request"
+    );
     assert!(step["agent_duration_ms"].as_u64().is_some());
     assert!(step["verification_duration_ms"].as_u64().is_some());
     assert!(step["request_json_bytes"].as_u64().is_some());
     assert!(step["result_json_bytes"].is_null());
-    assert!(step["revalidation_record_duration_ms"].is_null());
+    assert!(
+        step["revalidation_record_duration_ms"].as_u64().is_some(),
+        "recording the hold is measured"
+    );
     assert_eq!(
         steps
             .iter()
@@ -5141,7 +5147,7 @@ fn knowledge_campaign_releases_each_lease_and_stops_on_failure_without_losing_pr
         let runs = result["runs"].as_array().unwrap();
         assert_eq!(
             result["stop_reason"],
-            if fail_second { "failed" } else { "settled" }
+            if fail_second { "deferred" } else { "settled" }
         );
         assert_eq!(runs.len(), if fail_second { 2 } else { 3 });
         assert_ne!(runs[0]["workflow_id"], runs[1]["workflow_id"]);
@@ -6444,13 +6450,9 @@ BATCH"#;
         }
         let (_, report) = fixture.run("process");
         assert_eq!(report["semantic_calls"], 1, "{report}");
-        // A failed summary invocation is held and the run replans for its other work, which
-        // the exhausted call budget then retains.
-        assert_eq!(
-            report["queue_planning"]["attempts"],
-            if start_at_summary { 2 } else { 1 },
-            "{report}"
-        );
+        // An answerless invocation, summary or selected batch, is held and the run replans
+        // for its other work, which the exhausted call budget then retains.
+        assert_eq!(report["queue_planning"]["attempts"], 2, "{report}");
         assert_eq!(
             report["queue_planning"]["prepared_targets"],
             if start_at_summary { 1 } else { 2 },

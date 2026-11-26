@@ -536,6 +536,35 @@ pub(in crate::commands) fn decode_screening(
     screening::decode(value, request, limit)
 }
 
+/// Whether a host's output carries no answer at all: nothing but whitespace, or Claude's
+/// successful envelope without structured output. An answer that fails validation is not this.
+pub(in crate::commands) fn is_answerless(engine: AgentEngine, bytes: &[u8]) -> bool {
+    bytes.trim_ascii().is_empty()
+        || engine == AgentEngine::ClaudeCode
+            && lk_core::json::decode_object(bytes).is_ok_and(|response| {
+                response["type"] == "result"
+                    && response["subtype"] == "success"
+                    && response["is_error"] == false
+                    && response.get("structured_output").is_none_or(Value::is_null)
+            })
+}
+
+/// The invocation failure a host output that could not be used records.
+pub(in crate::commands) fn response_failure(
+    engine: AgentEngine,
+    bytes: &[u8],
+) -> crate::commands::work::state::InvocationFailure {
+    if is_answerless(engine, bytes) {
+        crate::commands::work::state::InvocationFailure::MissingResponse { engine }
+    } else {
+        crate::commands::work::state::InvocationFailure::InvalidResponse {
+            engine,
+            revision: lk_core::rss_original::digest(bytes),
+            bytes: bytes.len(),
+        }
+    }
+}
+
 pub(in crate::commands) fn decode_response(
     engine: AgentEngine,
     bytes: &[u8],
@@ -603,6 +632,39 @@ pub(in crate::commands) fn validate_evidence_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_output_without_an_answer_is_answerless() {
+        for (engine, raw) in [
+            (AgentEngine::Codex, " \n"),
+            (AgentEngine::ClaudeCode, ""),
+            (
+                AgentEngine::ClaudeCode,
+                r#"{"type":"result","subtype":"success","is_error":false,"result":""}"#,
+            ),
+            (
+                AgentEngine::ClaudeCode,
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":null}"#,
+            ),
+        ] {
+            assert!(is_answerless(engine, raw.as_bytes()), "{engine:?}: {raw}");
+        }
+        for (engine, raw) in [
+            (AgentEngine::Codex, "not JSON"),
+            (AgentEngine::Codex, "{}"),
+            (AgentEngine::ClaudeCode, "Finished without an envelope."),
+            (
+                AgentEngine::ClaudeCode,
+                r#"{"type":"result","subtype":"error_during_execution","is_error":true}"#,
+            ),
+            (
+                AgentEngine::ClaudeCode,
+                r#"{"type":"result","subtype":"success","is_error":false,"structured_output":{}}"#,
+            ),
+        ] {
+            assert!(!is_answerless(engine, raw.as_bytes()), "{engine:?}: {raw}");
+        }
+    }
 
     #[test]
     fn native_responses_reject_duplicate_fields_before_semantic_decoding() {

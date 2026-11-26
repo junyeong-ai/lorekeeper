@@ -942,11 +942,7 @@ mod native {
                     self.count_host_failure(step.host());
                 }
             } else if step.agent_duration_ms.is_some()
-                && step.host_failure.is_none()
-                && !matches!(
-                    step.outcome,
-                    WorkOutcome::Failed | WorkOutcome::Cancelled | WorkOutcome::Yielded
-                )
+                && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
             {
                 self.host_failures.remove(&step.host());
             }
@@ -1970,14 +1966,10 @@ mod native {
                     ));
                 }
             };
-            metrics.unanswered |= bytes.is_empty();
+            metrics.unanswered |= execution::observation::is_answerless(engine, &bytes);
             let invalid = || {
                 crate::commands::work::InspectionResponse::InvocationFailed(
-                    crate::commands::work::state::InvocationFailure::InvalidResponse {
-                        engine,
-                        revision: lk_core::rss_original::digest(&bytes),
-                        bytes: bytes.len(),
-                    },
+                    execution::observation::response_failure(engine, &bytes),
                 )
             };
             let output = match execution::observation::decode_response(engine, &bytes, limit) {
@@ -3620,14 +3612,9 @@ mod native {
                             metrics.host_failure = Some(
                                 execution::diagnostic::HostFailure::from_response(engine, &bytes),
                             );
-                            metrics.unanswered = bytes.is_empty();
-                            Err(
-                                crate::commands::work::state::InvocationFailure::InvalidResponse {
-                                    engine,
-                                    revision: lk_core::rss_original::digest(&bytes),
-                                    bytes: bytes.len(),
-                                },
-                            )
+                            let failure = execution::observation::response_failure(engine, &bytes);
+                            metrics.unanswered = failure.is_unanswered();
+                            Err(failure)
                         }
                     }
                 }
@@ -4603,13 +4590,7 @@ mod native {
                         failure,
                     };
                 let invalid_reply = |bytes: &[u8]| {
-                    failed_reply(
-                        crate::commands::work::state::InvocationFailure::InvalidResponse {
-                            engine,
-                            revision: lk_core::rss_original::digest(bytes),
-                            bytes: bytes.len(),
-                        },
-                    )
+                    failed_reply(execution::observation::response_failure(engine, bytes))
                 };
                 let decoded = if cancelled || !current {
                     step.outcome = if cancelled {
@@ -4621,7 +4602,8 @@ mod native {
                 } else {
                     match attempt.result {
                         Ok(child) if child.success => {
-                            step.unanswered = child.stdout.is_empty();
+                            step.unanswered =
+                                execution::observation::is_answerless(engine, &child.stdout);
                             match execution::observation::decode_response(
                                 engine,
                                 &child.stdout,

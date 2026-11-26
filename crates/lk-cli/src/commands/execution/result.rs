@@ -80,11 +80,7 @@ impl Output {
         };
         super::observation::decode_response(self.engine, &bytes, max_result_bytes).map_err(
             |detail| ResponseError::Remote {
-                failure: super::super::work::state::InvocationFailure::InvalidResponse {
-                    engine: self.engine,
-                    revision: lk_core::rss_original::digest(&bytes),
-                    bytes: bytes.len(),
-                },
+                failure: super::observation::response_failure(self.engine, &bytes),
                 detail,
             },
         )

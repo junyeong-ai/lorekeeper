@@ -381,7 +381,9 @@ fn bounded_audit_requires_a_structured_assessment_after_host_success() {
         std::fs::write(fixture.root().join("audit-response-mode"), "missing").unwrap();
         let (output, report) = fixture.run("knowledge");
         assert!(!output.status.success(), "{report}");
-        assert_eq!(report["halted"], true, "{report}");
+        // Codex leaves its result file absent: no answer, so the request is held. Claude's
+        // printed prose is an answer outside its envelope, which stays fatal.
+        assert_eq!(report["halted"], engine == "claude-code", "{report}");
         let calls = bounded_calls(&fixture);
         let finalizer = calls
             .iter()

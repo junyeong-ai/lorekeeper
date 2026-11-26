@@ -1904,7 +1904,10 @@ fn malformed_missing_oversized_and_changed_scope_results_never_publish() {
     let (task, _) = fixture.add("subject", lk_queue::TaskKind::ExtractConcepts, false);
     std::fs::write(fixture.root().join("mode"), "missing").unwrap();
     let report = fixture.run();
-    assert_eq!(report["halted"], true, "{report}");
+    assert_eq!(
+        report["halted"], false,
+        "an answerless finalizer holds its request: {report}"
+    );
     assert!(!fixture.done(&task));
 }
 

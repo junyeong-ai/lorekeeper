@@ -1262,7 +1262,9 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                 "{mode}"
             );
             assert!(!fixture.work_path(&plan, "final.json").exists(), "{mode}");
-            if matches!(mode, "section-boundary" | "exit") {
+            // Codex reads only its result file, so printed text leaves it without an answer.
+            let answerless = mode == "exit" || (engine == "codex" && mode == "malformed");
+            if mode == "section-boundary" || answerless {
                 assert_eq!(report["halted"], false, "{report}");
                 let (_, again) = fixture.run();
                 assert_eq!(again["semantic_calls"], 0, "{again}");

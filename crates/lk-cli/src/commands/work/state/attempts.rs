@@ -43,9 +43,9 @@ impl InvocationFailure {
     }
 
     /// Whether the host ended without any answer, as distinct from answering with an unusable
-    /// one: an empty response is no answer.
+    /// one.
     pub(crate) fn is_unanswered(&self) -> bool {
-        !matches!(self, Self::InvalidResponse { bytes, .. } if *bytes > 0)
+        !matches!(self, Self::InvalidResponse { .. })
     }
 }
 
