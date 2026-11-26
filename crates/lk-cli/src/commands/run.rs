@@ -414,6 +414,33 @@ mod native {
         released: Option<crate::commands::work::host::PendingHold>,
     }
 
+    /// The probe each drain is choosing. A queue drain and a knowledge audit reach different
+    /// holds, so neither continues the other's candidates.
+    #[derive(Default)]
+    struct HostProbes {
+        queue: Option<HostProbe>,
+        audit: Option<HostProbe>,
+    }
+
+    impl HostProbes {
+        fn scope(
+            &mut self,
+            scope: crate::commands::work::host::ProbeScope,
+        ) -> &mut Option<HostProbe> {
+            match scope {
+                crate::commands::work::host::ProbeScope::Queue => &mut self.queue,
+                crate::commands::work::host::ProbeScope::Audit => &mut self.audit,
+            }
+        }
+
+        fn released(&self) -> impl Iterator<Item = &crate::commands::work::host::PendingHold> {
+            [&self.queue, &self.audit]
+                .into_iter()
+                .flatten()
+                .filter_map(|probe| probe.released.as_ref())
+        }
+    }
+
     /// The host configuration a call ran on, by role, host and execution profile: a failure of
     /// one configuration says nothing about another.
     type HostKey = (WorkRole, HostChannel, Option<String>);
@@ -839,8 +866,8 @@ mod native {
         host_failures: std::collections::BTreeMap<HostKey, usize>,
         /// Hosts this run invoked; a host it already reached needs no probe.
         hosts_invoked: crate::commands::work::host::InvokedHosts,
-        /// The probe this run is choosing, once it found no admissible work.
-        host_probe: Option<HostProbe>,
+        /// The probe each drain of this run is choosing, once it found no admissible work.
+        host_probes: HostProbes,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -982,7 +1009,7 @@ mod native {
         fn release_host_probe(&mut self, scope: crate::commands::work::host::ProbeScope) -> bool {
             use crate::commands::work::host;
             let root = self.root.clone();
-            let mut probe = match self.host_probe.take() {
+            let mut probe = match self.host_probes.scope(scope).take() {
                 Some(probe) => probe,
                 None => {
                     let candidates = host::pending_holds(&root).and_then(|holds| {
@@ -1013,7 +1040,7 @@ mod native {
                     next => break next,
                 }
             };
-            self.host_probe = Some(probe);
+            *self.host_probes.scope(scope) = Some(probe);
             if let Err(error) = host::record_probe(&root, next.as_ref()) {
                 self.failure("host probe", error);
                 return false;
@@ -1032,7 +1059,17 @@ mod native {
                         .map_or(hold.engine.as_str(), |host| host.profile.as_str()),
                 )),
             );
-            self.host_probe.as_mut().expect("probe candidates").released = Some(hold);
+            // The vault keeps one probe, so this release replaces the other drain's.
+            for drain in [host::ProbeScope::Queue, host::ProbeScope::Audit] {
+                if let Some(probe) = self.host_probes.scope(drain) {
+                    probe.released = None;
+                }
+            }
+            self.host_probes
+                .scope(scope)
+                .as_mut()
+                .expect("probe candidates")
+                .released = Some(hold);
             self.queue_replan = QueueReplan::Invalidate;
             true
         }
@@ -1056,10 +1093,9 @@ mod native {
         fn wave_limit(&self, budget: lk_core::execution::SemanticWorkConfig) -> usize {
             let limit = budget.max_parallel.min(self.remaining_calls(budget));
             let probing = self
-                .host_probe
-                .as_ref()
-                .and_then(|probe| probe.released.as_ref())
-                .is_some_and(|hold| !self.hosts_invoked.reached(hold.engine, hold.host.as_ref()));
+                .host_probes
+                .released()
+                .any(|hold| !self.hosts_invoked.reached(hold.engine, hold.host.as_ref()));
             if probing { limit.min(1) } else { limit }
         }
 
@@ -7331,7 +7367,7 @@ mod native {
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
             hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
-            host_probe: None,
+            host_probes: HostProbes::default(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
