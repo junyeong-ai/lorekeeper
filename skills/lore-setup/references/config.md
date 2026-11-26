@@ -173,6 +173,9 @@ For a complete initial setup, distinguish these outcomes:
    [scheduling procedure](../../lore-ingest/references/scheduling.md), register the
    definitions with the OS, and inspect an actual scheduled run. Definition output
    alone is not registration; registration alone is not successful processing.
+   Definitions capture the generating environment, so have the user generate them in
+   their real terminal, not inside this agent's sandbox, and diagnose a scheduled
+   failure with the job's own `EnvironmentVariables`.
 
 Report completed, failed and untested stages separately. `health` is collection
 freshness; `self status` is installation coherence. Neither proves semantic quality.

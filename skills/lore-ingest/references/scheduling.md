@@ -19,10 +19,18 @@
 `lore schedule --format launchd --bin /absolute/path/to/lore`. On Linux review its
 cron output and merge with `crontab -e`; piping into `crontab -` replaces other jobs.
 Create the named log directory before loading launchd plists. Job logs keep Lore's
-report and progress, never host transcripts; reproduce a host failure by running the
-same command in a terminal. Use `launchctl print` and an actual run to verify registration. Regenerate and replace definitions after
+report and progress, never host transcripts. Reproduce a host failure with the job's own
+environment, not the terminal's: run the same command with the plist's
+`EnvironmentVariables` (or the cron line's assignments) applied, since a terminal can
+hold a different `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `PATH` and succeed where the job
+fails. Use `launchctl print` and an actual run to verify registration. Regenerate and replace definitions after
 changing configuration or environment; unload disabled jobs too. Uninstall does
 not unregister OS jobs.
+
+Generate definitions from the user's real login environment, outside any agent
+sandbox or temporary account: they capture the current `PATH` and account directories,
+so a definition generated inside an agent session can name a directory that session
+alone created or later removed.
 
 Terminal approval does not establish macOS protected-folder access for a launchd job.
 After a binary update, protected-folder access may need renewed OS approval even
