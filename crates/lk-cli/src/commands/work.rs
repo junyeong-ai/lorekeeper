@@ -3415,6 +3415,14 @@ fn native_finalization_hold(
     if let Some(reason) = generation::rejection::held(root, task, &work.plan.subject_revision)? {
         return Ok(Some(FinalizationHold::GenerationRejection(reason)));
     }
+    if let Some(reason) = action::REVIEW_REFUSAL.exhausted(
+        root,
+        &task.task_id,
+        &task.cache_hash,
+        &work.plan.subject_revision,
+    )? {
+        return Ok(Some(FinalizationHold::GenerationRejection(reason)));
+    }
     Ok(recovery
         .map(FinalizationHold::DiscoveryRecovery)
         .or_else(|| action.map(FinalizationHold::ProcessingAction)))
@@ -3944,7 +3952,7 @@ pub(super) fn finish_result(
                 },
             ) = (refusal, &prepared.subject)
             {
-                action::REVIEW_REFUSAL.plan_record_first(
+                action::REVIEW_REFUSAL.plan_record_refusal(
                     root,
                     &action::Action {
                         schema: action::REVIEW_REFUSAL.schema.into(),
@@ -3953,6 +3961,7 @@ pub(super) fn finish_result(
                         context_revision: work.plan.subject_revision.clone(),
                         request_revision: action::digest(&result.request)?,
                         reason: refusal,
+                        exhausted: false,
                     },
                     &mut plan,
                 )?;

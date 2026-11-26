@@ -225,6 +225,7 @@ impl Prepared {
     /// The exact bytes captured for a page, whatever reading its resource presents.
     /// The refusal a request answering `context_revision` carries once, if this task's review
     /// proposal was refused under that context.
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub(super) fn review_refusal(&self, context_revision: &str) -> Option<&str> {
         self.review_refusal
             .as_ref()
@@ -666,6 +667,7 @@ pub(super) fn task_with_audit_controlled(
     } else {
         Vec::new()
     };
+    #[cfg(unix)]
     let review_refusal = if task.kind == lk_queue::TaskKind::SynthesizeConcept {
         super::action::REVIEW_REFUSAL
             .read(root, &task.task_id, &task.cache_hash)?
@@ -673,6 +675,8 @@ pub(super) fn task_with_audit_controlled(
     } else {
         None
     };
+    #[cfg(not(unix))]
+    let review_refusal = None;
     let mut prepared = capture_task_with_audit_controlled(root, config, task, audit, read)?;
     prepared.review_refusal = review_refusal;
     prepared.require_requested_citations()?;

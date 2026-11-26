@@ -1228,9 +1228,23 @@ mod native {
                         .join(", ")
                 ));
             }
+            if !review_callouts.held.is_empty() {
+                detail.push_str(&format!(
+                    "; {} concept(s) whose own audit records cannot be read are not checked against their reviews: {}",
+                    review_callouts.held.len(),
+                    review_callouts
+                        .held
+                        .iter()
+                        .take(3)
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             let skipped = &report.sync.skipped;
             if skipped.is_empty() {
-                let state = if review_callouts.invalid.is_empty() {
+                let state = if review_callouts.invalid.is_empty() && review_callouts.held.is_empty()
+                {
                     StageState::Completed
                 } else {
                     StageState::Failed

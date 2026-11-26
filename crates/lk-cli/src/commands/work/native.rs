@@ -366,7 +366,8 @@ fn selected_task_value(
     });
     disclose_roster(&mut selected, captured.roster)?;
     if let Some(refusal) = captured.review_refusal {
-        selected["review_refusal"] = json!(refusal);
+        selected["review_refusal"] =
+            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
     }
     Ok(selected)
 }
@@ -586,7 +587,8 @@ pub(super) fn finalization_request(
     });
     disclose_roster(&mut request, roster)?;
     if let Some(refusal) = review_refusal {
-        request["review_refusal"] = json!(refusal);
+        request["review_refusal"] =
+            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
     }
     Ok(request)
 }
@@ -643,7 +645,8 @@ pub(super) fn frontier_request(
     });
     disclose_roster(&mut request, roster)?;
     if let Some(refusal) = review_refusal {
-        request["review_refusal"] = json!(refusal);
+        request["review_refusal"] =
+            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
     }
     Ok(request)
 }

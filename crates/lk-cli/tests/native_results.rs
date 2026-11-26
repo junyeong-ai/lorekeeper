@@ -103,7 +103,7 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             roster=request['inspected_resources'] if completed is not None else item['resources']
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
             refusal=item.get('review_refusal') or request.get('review_refusal')
-            if refusal: (root/'review-refusal').write_text(refusal)
+            if refusal: (root/'review-refusal').write_text(json.dumps(refusal))
             if (mode in ['needs-review-always','needs-review-stubborn'] or not any(authority(entry)=='review' for entry in roster)) and not (refusal and mode!='needs-review-stubborn'):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1

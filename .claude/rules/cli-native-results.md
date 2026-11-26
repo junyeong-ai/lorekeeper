@@ -108,9 +108,10 @@ paths:
   a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
   fault. The first refusal under a context is stored with it (`action::REVIEW_REFUSAL`,
   `.lorekeeper/queue/review-refusals/`, pruned with the task), and the next request for that
-  task and context carries it as `review_refusal`: that request differs from the held one,
-  so it is reconsidered once, and a further refusal keeps the first record, so the request
-  repeats exactly and defers without a call. A proposal citing an origin both as a page and
+  task and context carries it as `review_refusal` with its instruction (a request without a
+  refusal keeps its bytes): that request differs from the held one, so it is reconsidered
+  once, and a further refusal marks the record exhausted, which holds the task under that
+  context on every finalization path (selected, root and frontier) without a call. A proposal citing an origin both as a page and
   by its RSS events keeps the events. The run then replans; the review enters the concept's scope through `subjects`,
   so the next finalization completes against it. `needs-review` is only for an issue no
   open review in scope records. Whether an issue is already recorded is the finalizer's

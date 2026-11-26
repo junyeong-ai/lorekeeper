@@ -248,6 +248,7 @@ pub(in crate::commands) fn finish(
                 context_revision: current.prepared.revision(config_revision)?,
                 request_revision: digest(&section.request)?,
                 reason: reason.clone(),
+                exhausted: false,
             };
             plan.publish_expected(
                 root,

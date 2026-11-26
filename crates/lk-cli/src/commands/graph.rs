@@ -363,6 +363,9 @@ pub(crate) struct ReviewCallouts {
     pub unrecorded: Vec<PathBuf>,
     /// Concepts whose publication record cannot be read: reported for repair, synthesis kept.
     pub invalid: Vec<PathBuf>,
+    /// Concepts whose own audit records cannot be read: their reviews are not judged and their
+    /// synthesis is held until the records are repaired.
+    pub held: Vec<PathBuf>,
 }
 
 /// Requests a resynthesis of every concept whose published synthesis owes the open reviews
@@ -423,20 +426,19 @@ fn review_callouts(
         pages.insert(address.clone(), parsed);
         recorded.push((page.path.clone(), address, raw));
     }
-    let dependencies = lk_graph::audit::synthesis_review_dependencies_controlled(
+    let scope = lk_graph::audit::synthesis_review_dependencies_controlled(
         &rc.root,
         &rc.vault_dirs,
         &views.scanned,
         &pages,
         read,
     )
-    .map_err(|e| e.to_string())?
-    .dependencies;
+    .map_err(|e| e.to_string())?;
+    let dependencies = scope.dependencies;
+    callouts.held = scope.held.into_keys().map(PathBuf::from).collect();
     let mut reviews = std::collections::BTreeMap::new();
     let mut owed = Vec::new();
     for (path, address, raw) in recorded {
-        // A concept whose own audit records cannot be read has its synthesis held; its
-        // reviews are not judged until they are repaired.
         let Some(scoped) = dependencies.get(&address) else {
             continue;
         };
