@@ -136,22 +136,38 @@ pub(in crate::commands) enum HoldScope {
 
 #[cfg(unix)]
 impl HoldScope {
-    fn is_current(&self, root: &Path) -> miette::Result<bool> {
+    /// Whether the held request still applies. `queue` is the pending queue one probe
+    /// selection loaded, read at most once for all of its holds.
+    fn is_current(
+        &self,
+        root: &Path,
+        queue: &mut Option<crate::commands::queue::PendingTasks>,
+        read: &lk_vault::ReadControl,
+    ) -> miette::Result<bool> {
+        read.check().into_diagnostic()?;
         match self {
             Self::Queue {
                 task_id,
                 cache_hash,
-            } => match crate::commands::queue::current_task(root, task_id) {
-                Ok(task) => Ok(task.cache_hash == *cache_hash),
-                Err(error)
-                    if error
-                        .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
-                        .is_some() =>
-                {
-                    Ok(false)
+            } => {
+                let pending = match queue {
+                    Some(pending) => pending,
+                    None => queue.insert(crate::commands::queue::PendingTasks::load_controlled(
+                        root, read,
+                    )?),
+                };
+                match pending.current_controlled(root, task_id, read) {
+                    Ok(task) => Ok(task.cache_hash == *cache_hash),
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
+                            .is_some() =>
+                    {
+                        Ok(false)
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
-            },
+            }
             Self::Audit {
                 path,
                 subject_revision,
@@ -288,8 +304,10 @@ impl HostAnswers {
         scope: ProbeScope,
         invoked: &InvokedHosts,
         holds: Vec<PendingHold>,
+        read: &lk_vault::ReadControl,
     ) -> miette::Result<Vec<PendingHold>> {
         let mut candidates = Vec::new();
+        let mut queue = None;
         for hold in holds {
             let reachable = matches!(
                 (&hold.scope, scope),
@@ -299,7 +317,7 @@ impl HostAnswers {
             if reachable
                 && !invoked.reached(hold.engine, hold.host.as_ref())
                 && !self.answered_since(hold.engine, hold.host.as_ref())
-                && hold.scope.is_current(root)?
+                && hold.scope.is_current(root, &mut queue, read)?
             {
                 candidates.push(hold);
             }
@@ -559,7 +577,13 @@ mod tests {
                 hold("stale", "synthesis", "changed", 5),
             ];
             answers
-                .probe_candidates(root.path(), scope, invoked, holds)
+                .probe_candidates(
+                    root.path(),
+                    scope,
+                    invoked,
+                    holds,
+                    &lk_vault::ReadControl::default(),
+                )
                 .unwrap()
                 .into_iter()
                 .map(|hold| match hold.identity {

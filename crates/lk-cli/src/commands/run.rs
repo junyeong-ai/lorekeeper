@@ -991,6 +991,7 @@ mod native {
                             scope,
                             &self.hosts_invoked,
                             holds,
+                            self.supervisor.read_control(),
                         )
                     });
                     match candidates {
