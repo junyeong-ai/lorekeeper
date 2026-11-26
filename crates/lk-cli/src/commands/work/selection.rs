@@ -131,7 +131,11 @@ fn read_optional(root: &Path, path: &Path) -> miette::Result<Option<String>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).into_diagnostic(),
     }
-    std::fs::read_to_string(full).map(Some).into_diagnostic()
+    match std::fs::read_to_string(full) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).into_diagnostic(),
+    }
 }
 
 fn require_settled(root: &Path) -> miette::Result<()> {

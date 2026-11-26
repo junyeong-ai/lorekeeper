@@ -199,10 +199,13 @@ fn read(root: &Path, path: &Path) -> miette::Result<Option<(String, Receipt)>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).into_diagnostic(),
     }
+    let file = match std::fs::File::open(absolute) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
     let mut raw = String::new();
-    std::fs::File::open(absolute)
-        .into_diagnostic()?
-        .take((MAX_BYTES + 1) as u64)
+    file.take((MAX_BYTES + 1) as u64)
         .read_to_string(&mut raw)
         .into_diagnostic()?;
     if raw.len() > MAX_BYTES {
