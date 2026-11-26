@@ -158,13 +158,15 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             "{report}"
         );
         assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        let held = run(&fixture, "knowledge", false);
-        assert_eq!(
-            calls(&held),
-            0,
-            "a timeout holds its node until the host answers: {held}"
-        );
-        assert_eq!(usage(&fixture)["reserved_calls"], 1);
+        for (resume, reserved) in [(false, 2), (true, 3)] {
+            let probed = run(&fixture, "knowledge", resume);
+            assert_eq!(
+                calls(&probed),
+                1,
+                "each run with nothing admissible probes the held node once: {probed}"
+            );
+            assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+        }
         let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
             .into_iter()
             .map(Result::unwrap)
@@ -175,14 +177,11 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
         let held: serde_json::Value = serde_json::from_slice(&before).unwrap();
         let work = held["work_id"].as_str().unwrap();
         let node = held["entries"].as_object().unwrap().keys().next().unwrap();
-        let plan = std::fs::read(path.parent().unwrap().join("plan.json")).unwrap();
-        let report = run(&fixture, "knowledge", true);
-        assert_eq!(
-            calls(&report),
-            0,
-            "operation resume must not reset node holds: {report}"
+        assert!(
+            held["entries"][node.as_str()].get("exhausted").is_none(),
+            "a probe that times out again renews the hold: {held}"
         );
-        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let plan = std::fs::read(path.parent().unwrap().join("plan.json")).unwrap();
         for dry in [true, false] {
             let mut command = fixture.command();
             command.args(["work", "retry", work, node]);
@@ -203,7 +202,7 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 1);
+        assert_eq!(usage(&fixture)["reserved_calls"], 3);
         let agent = fixture.root().join("agent executable");
         let behavior = std::fs::read_to_string(&agent)
             .unwrap()
@@ -215,7 +214,7 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             report["runs"][0]["retained_progress"]["evidence_nodes"], 1,
             "{report}"
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 2);
+        assert_eq!(usage(&fixture)["reserved_calls"], 4);
         assert_eq!(
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan
@@ -437,11 +436,20 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
     assert_eq!(attempt["disposition"]["failure"]["code"], 7);
     let before = usage(fixture);
     for resume in [false, true] {
-        let held = run(fixture, "knowledge", resume);
-        assert_eq!(calls(&held), 0, "{held}");
-        assert_eq!(held["stop_reason"], "deferred", "{held}");
-        assert_eq!(usage(fixture), before);
-        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        let probed = run(fixture, "knowledge", resume);
+        assert_eq!(
+            calls(&probed),
+            1,
+            "a run with nothing admissible probes the held request once: {probed}"
+        );
+        assert_eq!(probed["stop_reason"], "deferred", "{probed}");
+        let renewed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(renewed["input_revision"], attempt["input_revision"]);
+        assert!(
+            renewed["disposition"].get("exhausted").is_none(),
+            "{renewed}"
+        );
     }
     let mode = fixture.root().join("audit-response-mode");
     if mode.exists() {
@@ -474,7 +482,8 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
     assert_eq!(calls(&retried), 1, "{retried}");
     assert_eq!(
         usage(fixture)["reserved_calls"],
-        before["reserved_calls"].as_u64().unwrap() + 1
+        before["reserved_calls"].as_u64().unwrap() + 3,
+        "two probes, then the retried request"
     );
 }
 
@@ -521,12 +530,16 @@ fn scheduled_tool_free_failure_holds_its_input_without_pausing_or_refunding_call
         assert_eq!(first["stop_reason"], "deferred");
         assert_eq!(usage(&fixture)["reserved_calls"], 1);
         assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        let before = usage(&fixture);
-        for resume in [false, true] {
-            let held = run(&fixture, "knowledge", resume);
-            assert_eq!(calls(&held), 0, "{held}");
-            assert_eq!(held["stop_reason"], "deferred");
-            assert_eq!(usage(&fixture), before);
+        for (resume, reserved) in [(false, 2), (true, 3)] {
+            let probed = run(&fixture, "knowledge", resume);
+            assert_eq!(
+                calls(&probed),
+                1,
+                "a run with nothing admissible probes the held input once: {probed}"
+            );
+            assert_eq!(probed["stop_reason"], "deferred");
+            assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+            assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
         }
     }
 }

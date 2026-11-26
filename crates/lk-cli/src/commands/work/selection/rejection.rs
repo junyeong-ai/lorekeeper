@@ -1,7 +1,7 @@
 use super::*;
 use crate::commands::work::host::{HoldIdentity, HostAnswers};
 #[cfg(unix)]
-use crate::commands::work::host::{PendingHold, Standing};
+use crate::commands::work::host::{HoldScope, PendingHold, Standing};
 
 const SCHEMA: &str = "screening-rejections-v1";
 
@@ -209,9 +209,7 @@ impl Rejections {
 
 /// Every pending unanswered screening hold, for choosing a probe.
 #[cfg(unix)]
-pub(in crate::commands::work) fn pending_holds(
-    root: &Path,
-) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+pub(in crate::commands::work) fn pending_holds(root: &Path) -> miette::Result<Vec<PendingHold>> {
     let mut holds = Vec::new();
     for task_directory in crate::commands::work::host::store_entries(root, Path::new(STORE))? {
         let path = Rejections::path(&task_directory);
@@ -233,14 +231,15 @@ pub(in crate::commands::work) fn pending_holds(
             && hold.failure.is_unanswered()
             && !hold.exhausted
         {
-            holds.push((
-                hold.failure.engine(),
-                PendingHold {
-                    identity: rejections.host_identity(),
-                    task: (rejections.task_id.clone(), rejections.cache_hash.clone()),
-                    failed_at: hold.failure.failed_at(),
+            holds.push(PendingHold {
+                identity: rejections.host_identity(),
+                engine: hold.failure.engine(),
+                scope: HoldScope::Queue {
+                    task_id: rejections.task_id.clone(),
+                    cache_hash: rejections.cache_hash.clone(),
                 },
-            ));
+                failed_at: hold.failure.failed_at(),
+            });
         }
     }
     Ok(holds)

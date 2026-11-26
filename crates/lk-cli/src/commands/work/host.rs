@@ -88,12 +88,68 @@ impl Standing {
     }
 }
 
+/// What a pending hold's request belongs to, which decides whether a probe can still reach it.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum HoldScope {
+    /// A current queue task.
+    Queue { task_id: String, cache_hash: String },
+    /// An audit subject at the revision the held request read.
+    Audit {
+        path: String,
+        subject_revision: String,
+    },
+}
+
+#[cfg(unix)]
+impl HoldScope {
+    fn is_current(&self, root: &Path) -> miette::Result<bool> {
+        match self {
+            Self::Queue {
+                task_id,
+                cache_hash,
+            } => match crate::commands::queue::current_task(root, task_id) {
+                Ok(task) => Ok(task.cache_hash == *cache_hash),
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
+                        .is_some() =>
+                {
+                    Ok(false)
+                }
+                Err(error) => Err(error),
+            },
+            Self::Audit {
+                path,
+                subject_revision,
+            } => {
+                let absolute = lk_vault::page_path(root, Path::new(path)).into_diagnostic()?;
+                match std::fs::read_to_string(absolute) {
+                    Ok(text) => Ok(lk_core::concept::file_revision(&text) == *subject_revision),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                    Err(error) => Err(error).into_diagnostic(),
+                }
+            }
+        }
+    }
+}
+
+/// Which pending holds an operation can probe: the queue drain reaches queue tasks, the
+/// knowledge audit reaches audit subjects.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum ProbeScope {
+    Queue,
+    Audit,
+}
+
 /// A pending hold that a probe may release.
 #[cfg(unix)]
+#[derive(Clone, Debug)]
 pub(in crate::commands) struct PendingHold {
     pub identity: HoldIdentity,
-    /// The queue task whose currency decides whether the probe can reach the request.
-    pub task: (String, String),
+    pub engine: AgentEngine,
+    pub scope: HoldScope,
     pub failed_at: Option<Timestamp>,
 }
 
@@ -181,31 +237,30 @@ impl HostAnswers {
             })
     }
 
-    /// The oldest pending hold of a current queue task whose engine has not answered since,
-    /// other than a probe released earlier and not yet sent.
+    /// The pending holds a probe may release for `scope`, oldest failure first: their
+    /// request is still current, their engine has not answered since, and this run has not
+    /// yet invoked that engine.
     #[cfg(unix)]
-    pub(in crate::commands) fn select_probe(
+    pub(in crate::commands) fn probe_candidates(
         &self,
         root: &Path,
-        holds: Vec<(AgentEngine, PendingHold)>,
-    ) -> miette::Result<Option<PendingHold>> {
+        scope: ProbeScope,
+        invoked: &std::collections::BTreeSet<AgentEngine>,
+        holds: Vec<PendingHold>,
+    ) -> miette::Result<Vec<PendingHold>> {
         let mut candidates = Vec::new();
-        for (engine, hold) in holds {
-            if self.answered_after(engine, hold.failed_at)
-                || self.probe.as_ref().is_some_and(|probe| {
-                    probe.identity == hold.identity && probe.failed_at == hold.failed_at
-                })
+        for hold in holds {
+            let reachable = matches!(
+                (&hold.scope, scope),
+                (HoldScope::Queue { .. }, ProbeScope::Queue)
+                    | (HoldScope::Audit { .. }, ProbeScope::Audit)
+            );
+            if reachable
+                && !invoked.contains(&hold.engine)
+                && !self.answered_after(hold.engine, hold.failed_at)
+                && hold.scope.is_current(root)?
             {
-                continue;
-            }
-            match crate::commands::queue::current_task(root, &hold.task.0) {
-                Ok(task) if task.cache_hash == hold.task.1 => candidates.push(hold),
-                Ok(_) => {}
-                Err(error)
-                    if error
-                        .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
-                        .is_some() => {}
-                Err(error) => return Err(error),
+                candidates.push(hold);
             }
         }
         candidates.sort_by(|left, right| {
@@ -215,7 +270,7 @@ impl HostAnswers {
                     .cmp(&serde_json::to_string(&right.identity).ok())
             })
         });
-        Ok(candidates.into_iter().next())
+        Ok(candidates)
     }
 
     #[cfg(unix)]
@@ -272,9 +327,7 @@ pub(in crate::commands) fn store_entries(
 
 /// Every pending unanswered hold of every store, for choosing a probe.
 #[cfg(unix)]
-pub(in crate::commands) fn pending_holds(
-    root: &Path,
-) -> miette::Result<Vec<(AgentEngine, PendingHold)>> {
+pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<PendingHold>> {
     let mut holds = super::state::pending_inspection_holds(root)?;
     holds.extend(super::generation::rejection::pending_holds(root)?);
     holds.extend(super::selection::rejection::pending_holds(root)?);
@@ -303,14 +356,22 @@ pub(in crate::commands) fn record_answer(
     answers.store(root)
 }
 
-/// Releases `hold` as this vault's probe, replacing any earlier probe.
+/// Releases `hold` as this vault's probe, replacing any earlier probe, or withdraws the
+/// probe when `hold` is `None`.
 #[cfg(unix)]
-pub(in crate::commands) fn record_probe(root: &Path, hold: &PendingHold) -> miette::Result<()> {
+pub(in crate::commands) fn record_probe(
+    root: &Path,
+    hold: Option<&PendingHold>,
+) -> miette::Result<()> {
     let mut answers = HostAnswers::load(root)?;
-    answers.probe = Some(Probe {
+    let probe = hold.map(|hold| Probe {
         identity: hold.identity.clone(),
         failed_at: hold.failed_at,
     });
+    if answers.probe == probe {
+        return Ok(());
+    }
+    answers.probe = probe;
     answers.store(root)
 }
 
@@ -397,6 +458,79 @@ mod tests {
         answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
         assert!(answers.exhausts(&repeat, Some((&prior, false))));
         assert!(!answers.exhausts(&repeat, Some((&exited(at(30)), false))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_candidates_are_current_reachable_unreached_and_oldest_first() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
+        std::fs::write(root.path().join("wiki/concepts/subject.md"), "Subject").unwrap();
+        let current = lk_core::concept::file_revision("Subject");
+        let hold = |node: &str, engine, subject_revision: &str, failed_at| PendingHold {
+            identity: HoldIdentity::Inspection {
+                work_id: "w".repeat(64),
+                node_id: node.into(),
+            },
+            engine,
+            scope: HoldScope::Audit {
+                path: "wiki/concepts/subject.md".into(),
+                subject_revision: subject_revision.into(),
+            },
+            failed_at,
+        };
+        let holds = || {
+            vec![
+                hold("newer", AgentEngine::Codex, &current, at(20)),
+                hold("older", AgentEngine::ClaudeCode, &current, at(10)),
+                hold("stale", AgentEngine::Codex, "changed", at(5)),
+            ]
+        };
+        let nodes = |candidates: Vec<PendingHold>| {
+            candidates
+                .into_iter()
+                .map(|hold| match hold.identity {
+                    HoldIdentity::Inspection { node_id, .. } => node_id,
+                    _ => unreachable!(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut answers = HostAnswers::default();
+        let none = std::collections::BTreeSet::new();
+        assert_eq!(
+            nodes(
+                answers
+                    .probe_candidates(root.path(), ProbeScope::Audit, &none, holds())
+                    .unwrap()
+            ),
+            ["older", "newer"]
+        );
+        assert!(
+            answers
+                .probe_candidates(root.path(), ProbeScope::Queue, &none, holds())
+                .unwrap()
+                .is_empty(),
+            "a queue drain cannot reach an audit subject"
+        );
+        let invoked = std::collections::BTreeSet::from([AgentEngine::ClaudeCode]);
+        assert_eq!(
+            nodes(
+                answers
+                    .probe_candidates(root.path(), ProbeScope::Audit, &invoked, holds())
+                    .unwrap()
+            ),
+            ["newer"],
+            "an engine this run already reached needs no probe"
+        );
+        answers.answers.insert(AgentEngine::Codex, at(30).unwrap());
+        assert_eq!(
+            nodes(
+                answers
+                    .probe_candidates(root.path(), ProbeScope::Audit, &none, holds())
+                    .unwrap()
+            ),
+            ["older"]
+        );
     }
 
     #[cfg(unix)]

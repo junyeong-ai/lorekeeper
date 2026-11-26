@@ -229,8 +229,8 @@ fn native_discovery_holds_failed_inputs_and_explicit_actions_without_pausing_ope
                 let (_, repeated) = fixture.run(operation);
                 assert_eq!(
                     repeated["semantic_calls"],
-                    usize::from(!audit && !action),
-                    "only a queue drain without admissible work probes an unanswered hold: {repeated}"
+                    usize::from(!action),
+                    "a run without admissible work probes only an unanswered hold: {repeated}"
                 );
                 assert_eq!(repeated["halted"], false, "{repeated}");
                 let directory = fixture.root().join(if audit {

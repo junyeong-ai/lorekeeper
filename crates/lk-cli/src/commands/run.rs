@@ -407,6 +407,13 @@ mod native {
         Result,
     }
 
+    /// Pending unanswered holds a run may release, one at a time, as the probe an operator would
+    /// send, and the one released now.
+    struct HostProbe {
+        remaining: std::collections::VecDeque<crate::commands::work::host::PendingHold>,
+        released: Option<crate::commands::work::host::PendingHold>,
+    }
+
     /// The host configuration a call ran on, by role, host and execution profile: a failure of
     /// one configuration says nothing about another.
     type HostKey = (WorkRole, HostChannel, Option<String>);
@@ -830,8 +837,10 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
-        /// Whether this run already released a pending unanswered hold as a host probe.
-        host_probed: bool,
+        /// Engines this run invoked; a host it already reached needs no probe.
+        engines_invoked: std::collections::BTreeSet<lk_core::execution::AgentEngine>,
+        /// The probe this run is choosing, once it found no admissible work.
+        host_probe: Option<HostProbe>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -948,6 +957,9 @@ mod native {
             {
                 self.host_failures.remove(&step.host());
             }
+            if let (Some(execution), Some(_)) = (&step.execution, step.finished_at) {
+                self.engines_invoked.insert(execution.engine);
+            }
             if step.answered
                 && let (Some(execution), Some(answered_at)) = (&step.execution, step.finished_at)
                 && let Err(error) = crate::commands::work::host::record_answer(
@@ -961,44 +973,76 @@ mod native {
             self.result.work_telemetry.record(step);
         }
 
-        /// With no admissible queue work and no invocation yet in this run, releases once the
-        /// oldest pending unanswered hold whose engine has not answered since its failure, as
-        /// the probe an operator would send. A run that already invoked a host has its own
-        /// evidence: an answer released such holds, an unanswered call showed the host still
-        /// failing. Returns whether planning should run again.
-        fn release_host_probe(&mut self) -> bool {
-            if self.result.semantic_calls != 0 || std::mem::replace(&mut self.host_probed, true) {
+        /// With no admissible work, releases the oldest pending unanswered hold whose engine
+        /// this run has not invoked and which has not answered since, as the probe an operator
+        /// would send. Called again after planning still found nothing admissible, the probe
+        /// released last could not run: it is withdrawn and the next oldest is tried, until
+        /// one admits a call or none remains. Returns whether planning should run again.
+        fn release_host_probe(&mut self, scope: crate::commands::work::host::ProbeScope) -> bool {
+            use crate::commands::work::host;
+            let root = self.root.clone();
+            let mut probe = match self.host_probe.take() {
+                Some(probe) => probe,
+                None => {
+                    let candidates = host::pending_holds(&root).and_then(|holds| {
+                        host::HostAnswers::load(&root)?.probe_candidates(
+                            &root,
+                            scope,
+                            &self.engines_invoked,
+                            holds,
+                        )
+                    });
+                    match candidates {
+                        Ok(candidates) => HostProbe {
+                            remaining: candidates.into(),
+                            released: None,
+                        },
+                        Err(error) => {
+                            self.failure("host probe", error);
+                            return false;
+                        }
+                    }
+                }
+            };
+            probe.released = None;
+            let next = loop {
+                match probe.remaining.pop_front() {
+                    Some(hold) if self.engines_invoked.contains(&hold.engine) => {}
+                    next => break next,
+                }
+            };
+            self.host_probe = Some(probe);
+            if let Err(error) = host::record_probe(&root, next.as_ref()) {
+                self.failure("host probe", error);
                 return false;
             }
-            let root = self.root.clone();
-            let probe = (|| -> miette::Result<Option<crate::commands::work::host::PendingHold>> {
-                use crate::commands::work::host;
-                let holds = host::pending_holds(&root)?;
-                let Some(hold) = host::HostAnswers::load(&root)?.select_probe(&root, holds)? else {
-                    return Ok(None);
-                };
-                host::record_probe(&root, &hold)?;
-                Ok(Some(hold))
-            })();
-            match probe {
-                Ok(Some(hold)) => {
-                    self.record(
-                        "host probe",
-                        StageState::Completed,
-                        Some(format!(
-                            "no queue work was admissible; released the oldest pending unanswered hold {} as a probe of its host",
-                            serde_json::to_string(&hold.identity).expect("hold identity serializes")
-                        )),
-                    );
-                    self.queue_replan = QueueReplan::Invalidate;
-                    true
-                }
-                Ok(None) => false,
-                Err(error) => {
-                    self.failure("host probe", error);
-                    false
-                }
-            }
+            let Some(hold) = next else {
+                return false;
+            };
+            self.record(
+                "host probe",
+                StageState::Completed,
+                Some(format!(
+                    "no work was admissible; released the oldest pending unanswered hold {} as a probe of its {} host",
+                    serde_json::to_string(&hold.identity).expect("hold identity serializes"),
+                    hold.engine.as_str(),
+                )),
+            );
+            self.host_probe.as_mut().expect("probe candidates").released = Some(hold);
+            self.queue_replan = QueueReplan::Invalidate;
+            true
+        }
+
+        /// The calls a wave may send at once. While a released probe's engine has given no
+        /// outcome in this run, one call learns whether the host serves requests.
+        fn wave_limit(&self, budget: lk_core::execution::SemanticWorkConfig) -> usize {
+            let limit = budget.max_parallel.min(self.remaining_calls(budget));
+            let probing = self
+                .host_probe
+                .as_ref()
+                .and_then(|probe| probe.released.as_ref())
+                .is_some_and(|hold| !self.engines_invoked.contains(&hold.engine));
+            if probing { limit.min(1) } else { limit }
         }
 
         /// Counts an invocation that ended without an answer. At
@@ -2497,7 +2541,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return Some(self.failure("semantic work budget", error)),
             };
-            let limit = budget.max_parallel.min(self.remaining_calls(budget));
+            let limit = self.wave_limit(budget);
             if limit <= 1 || !jobs.contains_key(selected) {
                 return None;
             }
@@ -4223,7 +4267,7 @@ mod native {
                 Ok(budget) => budget,
                 Err(error) => return self.failure("semantic work budget", error),
             };
-            let limit = budget.max_parallel.min(self.remaining_calls(budget));
+            let limit = self.wave_limit(budget);
             if limit == 0 {
                 return self.call_budget_available();
             }
@@ -5129,10 +5173,7 @@ mod native {
                 scheduler::Stage::Queue,
                 &keys,
             )?);
-            let independent_limit = budget
-                .max_parallel
-                .min(self.remaining_calls(budget))
-                .min(MAX_PREPARED_QUEUE_TARGETS);
+            let independent_limit = self.wave_limit(budget).min(MAX_PREPARED_QUEUE_TARGETS);
             let mut next = 0;
             while next < order.len() {
                 self.supervisor.read_control().check().into_diagnostic()?;
@@ -5543,7 +5584,7 @@ mod native {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
                     }
-                    if self.release_host_probe() {
+                    if self.release_host_probe(crate::commands::work::host::ProbeScope::Queue) {
                         continue 'planning;
                     }
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
@@ -6726,7 +6767,7 @@ mod native {
             if self.result.is_halted() || self.result.cancelled {
                 return;
             }
-            self.audit().await;
+            while self.audit().await {}
             let yielded = self.result.yield_reason.is_some() || self.yield_to_waiter();
             if !yielded {
                 self.reconcile().await;
@@ -6786,16 +6827,18 @@ mod native {
             }
         }
 
-        async fn audit(&mut self) {
+        /// Plans and runs one audit batch. Returns whether a released probe asks for planning
+        /// again.
+        async fn audit(&mut self) -> bool {
             if !self.inspect_review_health() {
-                return;
+                return false;
             }
             let mut plan = match self.admit_audit().await {
                 Ok(plan) => plan,
-                Err(_) if self.result.is_halted() || self.result.cancelled => return,
+                Err(_) if self.result.is_halted() || self.result.cancelled => return false,
                 Err(error) => {
                     self.failure("audit planning", error);
-                    return;
+                    return false;
                 }
             };
             self.result.audit_progress = Some(AuditProgress {
@@ -6821,12 +6864,15 @@ mod native {
             }
             if plan.candidates.is_empty() {
                 if self.result.audit_deferred_count > 0 {
+                    if self.release_host_probe(crate::commands::work::host::ProbeScope::Audit) {
+                        return true;
+                    }
                     self.deferred("audit dependencies", "pending subjects have unfinished inputs or require processing action; retained for later assessment");
-                    return;
+                    return false;
                 }
                 self.result.audit = Some(Vec::new());
                 if plan.blocked_count > 0 {
-                    return;
+                    return false;
                 }
                 if let Some(progress) = &mut self.result.audit_progress {
                     progress.after = Some(progress.before.clone());
@@ -6836,7 +6882,7 @@ mod native {
                     StageState::Skipped,
                     Some("no audit candidates".into()),
                 );
-                return;
+                return false;
             }
             let paths = plan
                 .candidates
@@ -6844,7 +6890,7 @@ mod native {
                 .map(|candidate| candidate.path.clone())
                 .collect::<Vec<_>>();
             let Some(fresh) = self.replan_audit(&paths).await else {
-                return;
+                return false;
             };
             plan = fresh;
             let selected_deferred = paths
@@ -6866,12 +6912,12 @@ mod native {
                         Some("selected subjects are already current".into()),
                     );
                 }
-                return;
+                return false;
             }
             let mut bounded = plan.input.ensure_ready().is_err();
             // Both routes below capture each subject again, so a wait needs no replan here.
             let Some((session, _)) = self.mutation_session("audit request planning").await else {
-                return;
+                return false;
             };
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work_controlled(
@@ -6884,7 +6930,7 @@ mod native {
                     Ok(required) => bounded |= required,
                     Err(error) => {
                         self.failure("audit request planning", error);
-                        return;
+                        return false;
                     }
                 }
             }
@@ -6907,7 +6953,7 @@ mod native {
                     .map(|candidate| (candidate.path.clone(), vec![candidate.clone()]))
                     .collect::<std::collections::BTreeMap<_, _>>();
                 let Some(mut jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
-                    return;
+                    return false;
                 };
                 while !jobs.is_empty() {
                     jobs.retain(|path, work| {
@@ -6922,11 +6968,11 @@ mod native {
                         break;
                     }
                     if !self.call_budget_available() {
-                        return;
+                        return false;
                     }
                     let keys = jobs.keys().cloned().collect();
                     let Some((session, _)) = self.mutation_session("audit scheduling").await else {
-                        return;
+                        return false;
                     };
                     let selected = match scheduler::select_in_session(
                         &session,
@@ -6937,7 +6983,7 @@ mod native {
                         Ok(None) => break,
                         Err(error) => {
                             self.failure("audit scheduling", error);
-                            return;
+                            return false;
                         }
                     };
                     drop(session);
@@ -6945,7 +6991,7 @@ mod native {
                     if let Some(completed) = self.bounded_audit_wave(&selected, &jobs, &keys).await
                     {
                         if !completed {
-                            return;
+                            return false;
                         }
                         continue;
                     }
@@ -6957,7 +7003,7 @@ mod native {
                             jobs.remove(&selected);
                             continue;
                         }
-                        WorkStep::Failed => return,
+                        WorkStep::Failed => return false,
                         WorkStep::Replan => {
                             originals
                                 .get_mut(&selected)
@@ -6984,7 +7030,7 @@ mod native {
                                 Ok(current) => current,
                                 Err(error) => {
                                     self.failure("bounded audit fresh scope", error);
-                                    return;
+                                    return false;
                                 }
                             };
                             let mut current_originals = std::collections::BTreeMap::<
@@ -6999,11 +7045,11 @@ mod native {
                             }
                             let paths = current_originals.keys().cloned().collect::<Vec<_>>();
                             let Some(fresh) = self.replan_audit(&paths).await else {
-                                return;
+                                return false;
                             };
                             let Some(fresh_jobs) = self.prepare_audit_jobs(&fresh.candidates).await
                             else {
-                                return;
+                                return false;
                             };
                             for (path, subjects) in &current_originals {
                                 if !fresh_jobs.contains_key(path) {
@@ -7031,7 +7077,7 @@ mod native {
                                 "bounded audit publication",
                                 "assessment path is not UTF-8",
                             );
-                            return;
+                            return false;
                         }
                     };
                     if !self
@@ -7041,7 +7087,7 @@ mod native {
                         )
                         .await
                     {
-                        return;
+                        return false;
                     }
                     self.audit_batch
                         .get_or_insert_with(Vec::new)
@@ -7050,7 +7096,7 @@ mod native {
                 }
             } else {
                 self.whole_audit(&plan.candidates).await;
-                return;
+                return false;
             }
             if !deferred_subjects.is_empty() {
                 self.deferred("audit inspection dependencies", format!("{} selected audit subjects require explicit processing action; no assessment was recorded for them", deferred_subjects.len()));
@@ -7058,6 +7104,7 @@ mod native {
             if self.audit_batch.as_ref().is_none_or(Vec::is_empty) {
                 self.result.audit = Some(Vec::new());
             }
+            false
         }
     }
 
@@ -7260,7 +7307,8 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
-            host_probed: false,
+            engines_invoked: std::collections::BTreeSet::new(),
+            host_probe: None,
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,

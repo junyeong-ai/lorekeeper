@@ -176,11 +176,15 @@ paths:
   request is admitted once more, the retry an operator makes after diagnosing the host.
   Failing again without an answer after that release exhausts the hold until the explicit
   retry command clears it; a changed input or request is a fresh judgment. Unusable answers
-  and semantic holds are never released this way. A queue drain with no admissible work
-  releases once per run, as a probe, the oldest pending hold of a current queue task whose
-  engine has not answered since; a probe that fails without an answer renews its failure
-  time and stays pending, so an outage costs at most one unanswered call per run and
-  exhausts nothing. Audit planning reads the same answers but does not probe. Hold reasons
+  and semantic holds are never released this way. When planning finds nothing admissible,
+  a queue drain (or a knowledge audit, for its subjects) releases as a probe the oldest
+  pending hold whose request is still current, whose engine has not answered since and
+  which this run has not invoked yet; if replanning still admits no call, that probe is
+  withdrawn and the next oldest is tried, within the same run, until one admits a call or
+  none remains. While the probe's engine has given no outcome in the run, waves send one
+  call at a time. A probe that fails without an answer renews its failure time and stays
+  pending, so an outage costs at most one unanswered call per engine per run and exhausts
+  nothing. Hold reasons
   name the state: pending holds are retried automatically once the host answers; exhausted
   and unusable ones need diagnosis and the named retry command. The scheduled pause for
   fatal stages is unchanged; navigation refresh commits beside readers holding their

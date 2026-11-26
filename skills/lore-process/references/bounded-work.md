@@ -68,8 +68,9 @@ structural readiness, not admission or completion.
 
 A native failure holds its exact input instead of spending further calls. An invocation
 that ended without an answer (an exit, a timeout or a missing result) is retried
-automatically, once, after the same engine answers another request; a scheduled queue
-drain with nothing else admissible sends the oldest such request as a probe. Reasons say
+automatically, once, after the same engine answers another request; a scheduled process
+or knowledge run with nothing else admissible sends the oldest such request it can still
+reach as a probe, one call at a time. Reasons say
 `retried automatically once the … host answers` for these. A request that fails again after
 the host answered, or one the host answered unusably, stays held: diagnose the reported
 cause before clearing it. Each command below invokes no agent, changes no

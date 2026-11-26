@@ -7,7 +7,7 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::super::host::{HoldIdentity, HostAnswers, PendingHold};
+use super::super::host::{HoldIdentity, HoldScope, HostAnswers, PendingHold};
 use super::super::state::InvocationFailure;
 use super::super::{Subject, Work};
 
@@ -282,9 +282,7 @@ fn identity(receipt: &Receipt) -> HoldIdentity {
 }
 
 /// Every pending unanswered generation hold, for choosing a probe.
-pub(in crate::commands::work) fn pending_holds(
-    root: &Path,
-) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+pub(in crate::commands::work) fn pending_holds(root: &Path) -> miette::Result<Vec<PendingHold>> {
     let mut holds = Vec::new();
     for destination in super::super::host::store_entries(root, Path::new(DIRECTORY))? {
         let Some((_, receipt)) = read(root, &destination)? else {
@@ -296,14 +294,15 @@ pub(in crate::commands::work) fn pending_holds(
         } = &receipt.cause
             && failure.is_unanswered()
         {
-            holds.push((
-                failure.engine(),
-                PendingHold {
-                    identity: identity(&receipt),
-                    task: (receipt.task_id.clone(), receipt.cache_hash.clone()),
-                    failed_at: failure.failed_at(),
+            holds.push(PendingHold {
+                identity: identity(&receipt),
+                engine: failure.engine(),
+                scope: HoldScope::Queue {
+                    task_id: receipt.task_id.clone(),
+                    cache_hash: receipt.cache_hash.clone(),
                 },
-            ));
+                failed_at: failure.failed_at(),
+            });
         }
     }
     Ok(holds)

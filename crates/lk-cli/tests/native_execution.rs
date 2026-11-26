@@ -6080,7 +6080,10 @@ fn a_failed_observation_stops_this_run_without_progress_or_a_persistent_operatio
             "{report}"
         );
         let (_, repeated) = fixture.run("knowledge");
-        assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+        assert_eq!(
+            repeated["semantic_calls"], 1,
+            "a run with nothing admissible probes the held request once: {repeated}"
+        );
         assert_eq!(repeated["halted"], false, "{repeated}");
     }
 }

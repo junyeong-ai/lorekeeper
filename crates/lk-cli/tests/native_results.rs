@@ -253,7 +253,10 @@ fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by
     let held = fixture.run();
     assert_eq!(held["halted"], false, "{held}");
     let first = receipt();
-    assert!(first["cause"]["failure"]["failed_at"].is_string(), "{first}");
+    assert!(
+        first["cause"]["failure"]["failed_at"].is_string(),
+        "{first}"
+    );
     assert!(first["cause"].get("exhausted").is_none(), "{first}");
     let calls = fixture.calls();
 
@@ -265,7 +268,10 @@ fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by
         renewed["cause"].get("exhausted").is_none(),
         "an outage exhausts nothing: {renewed}"
     );
-    assert_ne!(renewed["cause"]["failure"]["failed_at"], first["cause"]["failure"]["failed_at"]);
+    assert_ne!(
+        renewed["cause"]["failure"]["failed_at"],
+        first["cause"]["failure"]["failed_at"]
+    );
     assert!(
         stage(&probed, "queue dependencies")
             .iter()
@@ -1191,7 +1197,10 @@ fn tool_enabled_host_exits_hold_only_their_exact_input_until_guarded_retry() {
         );
         assert_eq!(probed["halted"], false, "{probed}");
         let renewed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_ne!(renewed["cause"]["failure"]["failed_at"], receipt["cause"]["failure"]["failed_at"]);
+        assert_ne!(
+            renewed["cause"]["failure"]["failed_at"],
+            receipt["cause"]["failure"]["failed_at"]
+        );
         assert!(renewed["cause"].get("exhausted").is_none(), "{renewed}");
         let calls = calls + 1;
         std::fs::write(fixture.root().join("mode"), "complete").unwrap();

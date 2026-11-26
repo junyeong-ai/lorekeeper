@@ -7,7 +7,7 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
-use super::host::{HoldIdentity, HostAnswers, PendingHold};
+use super::host::{HoldIdentity, HoldScope, HostAnswers, PendingHold};
 
 const QUEUE_DIRECTORY: &str = ".lorekeeper/queue/preparation-attempts";
 const AUDIT_DIRECTORY: &str = ".lorekeeper/audit-preparation-attempts";
@@ -140,31 +140,41 @@ impl Receipt {
     }
 }
 
-/// Every pending unanswered preparation hold of a queue task, for choosing a probe.
+/// Every pending unanswered preparation hold, for choosing a probe.
 #[cfg(unix)]
-pub(in crate::commands) fn pending_holds(
-    root: &Path,
-) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<PendingHold>> {
     let mut holds = Vec::new();
-    for path in super::host::store_entries(root, Path::new(QUEUE_DIRECTORY))? {
-        let Some((_, receipt)) = read(root, &path)? else {
-            continue;
-        };
-        if let Disposition::InvocationFailed {
-            failure,
-            exhausted: false,
-        } = &receipt.disposition
-            && failure.is_unanswered()
-            && let Some((task, cache)) = receipt.key.task()
-        {
-            holds.push((
-                failure.engine(),
-                PendingHold {
-                    identity: receipt.host_identity(),
-                    task: (task.into(), cache.into()),
-                    failed_at: failure.failed_at(),
+    for directory in [QUEUE_DIRECTORY, AUDIT_DIRECTORY] {
+        for path in super::host::store_entries(root, Path::new(directory))? {
+            let Some((_, receipt)) = read(root, &path)? else {
+                continue;
+            };
+            let Disposition::InvocationFailed {
+                failure,
+                exhausted: false,
+            } = &receipt.disposition
+            else {
+                continue;
+            };
+            if !failure.is_unanswered() {
+                continue;
+            }
+            let scope = match receipt.key.task() {
+                Some((task_id, cache_hash)) => HoldScope::Queue {
+                    task_id: task_id.into(),
+                    cache_hash: cache_hash.into(),
                 },
-            ));
+                None => HoldScope::Audit {
+                    path: receipt.subject.clone(),
+                    subject_revision: receipt.subject_revision.clone(),
+                },
+            };
+            holds.push(PendingHold {
+                identity: receipt.host_identity(),
+                engine: failure.engine(),
+                scope,
+                failed_at: failure.failed_at(),
+            });
         }
     }
     Ok(holds)

@@ -1,7 +1,7 @@
 use super::*;
-#[cfg(unix)]
-use crate::commands::work::host::PendingHold;
 use crate::commands::work::host::{HoldIdentity, HostAnswers};
+#[cfg(unix)]
+use crate::commands::work::host::{HoldScope, PendingHold};
 
 /// The most session timeouts a record written before timeouts became unanswered failures
 /// could count.
@@ -310,11 +310,9 @@ impl InspectionAttempts {
     }
 }
 
-/// Every pending unanswered inspection hold of a queue Work, for choosing a probe.
+/// Every pending unanswered inspection hold, for choosing a probe.
 #[cfg(unix)]
-pub(in crate::commands) fn pending_holds(
-    root: &Path,
-) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<PendingHold>> {
     let mut holds = Vec::new();
     for directory in
         crate::commands::work::host::store_entries(root, Path::new(".lorekeeper/work"))?
@@ -356,25 +354,33 @@ pub(in crate::commands) fn pending_holds(
         };
         let plan = lk_core::json::decode_object(plan.as_bytes()).map_err(fail)?;
         let subject = &plan["context"]["subject"];
-        let (Some("queue"), Some(task_id), Some(cache_hash)) = (
+        let scope = match (
             subject["kind"].as_str(),
             subject["task_id"].as_str(),
             subject["cache_hash"].as_str(),
-        ) else {
-            continue;
+            subject["path"].as_str(),
+            subject["file_revision"].as_str(),
+        ) {
+            (Some("queue"), Some(task_id), Some(cache_hash), _, _) => HoldScope::Queue {
+                task_id: task_id.into(),
+                cache_hash: cache_hash.into(),
+            },
+            (Some("audit"), _, _, Some(path), Some(file_revision)) => HoldScope::Audit {
+                path: path.into(),
+                subject_revision: file_revision.into(),
+            },
+            _ => continue,
         };
         for (node_id, engine, failed_at) in pending {
-            holds.push((
-                engine,
-                PendingHold {
-                    identity: HoldIdentity::Inspection {
-                        work_id: work_id.into(),
-                        node_id,
-                    },
-                    task: (task_id.into(), cache_hash.into()),
-                    failed_at,
+            holds.push(PendingHold {
+                identity: HoldIdentity::Inspection {
+                    work_id: work_id.into(),
+                    node_id,
                 },
-            ));
+                engine,
+                scope: scope.clone(),
+                failed_at,
+            });
         }
     }
     Ok(holds)
