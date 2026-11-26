@@ -231,6 +231,7 @@ mod tests {
                 stdout: b"SECRET".to_vec(),
                 stdout_capture: capture,
                 termination: ChildTermination::Exited,
+                finished_at: jiff::Timestamp::now(),
             };
             let out = serde_json::to_value(HostFailure::from_child(
                 AgentEngine::Codex,

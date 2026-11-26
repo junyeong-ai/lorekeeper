@@ -106,8 +106,6 @@ struct SemanticHold {
 struct OperationalHold {
     input_revision: String,
     failure: super::super::state::InvocationFailure,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    failed_at: Option<jiff::Timestamp>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     exhausted: bool,
 }
@@ -193,12 +191,7 @@ impl Rejections {
             && hold.input_revision == request.input_revision()?
         {
             return Ok(answers
-                .standing(
-                    &self.host_identity(),
-                    &hold.failure,
-                    hold.failed_at,
-                    hold.exhausted,
-                )
+                .standing(&self.host_identity(), &hold.failure, hold.exhausted)
                 .reason(
                     &hold.failure,
                     &format!("lore work select-retry --task-id {}", self.task_id),
@@ -239,7 +232,7 @@ pub(in crate::commands::work) fn pending_holds(
                 PendingHold {
                     identity: rejections.host_identity(),
                     task: (rejections.task_id.clone(), rejections.cache_hash.clone()),
-                    failed_at: hold.failed_at,
+                    failed_at: hold.failure.failed_at(),
                 },
             ));
         }
@@ -305,23 +298,16 @@ pub(in crate::commands::work) fn plan_failed_attempt(
             .as_ref()
             .filter(|hold| hold.input_revision == input_revision);
         if let Some(hold) = prior
-            && answers.standing(
-                &rejections.host_identity(),
-                &hold.failure,
-                hold.failed_at,
-                hold.exhausted,
-            ) != Standing::Released
+            && answers.standing(&rejections.host_identity(), &hold.failure, hold.exhausted)
+                != Standing::Released
         {
             return Err(fail("screening packet already has an operational hold"));
         }
-        let exhausted = answers.exhausts(
-            &failure,
-            prior.map(|hold| (&hold.failure, hold.failed_at, hold.exhausted)),
-        );
+        let exhausted =
+            answers.exhausts(&failure, prior.map(|hold| (&hold.failure, hold.exhausted)));
         rejections.operational = Some(OperationalHold {
             input_revision,
             failure,
-            failed_at: Some(jiff::Timestamp::now()),
             exhausted,
         });
         Ok(())

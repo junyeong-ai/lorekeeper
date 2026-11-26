@@ -14,23 +14,33 @@ fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
         .ok_or_else(|| fail("inspection attempt storage bound overflow"))
 }
 
+/// How a host invocation failed, and when the host finished it. Failures recorded before
+/// that time was kept have none.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum InvocationFailure {
     TimedOut {
         engine: lk_core::execution::AgentEngine,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
     },
     Exited {
         engine: lk_core::execution::AgentEngine,
         code: i32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
     },
     InvalidResponse {
         engine: lk_core::execution::AgentEngine,
         revision: String,
         bytes: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
     },
     MissingResponse {
         engine: lk_core::execution::AgentEngine,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
     },
 }
 
@@ -53,10 +63,20 @@ impl InvocationFailure {
 
     pub(crate) fn engine(&self) -> lk_core::execution::AgentEngine {
         match self {
-            Self::TimedOut { engine }
+            Self::TimedOut { engine, .. }
             | Self::Exited { engine, .. }
             | Self::InvalidResponse { engine, .. }
-            | Self::MissingResponse { engine } => *engine,
+            | Self::MissingResponse { engine, .. } => *engine,
+        }
+    }
+
+    /// When the host finished the failed invocation, if that was recorded.
+    pub(crate) fn failed_at(&self) -> Option<jiff::Timestamp> {
+        match self {
+            Self::TimedOut { failed_at, .. }
+            | Self::Exited { failed_at, .. }
+            | Self::InvalidResponse { failed_at, .. }
+            | Self::MissingResponse { failed_at, .. } => *failed_at,
         }
     }
 }
@@ -111,8 +131,6 @@ enum Attempt {
         canonical_revision: String,
         request_revision: String,
         failure: InvocationFailure,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exhausted: bool,
     },
@@ -253,7 +271,6 @@ impl InspectionAttempts {
         if let Attempt::Failed {
             canonical_revision,
             failure,
-            failed_at,
             exhausted,
             ..
         } = entry
@@ -266,7 +283,7 @@ impl InspectionAttempts {
                 node_id: id.into(),
             };
             return Ok(answers
-                .standing(&identity, failure, *failed_at, *exhausted)
+                .standing(&identity, failure, *exhausted)
                 .reason(failure, &retry));
         }
         let reason = match entry {
@@ -320,10 +337,11 @@ pub(in crate::commands) fn pending_holds(
             .filter_map(|(node_id, entry)| match entry {
                 Attempt::Failed {
                     failure,
-                    failed_at,
                     exhausted: false,
                     ..
-                } if failure.is_unanswered() => Some((node_id, failure.engine(), failed_at)),
+                } if failure.is_unanswered() => {
+                    Some((node_id, failure.engine(), failure.failed_at()))
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -463,19 +481,16 @@ impl Work {
                     Some(Attempt::Failed {
                         canonical_revision: previous,
                         failure,
-                        failed_at,
                         exhausted,
                         ..
-                    }) if *previous == canonical_revision => {
-                        Some((failure.clone(), *failed_at, *exhausted))
-                    }
+                    }) if *previous == canonical_revision => Some((failure.clone(), *exhausted)),
                     _ => None,
                 };
                 let exhausted = answers.exhausts(
                     &failure,
                     prior
                         .as_ref()
-                        .map(|(failure, failed_at, exhausted)| (failure, *failed_at, *exhausted)),
+                        .map(|(failure, exhausted)| (failure, *exhausted)),
                 );
                 attempts.entries.insert(
                     node.id.clone(),
@@ -483,7 +498,6 @@ impl Work {
                         canonical_revision,
                         request_revision,
                         failure,
-                        failed_at: Some(jiff::Timestamp::now()),
                         exhausted,
                     },
                 );
@@ -537,6 +551,7 @@ mod tests {
             AttemptUpdate::Failed(InvocationFailure::Exited {
                 engine: lk_core::execution::AgentEngine::Codex,
                 code: 1,
+                failed_at: Some(jiff::Timestamp::now()),
             }),
             AttemptUpdate::Hold("Review the failed host before another invocation.".into()),
         ] {
@@ -627,6 +642,7 @@ mod tests {
                     AttemptUpdate::Failed(InvocationFailure::Exited {
                         engine: lk_core::execution::AgentEngine::Codex,
                         code: 1,
+                        failed_at: Some(jiff::Timestamp::now()),
                     }),
                 )
                 .unwrap();
@@ -641,6 +657,7 @@ mod tests {
             crate::commands::work::host::record_answer(
                 root.path(),
                 lk_core::execution::AgentEngine::Codex,
+                jiff::Timestamp::now(),
             )
             .unwrap();
         };
@@ -653,6 +670,7 @@ mod tests {
         crate::commands::work::host::record_answer(
             root.path(),
             lk_core::execution::AgentEngine::ClaudeCode,
+            jiff::Timestamp::now(),
         )
         .unwrap();
         assert!(hold().is_some(), "another engine's answer proves nothing");

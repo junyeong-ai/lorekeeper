@@ -168,10 +168,11 @@ paths:
   remain fatal.
   An unanswered failure cannot tell a host fault from a request the host cannot serve, so
   its hold (inspection attempt, generation receipt, screening operational hold or
-  preparation attempt) records when it failed and lasts only until that engine answers
-  again (`work/host.rs`). Every run that records an answered step, usable or not, stores
-  the engine's latest answer in `.lorekeeper/queue/host-answers.json`, whichever operation
-  ran it. A pending hold whose engine answered after its failure no longer holds: the
+  preparation attempt) records when its host ended (`InvocationFailure.failed_at`) and lasts
+  only until that engine answers again (`work/host.rs`). A step whose host returned a
+  response, usable or not, stores its own completion time as the engine's latest answer in
+  `.lorekeeper/queue/host-answers.json`, whichever operation ran it; a launch failure or an
+  answerless exit is no answer, and a parallel wave's settlement order never reorders them. A pending hold whose engine answered after its failure no longer holds: the
   request is admitted once more, the retry an operator makes after diagnosing the host.
   Failing again without an answer after that release exhausts the hold until the explicit
   retry command clears it; a changed input or request is a fresh judgment. Unusable answers

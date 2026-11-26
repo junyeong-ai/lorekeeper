@@ -139,7 +139,6 @@ impl HostAnswers {
         &self,
         identity: &HoldIdentity,
         failure: &InvocationFailure,
-        failed_at: Option<Timestamp>,
         exhausted: bool,
     ) -> Standing {
         if !failure.is_unanswered() || exhausted {
@@ -147,6 +146,7 @@ impl HostAnswers {
                 repeated: exhausted,
             };
         }
+        let failed_at = failure.failed_at();
         let probed = self
             .probe
             .as_ref()
@@ -165,13 +165,13 @@ impl HostAnswers {
     pub(in crate::commands) fn exhausts(
         &self,
         failure: &InvocationFailure,
-        prior: Option<(&InvocationFailure, Option<Timestamp>, bool)>,
+        prior: Option<(&InvocationFailure, bool)>,
     ) -> bool {
         failure.is_unanswered()
-            && prior.is_some_and(|(prior, failed_at, exhausted)| {
+            && prior.is_some_and(|(prior, exhausted)| {
                 prior.is_unanswered()
                     && !exhausted
-                    && self.answered_after(prior.engine(), failed_at)
+                    && self.answered_after(prior.engine(), prior.failed_at())
             })
     }
 
@@ -276,20 +276,24 @@ pub(in crate::commands) fn pending_holds(
     Ok(holds)
 }
 
-/// Records that `engine` answered a request now. Runs hold the workflow lease while they
-/// invoke hosts, so these writes do not race.
+/// Records that `engine` answered a request when its host ended at `answered_at`. Only a
+/// later answer advances the record. Runs hold the workflow lease while they invoke hosts,
+/// so these writes do not race.
 #[cfg(unix)]
-pub(in crate::commands) fn record_answer(root: &Path, engine: AgentEngine) -> miette::Result<()> {
+pub(in crate::commands) fn record_answer(
+    root: &Path,
+    engine: AgentEngine,
+    answered_at: Timestamp,
+) -> miette::Result<()> {
     let mut answers = HostAnswers::load(root)?;
-    let now = Timestamp::now();
     if answers
         .answers
         .get(&engine)
-        .is_some_and(|answered| *answered >= now)
+        .is_some_and(|answered| *answered >= answered_at)
     {
         return Ok(());
     }
-    answers.answers.insert(engine, now);
+    answers.answers.insert(engine, answered_at);
     answers.store(root)
 }
 
@@ -308,10 +312,11 @@ pub(in crate::commands) fn record_probe(root: &Path, hold: &PendingHold) -> miet
 mod tests {
     use super::*;
 
-    fn exited() -> InvocationFailure {
+    fn exited(failed_at: Option<Timestamp>) -> InvocationFailure {
         InvocationFailure::Exited {
             engine: AgentEngine::Codex,
             code: 1,
+            failed_at,
         }
     }
 
@@ -330,7 +335,7 @@ mod tests {
     fn an_unanswered_hold_waits_for_a_later_answer_of_its_engine() {
         let mut answers = HostAnswers::default();
         let standing =
-            |answers: &HostAnswers| answers.standing(&identity(), &exited(), at(10), false);
+            |answers: &HostAnswers| answers.standing(&identity(), &exited(at(10)), false);
         assert_eq!(standing(&answers), Standing::AwaitingAnswer);
         answers
             .answers
@@ -341,21 +346,22 @@ mod tests {
         answers.answers.insert(AgentEngine::Codex, at(11).unwrap());
         assert_eq!(standing(&answers), Standing::Released);
         assert_eq!(
-            answers.standing(&identity(), &exited(), None, false),
+            answers.standing(&identity(), &exited(None), false),
             Standing::Released,
             "a hold recorded before failure times were kept is released by any answer"
         );
         assert_eq!(
-            answers.standing(&identity(), &exited(), at(10), true),
+            answers.standing(&identity(), &exited(at(10)), true),
             Standing::NeedsDiagnosis { repeated: true }
         );
         let unusable = InvocationFailure::InvalidResponse {
             engine: AgentEngine::Codex,
             revision: "a".repeat(64),
             bytes: 2,
+            failed_at: at(10),
         };
         assert_eq!(
-            answers.standing(&identity(), &unusable, at(10), false),
+            answers.standing(&identity(), &unusable, false),
             Standing::NeedsDiagnosis { repeated: false }
         );
     }
@@ -364,26 +370,27 @@ mod tests {
     #[test]
     fn only_a_failure_after_an_answered_release_exhausts_and_a_probe_renews() {
         let mut answers = HostAnswers::default();
-        let prior = exited();
-        assert!(!answers.exhausts(&exited(), None));
-        assert!(!answers.exhausts(&exited(), Some((&prior, at(10), false))));
+        let prior = exited(at(10));
+        let repeat = exited(at(40));
+        assert!(!answers.exhausts(&repeat, None));
+        assert!(!answers.exhausts(&repeat, Some((&prior, false))));
         answers.probe = Some(Probe {
             identity: identity(),
             failed_at: at(10),
         });
         assert_eq!(
-            answers.standing(&identity(), &prior, at(10), false),
+            answers.standing(&identity(), &prior, false),
             Standing::Released
         );
         assert_eq!(
-            answers.standing(&identity(), &prior, at(30), false),
+            answers.standing(&identity(), &exited(at(30)), false),
             Standing::AwaitingAnswer,
             "a renewed failure is no longer the probe"
         );
-        assert!(!answers.exhausts(&exited(), Some((&prior, at(10), false))));
+        assert!(!answers.exhausts(&repeat, Some((&prior, false))));
         answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
-        assert!(answers.exhausts(&exited(), Some((&prior, at(10), false))));
-        assert!(!answers.exhausts(&exited(), Some((&prior, at(30), false))));
+        assert!(answers.exhausts(&repeat, Some((&prior, false))));
+        assert!(!answers.exhausts(&repeat, Some((&exited(at(30)), false))));
     }
 
     #[cfg(unix)]
@@ -409,10 +416,13 @@ mod tests {
     fn answers_persist_monotonically_and_refuse_unknown_state() {
         let root = tempfile::tempdir().unwrap();
         assert!(HostAnswers::load(root.path()).unwrap().answers.is_empty());
-        record_answer(root.path(), AgentEngine::Codex).unwrap();
-        let first = HostAnswers::load(root.path()).unwrap().answers[&AgentEngine::Codex];
-        record_answer(root.path(), AgentEngine::Codex).unwrap();
-        assert!(HostAnswers::load(root.path()).unwrap().answers[&AgentEngine::Codex] >= first);
+        record_answer(root.path(), AgentEngine::Codex, at(20).unwrap()).unwrap();
+        record_answer(root.path(), AgentEngine::Codex, at(10).unwrap()).unwrap();
+        assert_eq!(
+            HostAnswers::load(root.path()).unwrap().answers[&AgentEngine::Codex],
+            at(20).unwrap(),
+            "an answer settled later but given earlier never moves the record back"
+        );
         let path = root.path().join(PATH);
         std::fs::write(
             &path,

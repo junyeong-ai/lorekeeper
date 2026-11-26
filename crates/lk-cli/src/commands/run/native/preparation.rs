@@ -38,6 +38,7 @@ impl Runner<'_> {
                 engine: self.agent_profile(metrics).engine(),
                 revision: lk_core::rss_original::digest(&bytes),
                 bytes: bytes.len(),
+                failed_at: metrics.finished_at,
             },
         )
     }

@@ -66,8 +66,6 @@ impl Key {
 pub(in crate::commands) enum Disposition {
     InvocationFailed {
         failure: super::state::InvocationFailure,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exhausted: bool,
     },
@@ -81,7 +79,6 @@ impl Disposition {
     pub(in crate::commands) fn invocation_failed(failure: super::state::InvocationFailure) -> Self {
         Self::InvocationFailed {
             failure,
-            failed_at: Some(jiff::Timestamp::now()),
             exhausted: false,
         }
     }
@@ -155,7 +152,6 @@ pub(in crate::commands) fn pending_holds(
         };
         if let Disposition::InvocationFailed {
             failure,
-            failed_at,
             exhausted: false,
         } = &receipt.disposition
             && failure.is_unanswered()
@@ -166,7 +162,7 @@ pub(in crate::commands) fn pending_holds(
                 PendingHold {
                     identity: receipt.host_identity(),
                     task: (task.into(), cache.into()),
-                    failed_at: *failed_at,
+                    failed_at: failure.failed_at(),
                 },
             ));
         }
@@ -359,13 +355,9 @@ impl Binding {
         };
         let retry = receipt.retry_command();
         let reason = match &receipt.disposition {
-            Disposition::InvocationFailed {
-                failure,
-                failed_at,
-                exhausted,
-            } => {
+            Disposition::InvocationFailed { failure, exhausted } => {
                 let Some(reason) = HostAnswers::load(root)?
-                    .standing(&receipt.host_identity(), failure, *failed_at, *exhausted)
+                    .standing(&receipt.host_identity(), failure, *exhausted)
                     .reason(failure, &retry)
                 else {
                     return Ok(None);
@@ -399,15 +391,14 @@ impl Binding {
                     disposition:
                         Disposition::InvocationFailed {
                             failure: prior,
-                            failed_at,
                             exhausted: prior_exhausted,
                         },
                     ..
                 },
             )) = self.retained(root)?
         {
-            *exhausted = HostAnswers::load(root)?
-                .exhausts(failure, Some((&prior, failed_at, prior_exhausted)));
+            *exhausted =
+                HostAnswers::load(root)?.exhausts(failure, Some((&prior, prior_exhausted)));
         }
         let path = self.key.path();
         let before = read(root, &path)?.map(|(raw, _)| raw);
@@ -590,6 +581,7 @@ mod tests {
                 Disposition::invocation_failed(super::super::state::InvocationFailure::Exited {
                     engine: lk_core::execution::AgentEngine::Codex,
                     code: 1,
+                    failed_at: Some(jiff::Timestamp::now()),
                 });
             session
                 .apply(binding.plan_record(root, failure).unwrap())
@@ -611,6 +603,7 @@ mod tests {
             crate::commands::work::host::record_answer(
                 root,
                 lk_core::execution::AgentEngine::Codex,
+                jiff::Timestamp::now(),
             )
             .unwrap();
             assert!(binding.held(root).unwrap().is_none());
@@ -623,6 +616,7 @@ mod tests {
                                 super::super::state::InvocationFailure::Exited {
                                     engine: lk_core::execution::AgentEngine::Codex,
                                     code: 1,
+                                    failed_at: Some(jiff::Timestamp::now()),
                                 },
                             ),
                         )
@@ -696,6 +690,7 @@ mod tests {
                             super::super::state::InvocationFailure::Exited {
                                 engine: lk_core::execution::AgentEngine::Codex,
                                 code: 1,
+                                failed_at: Some(jiff::Timestamp::now()),
                             },
                         ),
                     )

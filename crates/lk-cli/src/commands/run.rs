@@ -153,6 +153,13 @@ mod native {
         /// yet a repeat that points at the host.
         #[serde(skip)]
         retried: bool,
+        /// When the host ended this step's invocation.
+        #[serde(skip)]
+        finished_at: Option<jiff::Timestamp>,
+        /// The host returned a response, usable or not: only such a step shows that the
+        /// engine serves requests. A failure to launch or an answerless exit never does.
+        #[serde(skip)]
+        answered: bool,
         work_id: Option<String>,
         node_id: Option<String>,
         node_kind: Option<NodeKind>,
@@ -184,6 +191,8 @@ mod native {
                 channel: HostChannel::Observation,
                 unanswered: false,
                 retried: false,
+                finished_at: None,
+                answered: false,
                 work_id: None,
                 node_id: None,
                 node_kind: None,
@@ -947,12 +956,16 @@ mod native {
                 && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
             {
                 self.host_failures.remove(&step.host());
-                if let Some(execution) = &step.execution
-                    && let Err(error) =
-                        crate::commands::work::host::record_answer(&self.root, execution.engine)
-                {
-                    self.failure("host answer", error);
-                }
+            }
+            if step.answered
+                && let (Some(execution), Some(answered_at)) = (&step.execution, step.finished_at)
+                && let Err(error) = crate::commands::work::host::record_answer(
+                    &self.root,
+                    execution.engine,
+                    answered_at,
+                )
+            {
+                self.failure("host answer", error);
             }
             self.result.work_telemetry.record(step);
         }
@@ -1947,6 +1960,7 @@ mod native {
                     return None;
                 }
             };
+            metrics.finished_at = Some(child.finished_at);
             if !child.success {
                 if child.termination == execution::ChildTermination::TimedOut
                     && self.configuration_is_current()
@@ -1964,6 +1978,7 @@ mod native {
                         ObservationReply::InvocationFailed(
                             crate::commands::work::state::InvocationFailure::TimedOut {
                                 engine: invocation.engine,
+                                failed_at: Some(child.finished_at),
                             },
                         )
                     });
@@ -1982,6 +1997,7 @@ mod native {
                         crate::commands::work::state::InvocationFailure::Exited {
                             engine: invocation.engine,
                             code,
+                            failed_at: Some(child.finished_at),
                         },
                     ));
                 }
@@ -2046,10 +2062,13 @@ mod native {
                     ));
                 }
             };
-            metrics.unanswered |= execution::observation::is_answerless(engine, &bytes);
+            let answerless = execution::observation::is_answerless(engine, &bytes);
+            metrics.unanswered |= answerless;
+            metrics.answered = !answerless;
+            let finished_at = metrics.finished_at;
             let invalid = || {
                 crate::commands::work::InspectionResponse::InvocationFailed(
-                    execution::observation::response_failure(engine, &bytes),
+                    execution::observation::response_failure(engine, &bytes, finished_at),
                 )
             };
             let output = match execution::observation::decode_response(engine, &bytes, limit) {
@@ -2758,6 +2777,8 @@ mod native {
             let mut returned = Vec::new();
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 turn.metrics.agent_duration_ms = Some(attempt.duration_ms);
+                turn.metrics.finished_at =
+                    attempt.result.as_ref().ok().map(|child| child.finished_at);
                 self.result.semantic_duration_ms += attempt.duration_ms;
                 if cancelled || !current {
                     turn.metrics.outcome = if cancelled {
@@ -2805,6 +2826,7 @@ mod native {
                                 crate::commands::work::state::InvocationFailure::Exited {
                                     engine,
                                     code: child.failed_exit().expect("numeric failed exit"),
+                                    failed_at: Some(child.finished_at),
                                 },
                             ),
                         });
@@ -3126,6 +3148,7 @@ mod native {
                     return None;
                 }
             };
+            metrics.finished_at = Some(child.finished_at);
             if child.cancelled {
                 metrics.outcome = WorkOutcome::Cancelled;
                 self.record("native result host", StageState::Cancelled, child.detail);
@@ -3145,13 +3168,20 @@ mod native {
                 if let Some(code) = child.failed_exit() {
                     metrics.unanswered = true;
                     return Some(ResultReply::InvocationFailed(
-                        crate::commands::work::state::InvocationFailure::Exited { engine, code },
+                        crate::commands::work::state::InvocationFailure::Exited {
+                            engine,
+                            code,
+                            failed_at: Some(child.finished_at),
+                        },
                     ));
                 }
                 if child.termination == execution::ChildTermination::TimedOut {
                     metrics.unanswered = true;
                     return Some(ResultReply::InvocationFailed(
-                        crate::commands::work::state::InvocationFailure::TimedOut { engine },
+                        crate::commands::work::state::InvocationFailure::TimedOut {
+                            engine,
+                            failed_at: Some(child.finished_at),
+                        },
                     ));
                 }
                 self.failure(
@@ -3166,8 +3196,10 @@ mod native {
                     .as_u64()
                     .and_then(|limit| usize::try_from(limit).ok())
                     .expect("native response allowance"),
+                child.finished_at,
             ) {
                 Ok(value) => {
+                    metrics.answered = true;
                     metrics.result_json_bytes = Some(
                         serde_json::to_vec(&value)
                             .expect("response serializes")
@@ -3185,6 +3217,9 @@ mod native {
                                 lk_core::execution::AgentEngine::ClaudeCode,
                                 &child.stdout,
                             ));
+                    }
+                    if let execution::result::ResponseError::Remote { failure, .. } = &error {
+                        metrics.answered = !failure.is_unanswered();
                     }
                     if let execution::result::ResponseError::Remote { failure, .. } = &error
                         && (matches!(access, execution::AgentAccess::ReadOnly)
@@ -3682,6 +3717,7 @@ mod native {
                         Ok((response, size))
                     }) {
                         Ok((response, size)) => {
+                            metrics.answered = true;
                             metrics.result_json_bytes = Some(size);
                             Ok(response)
                         }
@@ -3692,8 +3728,13 @@ mod native {
                             metrics.host_failure = Some(
                                 execution::diagnostic::HostFailure::from_response(engine, &bytes),
                             );
-                            let failure = execution::observation::response_failure(engine, &bytes);
+                            let failure = execution::observation::response_failure(
+                                engine,
+                                &bytes,
+                                metrics.finished_at,
+                            );
                             metrics.unanswered = failure.is_unanswered();
+                            metrics.answered = !metrics.unanswered;
                             Err(failure)
                         }
                     }
@@ -4663,14 +4704,20 @@ mod native {
                     metrics: mut step,
                 } = turn;
                 step.agent_duration_ms = Some(attempt.duration_ms);
+                step.finished_at = attempt.result.as_ref().ok().map(|child| child.finished_at);
                 self.result.semantic_duration_ms += attempt.duration_ms;
+                let finished_at = step.finished_at;
                 let failed_reply =
                     |failure| crate::commands::work::ScreeningResponse::InvocationFailed {
                         request: request.clone(),
                         failure,
                     };
                 let invalid_reply = |bytes: &[u8]| {
-                    failed_reply(execution::observation::response_failure(engine, bytes))
+                    failed_reply(execution::observation::response_failure(
+                        engine,
+                        bytes,
+                        finished_at,
+                    ))
                 };
                 let decoded = if cancelled || !current {
                     step.outcome = if cancelled {
@@ -4684,6 +4731,7 @@ mod native {
                         Ok(child) if child.success => {
                             step.unanswered =
                                 execution::observation::is_answerless(engine, &child.stdout);
+                            step.answered = !step.unanswered;
                             match execution::observation::decode_response(
                                 engine,
                                 &child.stdout,
@@ -4743,10 +4791,12 @@ mod native {
                                     crate::commands::work::state::InvocationFailure::Exited {
                                         engine,
                                         code,
+                                        failed_at: finished_at,
                                     }
                                 }
                                 None => crate::commands::work::state::InvocationFailure::TimedOut {
                                     engine,
+                                    failed_at: finished_at,
                                 },
                             };
                             Some(failed_reply(failure))

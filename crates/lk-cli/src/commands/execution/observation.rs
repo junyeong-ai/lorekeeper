@@ -553,14 +553,16 @@ pub(in crate::commands) fn is_answerless(engine: AgentEngine, bytes: &[u8]) -> b
 pub(in crate::commands) fn response_failure(
     engine: AgentEngine,
     bytes: &[u8],
+    failed_at: Option<jiff::Timestamp>,
 ) -> crate::commands::work::state::InvocationFailure {
     if is_answerless(engine, bytes) {
-        crate::commands::work::state::InvocationFailure::MissingResponse { engine }
+        crate::commands::work::state::InvocationFailure::MissingResponse { engine, failed_at }
     } else {
         crate::commands::work::state::InvocationFailure::InvalidResponse {
             engine,
             revision: lk_core::rss_original::digest(bytes),
             bytes: bytes.len(),
+            failed_at,
         }
     }
 }
@@ -650,7 +652,7 @@ mod tests {
         ] {
             assert!(is_answerless(engine, raw.as_bytes()), "{engine:?}: {raw}");
             assert!(decode_response(engine, raw.as_bytes(), 32768).is_err());
-            assert!(response_failure(engine, raw.as_bytes()).is_unanswered());
+            assert!(response_failure(engine, raw.as_bytes(), None).is_unanswered());
         }
         for (engine, raw) in [
             (AgentEngine::Codex, "not JSON"),

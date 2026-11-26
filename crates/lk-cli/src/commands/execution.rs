@@ -25,6 +25,9 @@ pub(super) struct ChildResult {
     pub stdout: Vec<u8>,
     pub stdout_capture: StdoutCapture,
     pub termination: ChildTermination,
+    /// When the child ended, as distinct from when its outcome is recorded: a parallel wave
+    /// settles every child before recording any of them.
+    pub finished_at: jiff::Timestamp,
 }
 
 impl ChildResult {
@@ -460,6 +463,7 @@ async fn run_child(
                         detail, stdout,
                         stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
                         termination: if incomplete_success {ChildTermination::IoFailed} else {ChildTermination::Exited},
+                        finished_at: jiff::Timestamp::now(),
                     });
                 },
                 Err(error) => (false, ChildTermination::IoFailed, format!("child IO: {error}")),
@@ -485,6 +489,7 @@ async fn run_child(
         stdout: Vec::new(),
         stdout_capture: StdoutCapture::Unavailable,
         termination,
+        finished_at: jiff::Timestamp::now(),
     })
 }
 
@@ -566,7 +571,7 @@ async fn run_children(
                             let mut detail = format!("supervised child task: {error}");
                             running.lock().await.stop(&mut detail).await;
                             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
-                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable,termination:ChildTermination::Cancelled})
+                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable,termination:ChildTermination::Cancelled,finished_at:jiff::Timestamp::now()})
                             } else {
                                 Err(miette::miette!("{detail}"))
                             };
@@ -597,6 +602,7 @@ async fn run_children(
                     stdout: Vec::new(),
                     stdout_capture: StdoutCapture::Unavailable,
                     termination: ChildTermination::Cancelled,
+                    finished_at: jiff::Timestamp::now(),
                 })
             } else {
                 Err(miette::miette!("{detail}"))
@@ -945,6 +951,7 @@ mod tests {
                     stdout: Vec::new(),
                     stdout_capture: StdoutCapture::Complete,
                     termination,
+                    finished_at: jiff::Timestamp::now(),
                 };
                 assert_eq!(
                     child.failed_exit(),

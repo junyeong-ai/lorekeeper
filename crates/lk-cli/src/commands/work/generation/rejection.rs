@@ -75,8 +75,6 @@ pub(in crate::commands::work) enum Cause {
     },
     Invocation {
         failure: InvocationFailure,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         exhausted: bool,
     },
@@ -86,7 +84,6 @@ impl Cause {
     pub(in crate::commands::work) fn invocation(failure: InvocationFailure) -> Self {
         Self::Invocation {
             failure,
-            failed_at: Some(jiff::Timestamp::now()),
             exhausted: false,
         }
     }
@@ -267,12 +264,8 @@ pub(in crate::commands::work) fn held(
         receipt.task_id, receipt.input_revision
     );
     Ok(match &receipt.cause {
-        Cause::Invocation {
-            failure,
-            failed_at,
-            exhausted,
-        } => HostAnswers::load(root)?
-            .standing(&identity(&receipt), failure, *failed_at, *exhausted)
+        Cause::Invocation { failure, exhausted } => HostAnswers::load(root)?
+            .standing(&identity(&receipt), failure, *exhausted)
             .reason(failure, &retry),
         Cause::Proposal { .. } => Some(format!(
             "{}; retained native generation input {}; use {retry} after diagnosis",
@@ -299,7 +292,6 @@ pub(in crate::commands::work) fn pending_holds(
         };
         if let Cause::Invocation {
             failure,
-            failed_at,
             exhausted: false,
         } = &receipt.cause
             && failure.is_unanswered()
@@ -309,7 +301,7 @@ pub(in crate::commands::work) fn pending_holds(
                 PendingHold {
                     identity: identity(&receipt),
                     task: (receipt.task_id.clone(), receipt.cache_hash.clone()),
-                    failed_at: *failed_at,
+                    failed_at: failure.failed_at(),
                 },
             ));
         }
@@ -367,7 +359,6 @@ pub(in crate::commands::work) fn plan_record(
                 cause:
                     Cause::Invocation {
                         failure: prior_failure,
-                        failed_at,
                         exhausted: prior_exhausted,
                     },
                 ..
@@ -375,8 +366,8 @@ pub(in crate::commands::work) fn plan_record(
         )) = &prior
         && *input_revision == work.plan.subject_revision
     {
-        *exhausted = HostAnswers::load(root)?
-            .exhausts(failure, Some((prior_failure, *failed_at, *prior_exhausted)));
+        *exhausted =
+            HostAnswers::load(root)?.exhausts(failure, Some((prior_failure, *prior_exhausted)));
     }
     let before = prior.map(|(raw, _)| raw);
     let receipt = Receipt {
@@ -532,8 +523,12 @@ mod tests {
         assert!(reason.contains("exited with status 7"), "{reason}");
         assert!(reason.contains("retried automatically"), "{reason}");
         assert!(held(root, &task, &"e".repeat(64)).unwrap().is_none());
-        crate::commands::work::host::record_answer(root, lk_core::execution::AgentEngine::Codex)
-            .unwrap();
+        crate::commands::work::host::record_answer(
+            root,
+            lk_core::execution::AgentEngine::Codex,
+            jiff::Timestamp::now(),
+        )
+        .unwrap();
         assert!(
             held(root, &task, &"b".repeat(64)).unwrap().is_none(),
             "a hold recorded without its failure time is released by any later answer"
