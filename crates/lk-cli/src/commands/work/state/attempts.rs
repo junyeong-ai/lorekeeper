@@ -3,7 +3,9 @@ use super::*;
 use crate::commands::work::host::PendingHold;
 use crate::commands::work::host::{HoldIdentity, HostAnswers};
 
-const MAX_TIMEOUTS: usize = 2;
+/// The most session timeouts a record written before timeouts became unanswered failures
+/// could count.
+const LEGACY_TIMEOUT_LIMIT: usize = 2;
 const MAX_HOLD_REASON_BYTES: usize = 256;
 
 fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
@@ -101,7 +103,6 @@ impl std::fmt::Display for InvocationFailure {
 
 #[cfg(unix)]
 pub(crate) enum AttemptUpdate {
-    TimedOut,
     Failed(InvocationFailure),
     Hold(String),
     Retry,
@@ -123,6 +124,8 @@ enum Schema {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Attempt {
+    /// Session timeouts counted before a timeout became an unanswered failure; read, never
+    /// written. Its engine and time were not kept, so any recorded answer releases it.
     Timeout {
         request_revision: String,
         count: usize,
@@ -219,7 +222,7 @@ impl InspectionAttempts {
                     count,
                 } => {
                     require_id(request_revision)?;
-                    if *count == 0 || *count > MAX_TIMEOUTS {
+                    if *count == 0 || *count > LEGACY_TIMEOUT_LIMIT {
                         return Err(fail("invalid inspection timeout count"));
                     }
                 }
@@ -286,24 +289,24 @@ impl InspectionAttempts {
                 .standing(&identity, failure, *exhausted)
                 .reason(failure, &retry));
         }
-        let reason = match entry {
+        Ok(match entry {
             Attempt::Timeout {
-                request_revision,
-                count,
+                request_revision, ..
             } if *request_revision == inspection::request_revision(request, contract)?
-                && *count == MAX_TIMEOUTS =>
+                && !answers.has_answer() =>
             {
                 Some(format!(
-                    "inspection {id} reached its {MAX_TIMEOUTS} session timeouts"
+                    "native invocation reached its session timeout; retried automatically once a host answers another request; {retry} retries it now"
                 ))
             }
             Attempt::Held {
                 canonical_revision,
                 reason,
-            } if *canonical_revision == revision(request)? => Some(reason.clone()),
+            } if *canonical_revision == revision(request)? => {
+                Some(format!("{reason}; diagnose the host, then use {retry}"))
+            }
             _ => None,
-        };
-        Ok(reason.map(|reason| format!("{reason}; diagnose the host, then use {retry}")))
+        })
     }
 }
 
@@ -388,6 +391,8 @@ fn validate_reason(reason: &str) -> miette::Result<()> {
 }
 
 impl Work {
+    /// Plans one operational attempt record for an exact ready inspection and returns the hold
+    /// reason it leaves, if any.
     #[cfg(unix)]
     pub fn plan_inspection_attempt(
         &self,
@@ -396,7 +401,7 @@ impl Work {
         request: &Value,
         contract: &str,
         update: AttemptUpdate,
-    ) -> miette::Result<(MutationPlan, usize)> {
+    ) -> miette::Result<(MutationPlan, Option<String>)> {
         let evaluated = self.evaluate(root, resources)?;
         let node = evaluated
             .nodes
@@ -423,13 +428,13 @@ impl Work {
         let canonical_revision = revision(request)?;
         let answers = HostAnswers::load(root)?;
         let current = attempts.entries.get(&node.id);
-        let remaining = match update {
+        let held = match update {
             AttemptUpdate::Retry => {
                 let retryable = match current {
                     Some(Attempt::Timeout {
                         request_revision: previous,
-                        count,
-                    }) => previous == &request_revision && *count == MAX_TIMEOUTS,
+                        ..
+                    }) => previous == &request_revision,
                     Some(
                         Attempt::Failed {
                             canonical_revision: previous,
@@ -443,34 +448,10 @@ impl Work {
                     None => false,
                 };
                 if !retryable {
-                    return Err(fail(
-                        "inspection has no current exhausted timeout or failed invocation",
-                    ));
+                    return Err(fail("inspection has no current failed invocation or hold"));
                 }
                 attempts.entries.remove(&node.id);
-                MAX_TIMEOUTS
-            }
-            AttemptUpdate::TimedOut => {
-                if attempts.reason(request, contract, &answers)?.is_some() {
-                    return Err(fail(
-                        "inspection timeout allowance is already exhausted or held",
-                    ));
-                }
-                let count = match current {
-                    Some(Attempt::Timeout {
-                        request_revision: previous,
-                        count,
-                    }) if previous == &request_revision => *count,
-                    _ => 0,
-                };
-                attempts.entries.insert(
-                    node.id.clone(),
-                    Attempt::Timeout {
-                        request_revision,
-                        count: count + 1,
-                    },
-                );
-                MAX_TIMEOUTS - count - 1
+                None
             }
             AttemptUpdate::Failed(failure) => {
                 failure.validate()?;
@@ -484,6 +465,16 @@ impl Work {
                         exhausted,
                         ..
                     }) if *previous == canonical_revision => Some((failure.clone(), *exhausted)),
+                    Some(Attempt::Timeout {
+                        request_revision: previous,
+                        ..
+                    }) if *previous == request_revision => Some((
+                        InvocationFailure::TimedOut {
+                            engine: failure.engine(),
+                            failed_at: None,
+                        },
+                        false,
+                    )),
                     _ => None,
                 };
                 let exhausted = answers.exhausts(
@@ -501,7 +492,7 @@ impl Work {
                         exhausted,
                     },
                 );
-                0
+                attempts.reason(request, contract, &answers)?
             }
             AttemptUpdate::Hold(reason) => {
                 validate_reason(&reason)?;
@@ -515,7 +506,7 @@ impl Work {
                         reason,
                     },
                 );
-                0
+                attempts.reason(request, contract, &answers)?
             }
         };
         let after = encoded(&attempts)?;
@@ -536,7 +527,7 @@ impl Work {
         mutation
             .publish_expected(root, path, before, after)
             .map_err(fail)?;
-        Ok((mutation, remaining))
+        Ok((mutation, held))
     }
 }
 
@@ -565,10 +556,10 @@ mod tests {
                 .unwrap()
                 .1
                 .unwrap();
-            let (plan, remaining) = work
+            let (plan, held) = work
                 .plan_inspection_attempt(root.path(), &source, &request, "old-contract", update)
                 .unwrap();
-            assert_eq!(remaining, 0);
+            assert!(held.is_some());
             session.apply(plan).unwrap();
             for contract in ["old-contract", "new-contract"] {
                 assert!(
@@ -700,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn original_timeouts_decode_without_rewriting_and_reject_ambiguous_state() {
+    fn legacy_timeouts_are_pending_until_any_answer_and_a_repeat_exhausts() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
@@ -718,14 +709,43 @@ mod tests {
         let raw = value.to_string();
         let path = root.path().join(path(&work).unwrap());
         std::fs::write(&path, &raw).unwrap();
-        assert!(
+        let hold = || {
             work.load_inspection_hold(root.path(), &request, "contract")
                 .unwrap()
-                .is_some()
+        };
+        assert!(
+            hold()
+                .unwrap()
+                .contains("retried automatically once a host answers"),
+            "an exhausted legacy allowance is pending, not exhausted"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
         let duplicate = raw.replacen("\"count\":2", "\"count\":1,\"count\":2", 1);
         assert!(InspectionAttempts::decode(&duplicate, &work, &nodes).is_err());
+        crate::commands::work::host::record_answer(
+            root.path(),
+            lk_core::execution::AgentEngine::Codex,
+            jiff::Timestamp::now(),
+        )
+        .unwrap();
+        assert_eq!(hold(), None);
+        let (plan, held) = work
+            .plan_inspection_attempt(
+                root.path(),
+                &source,
+                &request,
+                "contract",
+                AttemptUpdate::Failed(InvocationFailure::TimedOut {
+                    engine: lk_core::execution::AgentEngine::Codex,
+                    failed_at: Some(jiff::Timestamp::now()),
+                }),
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+        assert!(
+            held.unwrap().contains("again after the host answered"),
+            "a timeout after the release exhausts rather than resetting an allowance"
+        );
     }
 
     #[test]
@@ -746,7 +766,7 @@ mod tests {
                         node.id.clone(),
                         Attempt::Timeout {
                             request_revision: "a".repeat(64),
-                            count: MAX_TIMEOUTS,
+                            count: LEGACY_TIMEOUT_LIMIT,
                         },
                     )
                 })
@@ -763,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn timeouts_bind_exact_requests_and_retry_preserves_semantic_holds() {
+    fn timeouts_hold_their_exact_input_and_retry_preserves_semantic_holds() {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
@@ -775,39 +795,26 @@ mod tests {
             .1
             .unwrap();
         let contract = "contract";
-        for expected in [1, 0] {
-            let (plan, remaining) = work
-                .plan_inspection_attempt(
-                    root.path(),
-                    &source,
-                    &request,
-                    contract,
-                    AttemptUpdate::TimedOut,
-                )
-                .unwrap();
-            assert_eq!(remaining, expected);
-            session.apply(plan).unwrap();
-            assert_eq!(
-                work.load_inspection_hold(root.path(), &request, contract)
-                    .unwrap()
-                    .is_some(),
-                expected == 0
-            );
-        }
+        let timed_out = || {
+            AttemptUpdate::Failed(InvocationFailure::TimedOut {
+                engine: lk_core::execution::AgentEngine::Codex,
+                failed_at: Some(jiff::Timestamp::now()),
+            })
+        };
+        let (plan, held) = work
+            .plan_inspection_attempt(root.path(), &source, &request, contract, timed_out())
+            .unwrap();
+        assert!(held.unwrap().contains("session timeout"));
+        session.apply(plan).unwrap();
         assert!(
-            work.plan_inspection_attempt(
-                root.path(),
-                &source,
-                &request,
-                contract,
-                AttemptUpdate::TimedOut
-            )
-            .is_err()
+            work.plan_inspection_attempt(root.path(), &source, &request, contract, timed_out())
+                .is_err()
         );
         assert!(
             work.load_inspection_hold(root.path(), &request, "different-contract")
                 .unwrap()
-                .is_none()
+                .is_some(),
+            "the hold follows the exact input across contract changes"
         );
         let semantic = work
             .plan_inspection_action(
@@ -879,19 +886,22 @@ mod tests {
                 &source,
                 &request,
                 "contract",
-                AttemptUpdate::TimedOut,
+                AttemptUpdate::Failed(InvocationFailure::TimedOut {
+                    engine: lk_core::execution::AgentEngine::Codex,
+                    failed_at: Some(jiff::Timestamp::now()),
+                }),
             )
             .unwrap();
         session.apply(plan).unwrap();
         let path = root.path().join(path(&work).unwrap());
         let raw = std::fs::read(&path).unwrap();
-        for field in ["schema", "work_id", "count", "node"] {
+        for field in ["schema", "work_id", "failure", "node"] {
             let mut value: Value = serde_json::from_slice(&raw).unwrap();
             let node = request["node_id"].as_str().unwrap();
             match field {
                 "schema" => value["schema"] = json!("unknown"),
                 "work_id" => value["work_id"] = json!("f".repeat(64)),
-                "count" => value["entries"][node]["count"] = json!(MAX_TIMEOUTS + 1),
+                "failure" => value["entries"][node]["failure"]["kind"] = json!("unknown"),
                 "node" => {
                     let entry = value["entries"]
                         .as_object_mut()

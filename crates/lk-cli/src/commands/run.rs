@@ -149,10 +149,6 @@ mod native {
         /// terminal result), as distinct from answering with an unusable one.
         #[serde(skip)]
         unanswered: bool,
-        /// The unanswered invocation is retried under its request's own allowance, so it is not
-        /// yet a repeat that points at the host.
-        #[serde(skip)]
-        retried: bool,
         /// When the host ended this step's invocation.
         #[serde(skip)]
         finished_at: Option<jiff::Timestamp>,
@@ -190,7 +186,6 @@ mod native {
                 host_failure: None,
                 channel: HostChannel::Observation,
                 unanswered: false,
-                retried: false,
                 finished_at: None,
                 answered: false,
                 work_id: None,
@@ -294,7 +289,6 @@ mod native {
             bytes: Vec<u8>,
             limit: usize,
         },
-        TimedOut,
         InvocationFailed(crate::commands::work::state::InvocationFailure),
     }
 
@@ -305,7 +299,6 @@ mod native {
 
     enum ObservationStep {
         Recorded,
-        Retry,
         Refined,
         Deferred(String),
         /// The Work's inputs changed while its host ran; the reply is discarded unrecorded.
@@ -418,7 +411,7 @@ mod native {
     /// one configuration says nothing about another.
     type HostKey = (WorkRole, HostChannel, Option<String>);
 
-    /// Consecutive unretried invocation failures of one host configuration, with no answered call
+    /// Consecutive unanswered invocation failures of one host configuration, with no answered call
     /// on it between them, that end a run. One failure is usually its own request's and is held
     /// or replanned while the run continues; a repeat points at a fault shared by every
     /// request, which further calls would only spend.
@@ -949,9 +942,7 @@ mod native {
                 step.outcome = WorkOutcome::Cancelled;
             }
             if step.unanswered {
-                if !step.retried {
-                    self.count_host_failure(step.host());
-                }
+                self.count_host_failure(step.host());
             } else if step.agent_duration_ms.is_some()
                 && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
             {
@@ -1010,7 +1001,7 @@ mod native {
             }
         }
 
-        /// Counts an invocation that ended without an answer and was not retried. At
+        /// Counts an invocation that ended without an answer. At
         /// `HOST_FAILURE_LIMIT` for one host configuration the run admits no further call, on
         /// any route, and retains unfinished work as a spent budget does.
         fn count_host_failure(&mut self, host: HostKey) {
@@ -1972,16 +1963,12 @@ mod native {
                         execution::diagnostic::Phase::Invocation,
                         &child,
                     ));
-                    return Some(if matches!(metrics.role, WorkRole::Evidence) {
-                        ObservationReply::TimedOut
-                    } else {
-                        ObservationReply::InvocationFailed(
-                            crate::commands::work::state::InvocationFailure::TimedOut {
-                                engine: invocation.engine,
-                                failed_at: Some(child.finished_at),
-                            },
-                        )
-                    });
+                    return Some(ObservationReply::InvocationFailed(
+                        crate::commands::work::state::InvocationFailure::TimedOut {
+                            engine: invocation.engine,
+                            failed_at: Some(child.finished_at),
+                        },
+                    ));
                 }
                 if let Some(code) = child.failed_exit()
                     && self.configuration_is_current()
@@ -2053,9 +2040,6 @@ mod native {
                     bytes,
                     limit,
                 } => (engine, bytes, limit),
-                ObservationReply::TimedOut => {
-                    return Some(crate::commands::work::InspectionResponse::TimedOut);
-                }
                 ObservationReply::InvocationFailed(failure) => {
                     return Some(crate::commands::work::InspectionResponse::InvocationFailed(
                         failure,
@@ -2214,30 +2198,8 @@ mod native {
                     metrics.outcome = WorkOutcome::Failed;
                     self.inspection_deferred.insert(id.into(), reason.clone());
                     self.queue_admitted.clear();
-                    self.deferred(
-                        "bounded invocation held",
-                        format!(
-                            "{node}: {reason}; use lore work retry {id} {node} after diagnosis"
-                        ),
-                    );
+                    self.deferred("bounded invocation held", format!("{node}: {reason}"));
                     ObservationStep::InvocationFailed
-                }
-                Ok(InspectionRecordOutcome::TimedOut { remaining }) => {
-                    metrics.outcome = WorkOutcome::Failed;
-                    if remaining > 0 {
-                        metrics.retried = true;
-                        self.record("bounded inspection timeout", StageState::Skipped, Some(format!("{node}: session timed out; {remaining} automatic retry remains; no observation recorded")));
-                        ObservationStep::Retry
-                    } else {
-                        let reason = format!(
-                            "inspection {node} exhausted its timeout allowance; diagnose the host, then use lore work retry {id} {node}"
-                        );
-                        self.inspection_deferred.insert(id.into(), reason.clone());
-                        self.queue_replan = QueueReplan::Invalidate;
-                        self.queue_admitted.clear();
-                        self.deferred("bounded inspection timeout", &reason);
-                        ObservationStep::Deferred(reason)
-                    }
                 }
                 Ok(InspectionRecordOutcome::Refined { added_nodes }) => {
                     metrics.outcome = WorkOutcome::Refined;
@@ -2281,7 +2243,6 @@ mod native {
                         }
                         InspectionRecordOutcome::Recorded(_)
                         | InspectionRecordOutcome::InvocationFailed(_)
-                        | InspectionRecordOutcome::TimedOut { .. }
                         | InspectionRecordOutcome::Refined { .. } => unreachable!(),
                     };
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
@@ -2804,7 +2765,12 @@ mod native {
                             work_id: turn.work_id.clone(),
                             node_id: turn.node_id.clone(),
                             request: turn.request.clone(),
-                            response: crate::commands::work::InspectionResponse::TimedOut,
+                            response: crate::commands::work::InspectionResponse::InvocationFailed(
+                                crate::commands::work::state::InvocationFailure::TimedOut {
+                                    engine,
+                                    failed_at: Some(child.finished_at),
+                                },
+                            ),
                         });
                         returned.push(turn);
                         continue;
@@ -3739,9 +3705,6 @@ mod native {
                         }
                     }
                 }
-                Some(ObservationReply::TimedOut) => unreachable!(
-                    "whole sections retain failures without an inspection timeout allowance"
-                ),
                 None => return WorkStep::Failed,
             };
             let started = Instant::now();
@@ -3974,9 +3937,7 @@ mod native {
                     .bounded_observation_step(id, progress, request, preparation_duration_ms)
                     .await
                 {
-                    ObservationStep::Recorded
-                    | ObservationStep::Refined
-                    | ObservationStep::Retry => WorkStep::Pending,
+                    ObservationStep::Recorded | ObservationStep::Refined => WorkStep::Pending,
                     ObservationStep::Deferred(reason) => WorkStep::Deferred(reason),
                     ObservationStep::InputsChanged(error) => self.work_inputs_changed(stage, error),
                     ObservationStep::InvocationFailed => {

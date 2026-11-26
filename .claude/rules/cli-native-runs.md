@@ -140,11 +140,12 @@ paths:
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;
   absence is not admission. Resume and authoritative admission still require the lease.
-  Confirmed tool-free Inspect/Reduce session timeouts retain one automatic retry per
-  exact request/contract, then hold only that node. Persist counts separately from
-  observations and semantic actions through the mutation journal; they are not retained
-  semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
-  tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
+  Confirmed session timeouts, numeric nonzero exits and unusable remote responses from
+  tool-free Inspect/Reduce hold only that node's exact input across instruction-contract
+  changes. Attempts persist separately from observations and semantic actions through the
+  mutation journal; they are not retained semantic progress. Timeout counts written before
+  a timeout became an unanswered failure read as pending holds whose engine and time were
+  not kept, so any recorded answer releases them once.
   A confirmed timeout, numeric nonzero exit or answerless exit of a tool-enabled finalizer, after completed process-group cleanup, holds only
   its exact request: each queue task's input in its
   native generation receipt, each audit subject's context as an audit-assessment
@@ -155,9 +156,8 @@ paths:
   distinct from a malformed or oversized answer), on any route and in serial or
   parallel waves, counts against its
   host configuration (role,
-  observation or tool-result host, and execution profile) when the run records its step;
-  a timeout retried under its request's own allowance does not, and an answered call on
-  that configuration, usable or not, clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive
+  observation or tool-result host, and execution profile) when the run records its step,
+  and an answered call on that configuration, usable or not, clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive
   failures of one configuration the run replans without the held requests and continues
   its independent work; at the limit the run admits no further call, through the same
   gate as a spent call budget, for every later stage and drain, and its campaign stops
@@ -186,7 +186,7 @@ paths:
   fatal stages is unchanged; navigation refresh commits beside readers holding their
   snapshot because the search index uses write-ahead logging, and a refresh that still finds
   the index busy exits 75 like a changed capture, so the run defers instead of pausing.
-  `work retry` clears only a current operational hold or exhausted timeout allowance;
+  `work retry` clears only a current operational hold;
   `work hold` suspends an exact ready node without invoking a host or granting refinement.
   Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.
 - Native writer waiting is cancellable, retries only typed contention and validates the

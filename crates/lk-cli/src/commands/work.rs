@@ -2939,7 +2939,6 @@ pub(super) fn inspection_action(
 
 #[cfg(unix)]
 pub(super) enum InspectionResponse {
-    TimedOut,
     InvocationFailed(state::InvocationFailure),
     Complete(Box<state::ObservationCandidate>),
     NeedsAction(String),
@@ -2960,7 +2959,6 @@ pub(super) struct InspectionReply {
 
 #[cfg(unix)]
 pub(super) enum InspectionRecordOutcome {
-    TimedOut { remaining: usize },
     InvocationFailed(String),
     Recorded(state::WorkProgress),
     Refined { added_nodes: usize },
@@ -3165,25 +3163,15 @@ fn record_prepared_inspections(
                             super::execution::observation::contract_revision(&reply.request)?;
                         let (mut plan, outcome) = match response {
                             InspectionResponse::InvocationFailed(failure) => {
-                                let reason = failure.to_string();
-                                let (plan, _) = work.plan_inspection_attempt(
+                                let (plan, held) = work.plan_inspection_attempt(
                                     root,
                                     &prepared.resources,
                                     &reply.request,
                                     &revision,
                                     state::AttemptUpdate::Failed(failure),
                                 )?;
+                                let reason = held.expect("a recorded failure holds its request");
                                 (plan, InspectionRecordOutcome::InvocationFailed(reason))
-                            }
-                            InspectionResponse::TimedOut => {
-                                let (plan, remaining) = work.plan_inspection_attempt(
-                                    root,
-                                    &prepared.resources,
-                                    &reply.request,
-                                    &revision,
-                                    state::AttemptUpdate::TimedOut,
-                                )?;
-                                (plan, InspectionRecordOutcome::TimedOut { remaining })
                             }
                             InspectionResponse::SmallerInspection { reason, response } => {
                                 match work.plan_native_refinement(

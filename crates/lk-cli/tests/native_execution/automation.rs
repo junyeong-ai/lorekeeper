@@ -137,7 +137,7 @@ fn an_unrecordable_concept_defers_graph_stages_and_unreadable_pages_remain_fatal
 }
 
 #[test]
-fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retry() {
+fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_clears_them() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 1, "exec sleep 30");
         let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
@@ -146,21 +146,25 @@ fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retr
         );
         std::fs::write(&fixture.config, config).unwrap();
         configure(&fixture, Some(20), 60);
-        for expected in [1, 2] {
-            let report = run(&fixture, "knowledge", false);
-            assert_eq!(calls(&report), 1, "{report}");
-            assert_eq!(report["runs"][0]["halted"], false, "{report}");
-            assert_eq!(
-                report["runs"][0]["work_steps"][0]["host_failure"]["phase"], "invocation",
-                "{report}"
-            );
-            assert_eq!(
-                report["runs"][0]["work_steps"][0]["host_failure"]["termination"], "timed-out",
-                "{report}"
-            );
-            assert_eq!(usage(&fixture)["reserved_calls"], expected);
-            assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        }
+        let report = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&report), 1, "{report}");
+        assert_eq!(report["runs"][0]["halted"], false, "{report}");
+        assert_eq!(
+            report["runs"][0]["work_steps"][0]["host_failure"]["phase"], "invocation",
+            "{report}"
+        );
+        assert_eq!(
+            report["runs"][0]["work_steps"][0]["host_failure"]["termination"], "timed-out",
+            "{report}"
+        );
+        assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
+        let held = run(&fixture, "knowledge", false);
+        assert_eq!(
+            calls(&held),
+            0,
+            "a timeout holds its node until the host answers: {held}"
+        );
+        assert_eq!(usage(&fixture)["reserved_calls"], 1);
         let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
             .into_iter()
             .map(Result::unwrap)
@@ -199,7 +203,7 @@ fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retr
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 2);
+        assert_eq!(usage(&fixture)["reserved_calls"], 1);
         let agent = fixture.root().join("agent executable");
         let behavior = std::fs::read_to_string(&agent)
             .unwrap()
@@ -211,7 +215,7 @@ fn inspection_timeouts_retry_once_across_runs_and_require_an_exact_explicit_retr
             report["runs"][0]["retained_progress"]["evidence_nodes"], 1,
             "{report}"
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 3);
+        assert_eq!(usage(&fixture)["reserved_calls"], 2);
         assert_eq!(
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan

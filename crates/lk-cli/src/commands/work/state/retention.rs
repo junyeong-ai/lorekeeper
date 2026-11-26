@@ -521,7 +521,10 @@ mod tests {
                 &source,
                 &request,
                 "contract",
-                super::super::AttemptUpdate::TimedOut,
+                super::super::AttemptUpdate::Failed(super::super::InvocationFailure::TimedOut {
+                    engine: lk_core::execution::AgentEngine::Codex,
+                    failed_at: Some(jiff::Timestamp::now()),
+                }),
             )
             .unwrap();
         session.apply(plan).unwrap();

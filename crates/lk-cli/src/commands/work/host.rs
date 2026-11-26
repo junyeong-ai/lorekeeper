@@ -129,6 +129,12 @@ impl HostAnswers {
         })
     }
 
+    /// Whether any engine answered since answers were recorded, which releases a hold that
+    /// kept neither its engine nor its time.
+    pub(in crate::commands) fn has_answer(&self) -> bool {
+        !self.answers.is_empty()
+    }
+
     fn answered_after(&self, engine: AgentEngine, failed_at: Option<Timestamp>) -> bool {
         self.answers
             .get(&engine)

@@ -78,16 +78,15 @@ REVISION are the retained input values the failed run reported.
 
 | Held input | Clear with |
 |---|---|
-| Inspect or reduce node after a failed or exhausted invocation | `lore work retry WORK NODE` |
+| Inspect or reduce node after a failed invocation | `lore work retry WORK NODE` |
 | Known failed input to suspend without another call | `lore work hold WORK NODE --reason "..."` |
 | Extraction screening packet | `lore work select-retry --task-id ID` |
 | Extraction discovery or whole-section preparation | `lore work retry-preparation --stage extraction-discovery\|whole-section --task-id ID --input-revision HASH` |
 | Audit discovery, screening or assessment preparation | `lore work retry-preparation --stage audit-discovery\|audit-screening\|audit-assessment --path PATH --input-revision HASH` |
 | Tool-enabled selected result, bounded result or section finalizer | `lore work retry-generation --task-id ID --input-revision REVISION` |
 
-Tool-free inspect/reduce session timeouts get one automatic retry per exact request and
-native contract; two confirmed timeouts hold the node. Confirmed numeric nonzero exits
-and unusable replies hold the exact input across contract changes. A wave with only
+Confirmed tool-free inspect/reduce session timeouts, numeric nonzero exits and unusable
+replies hold the node's exact input across contract changes. A wave with only
 invocation failures ends the run without pausing the scheduled operation; independent
 successful results stay saved. A confirmed timeout or numeric nonzero exit of a
 tool-enabled result host or section finalizer holds each task of its exact request and
