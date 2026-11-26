@@ -3,7 +3,8 @@
 //! leaves open, and for an evidence-gap review the defining claims still unsupported in
 //! `gap_claims`. Publication renders the callouts beneath the synthesis from those references
 //! and the capture, and records them with each review's authored revision on the concept
-//! (`llm_inputs.synthesis_reviews`, `{}` when it references none), so the marker and every
+//! (`llm_inputs.synthesis_reviews`, a JSON string like every `llm_inputs` value, so a concept
+//! re-render carries it with the synthesis it describes; `{}` when it references none), so the marker and every
 //! reference are Rust's, and a callout follows its reviews from that record, never from prose
 //! whose author Rust cannot establish.
 
@@ -65,7 +66,7 @@ pub(super) fn open_reviews(
         let Some(stored) = owner(path).filter(|stored| owners.insert(stored.clone())) else {
             continue;
         };
-        let address = stored.to_string_lossy().into_owned();
+        let address = lk_core::vault_path::address(&stored);
         let Some(page) = pages
             .get(&stored)
             .and_then(|raw| lk_core::frontmatter::parse_page(raw).ok())
@@ -289,7 +290,10 @@ pub(in crate::commands) fn published_state(
     }) else {
         return Ok(PublishedState::Unrecorded);
     };
-    let Ok(recorded) = serde_json::from_value::<BTreeMap<String, Recorded>>(recorded) else {
+    let Some(Ok(recorded)) = recorded
+        .as_str()
+        .map(serde_json::from_str::<BTreeMap<String, Recorded>>)
+    else {
         return Ok(PublishedState::Owed);
     };
     let owner = |address: &Path| lk_vault::resolve_page_owner(root, address).ok();
@@ -372,7 +376,8 @@ mod tests {
         };
         let recorded = |record: &str| {
             format!(
-                "---\ntype: concept\nllm_inputs:\n  synthesis_reviews: {record}\n---\n## Synthesis\nBody.\n"
+                "---\ntype: concept\nllm_inputs:\n  synthesis_reviews: {}\n---\n## Synthesis\nBody.\n",
+                serde_json::to_string(record).unwrap()
             )
         };
         let conflict = review("conflict", "open", concept);

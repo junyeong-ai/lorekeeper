@@ -1086,9 +1086,13 @@ mod tests {
         );
 
         std::os::unix::fs::symlink("retry.md", root.join("wiki/concepts/alias.md")).unwrap();
-        write(
-            "llm_inputs:\n  synthesis_reviews: {\"wiki/explorations/gap.md\":{\"kind\":\"evidence-gap\",\"revision\":\"r\"}}\n",
-        );
+        write(&format!(
+            "llm_inputs:\n  synthesis_reviews: {}\n",
+            serde_json::to_string(
+                r#"{"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"r"}}"#
+            )
+            .unwrap()
+        ));
         assert_eq!(
             sweep().requested,
             [PathBuf::from(TARGET)],

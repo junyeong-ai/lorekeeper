@@ -294,8 +294,12 @@ pub(super) fn apply(
             let content = super::stamp_policy(&content, Some(task), task.target.kind)?;
             let key = super::super::work::PUBLISHED_REVIEWS_KEY;
             let content = match reviews.record {
-                Some(record) => lk_vault::set_llm_input(&content, key, &record)
-                    .ok_or_else(|| miette::miette!("cannot record referenced reviews"))?,
+                Some(record) => lk_vault::set_llm_input(
+                    &content,
+                    key,
+                    &serde_json::to_string(&record).expect("record serializes"),
+                )
+                .ok_or_else(|| miette::miette!("cannot record referenced reviews"))?,
                 None => content,
             };
             if !dry_run {

@@ -1795,6 +1795,43 @@ mod tests {
         assert!(capture_section(empty, |s| s.concept_synthesis).is_none());
     }
 
+    /// The review references a synthesis publication recorded describe that synthesis, so a
+    /// re-render that keeps the synthesis keeps them, or the callout would outlive its record.
+    #[test]
+    fn a_rerender_keeps_the_review_record_of_the_synthesis_it_preserves() {
+        let record = r#"{"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"r"}}"#;
+        let draft = ConceptDraft {
+            original: None,
+            slug: "rag".into(),
+            name: "RAG".into(),
+            category: ConceptCategory::Unassigned,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 2,
+            preserved_llm_inputs: BTreeMap::from([
+                ("synthesis".into(), "digest".into()),
+                ("synthesis_done".into(), "digest".into()),
+                ("synthesis_reviews".into(), record.into()),
+            ]),
+            preserved_metadata: BTreeMap::new(),
+            preserved_synthesis: Some("An answered synthesis.".into()),
+            synthesis_evidence: None,
+            preserved_sources: None,
+            preserved_related: None,
+            aliases: Vec::new(),
+        };
+        let engine = TemplateEngine::build(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::En)
+            .unwrap();
+        let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
+        assert_eq!(
+            parsed.frontmatter.fields["llm_inputs"]["synthesis_reviews"], record,
+            "{}",
+            page.content
+        );
+    }
+
     /// A synthesis input `backlinks-sync` already recorded is that sweep's promise of a
     /// rewrite, and the queued task reads it as its cache key. A grounding seeded into the
     /// empty section is not an answer to it, so the record stands as written.

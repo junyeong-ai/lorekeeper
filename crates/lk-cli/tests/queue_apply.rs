@@ -2278,14 +2278,19 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
             String::from_utf8_lossy(&output.stderr)
         );
         let page = lk_core::frontmatter::parse_page(&published).unwrap();
-        let recorded = &page.frontmatter.fields["llm_inputs"]["synthesis_reviews"];
+        let recorded: serde_json::Value = serde_json::from_str(
+            page.frontmatter.fields["llm_inputs"]["synthesis_reviews"]
+                .as_str()
+                .expect("the record is a string llm_inputs value"),
+        )
+        .unwrap();
         if callout.is_empty() {
             assert!(
                 published.contains("The source declares retention of 30 days.")
                     && !published.contains("> [!"),
                 "{case}: settled reviews publish without a callout: {published}"
             );
-            assert_eq!(recorded, &serde_json::json!({}), "{case}: {published}");
+            assert_eq!(recorded, serde_json::json!({}), "{case}: {published}");
             continue;
         }
         assert!(
