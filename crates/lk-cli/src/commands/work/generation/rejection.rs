@@ -369,7 +369,7 @@ pub(in crate::commands::work) fn plan_record(
         && *prior_request == request_revision
     {
         *exhausted =
-            HostAnswers::load(root)?.exhausts(failure, Some((prior_failure, *prior_exhausted)));
+            HostAnswers::load(root)?.settle(failure, Some((prior_failure, *prior_exhausted)));
     }
     let before = prior.map(|(raw, _)| raw);
     let receipt = Receipt {

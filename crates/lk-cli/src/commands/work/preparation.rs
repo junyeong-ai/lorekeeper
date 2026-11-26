@@ -410,8 +410,7 @@ impl Binding {
                 },
             )) = self.retained(root)?
         {
-            *exhausted =
-                HostAnswers::load(root)?.exhausts(failure, Some((&prior, prior_exhausted)));
+            *exhausted = HostAnswers::load(root)?.settle(failure, Some((&prior, prior_exhausted)));
         }
         let path = self.key.path();
         let before = read(root, &path)?.map(|(raw, _)| raw);
@@ -597,6 +596,7 @@ mod tests {
                     host: Some(crate::commands::work::state::HostEnd {
                         profile: "codex".into(),
                         at: jiff::Timestamp::now(),
+                        probe_failures: 0,
                     }),
                 });
             session
@@ -637,6 +637,7 @@ mod tests {
                                     host: Some(crate::commands::work::state::HostEnd {
                                         profile: "codex".into(),
                                         at: jiff::Timestamp::now(),
+                                        probe_failures: 0,
                                     }),
                                 },
                             ),
@@ -714,6 +715,7 @@ mod tests {
                                 host: Some(crate::commands::work::state::HostEnd {
                                     profile: "codex".into(),
                                     at: jiff::Timestamp::now(),
+                                    probe_failures: 0,
                                 }),
                             },
                         ),

@@ -158,14 +158,14 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             "{report}"
         );
         assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        for (resume, reserved) in [(false, 2), (true, 3)] {
+        for (resume, sent) in [(false, 1), (true, 0)] {
             let probed = run(&fixture, "knowledge", resume);
             assert_eq!(
                 calls(&probed),
-                1,
-                "each run with nothing admissible probes the held node once: {probed}"
+                sent,
+                "a run with nothing admissible probes the held node once, and its failure spaces the next probe: {probed}"
             );
-            assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+            assert_eq!(usage(&fixture)["reserved_calls"], 2);
         }
         let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
             .into_iter()
@@ -202,7 +202,7 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 3);
+        assert_eq!(usage(&fixture)["reserved_calls"], 2);
         let agent = fixture.root().join("agent executable");
         let behavior = std::fs::read_to_string(&agent)
             .unwrap()
@@ -214,7 +214,7 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
             report["runs"][0]["retained_progress"]["evidence_nodes"], 1,
             "{report}"
         );
-        assert_eq!(usage(&fixture)["reserved_calls"], 4);
+        assert_eq!(usage(&fixture)["reserved_calls"], 3);
         assert_eq!(
             std::fs::read(path.parent().unwrap().join("plan.json")).unwrap(),
             plan
@@ -528,12 +528,19 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
     assert_eq!(attempt["subject"], subject);
     assert_eq!(attempt["disposition"]["failure"]["code"], 7);
     let before = usage(fixture);
-    for resume in [false, true] {
+    // A campaign's later batch may already have probed the hold; a failed probe spaces the
+    // next, so only a hold no probe has failed yet is probed now, once.
+    let already_probed = attempt["disposition"]["failure"]["host"]["probe_failures"]
+        .as_u64()
+        .is_some_and(|failures| failures > 0);
+    let mut probes = 0;
+    for (resume, sent) in [(false, u64::from(!already_probed)), (true, 0)] {
+        probes += sent;
         let probed = run(fixture, "knowledge", resume);
         assert_eq!(
             calls(&probed),
-            1,
-            "a run with nothing admissible probes the held request once: {probed}"
+            sent,
+            "a run with nothing admissible probes the held request once, and its failure spaces the next probe: {probed}"
         );
         assert_eq!(probed["stop_reason"], "deferred", "{probed}");
         let renewed: serde_json::Value =
@@ -575,8 +582,8 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
     assert_eq!(calls(&retried), 1, "{retried}");
     assert_eq!(
         usage(fixture)["reserved_calls"],
-        before["reserved_calls"].as_u64().unwrap() + 3,
-        "two probes, then the retried request"
+        before["reserved_calls"].as_u64().unwrap() + probes + 1,
+        "the probes sent, then the retried request"
     );
 }
 
@@ -623,15 +630,15 @@ fn scheduled_tool_free_failure_holds_its_input_without_pausing_or_refunding_call
         assert_eq!(first["stop_reason"], "deferred");
         assert_eq!(usage(&fixture)["reserved_calls"], 1);
         assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        for (resume, reserved) in [(false, 2), (true, 3)] {
+        for (resume, sent) in [(false, 1), (true, 0)] {
             let probed = run(&fixture, "knowledge", resume);
             assert_eq!(
                 calls(&probed),
-                1,
-                "a run with nothing admissible probes the held input once: {probed}"
+                sent,
+                "a run with nothing admissible probes the held input once, and its failure spaces the next probe: {probed}"
             );
             assert_eq!(probed["stop_reason"], "deferred");
-            assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+            assert_eq!(usage(&fixture)["reserved_calls"], 2);
             assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
         }
     }

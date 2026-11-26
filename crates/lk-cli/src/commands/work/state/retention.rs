@@ -526,6 +526,7 @@ mod tests {
                     host: Some(crate::commands::work::state::HostEnd {
                         profile: "codex".into(),
                         at: jiff::Timestamp::now(),
+                        probe_failures: 0,
                     }),
                 }),
             )

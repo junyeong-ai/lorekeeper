@@ -1046,6 +1046,7 @@ mod native {
                             &self.hosts_invoked,
                             holds,
                             self.supervisor.read_control(),
+                            jiff::Timestamp::now(),
                         )
                     });
                     match candidates {
@@ -1116,6 +1117,7 @@ mod native {
                 .map(|execution| crate::commands::work::state::HostEnd {
                     profile: execution.profile.clone(),
                     at: finished_at,
+                    probe_failures: 0,
                 })
         }
 

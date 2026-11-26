@@ -192,7 +192,12 @@ paths:
   earlier run released and whose host has not answered since counts as this run's probe,
   since that run may have stopped before sending it. A probe that
   fails without an answer renews its failure time and stays pending, so an outage costs at
-  most one unanswered call per host per run and exhausts nothing. Hold reasons
+  most one unanswered call per host per run and exhausts nothing. The renewed failure counts
+  its consecutive failed probes (`HostEnd.probe_failures`), and the hold is a probe
+  candidate again only 5 minutes × 2^(n−1) after that failure, at most 24 hours
+  (`work::host::probe_backoff`), so a request that always fails after its host served it
+  stops spending a call every scheduled run; its hold reason names the next probe time. An
+  answer of its host, or an explicit retry, still releases it at once. Hold reasons
   name the state: pending holds are retried automatically once the host answers; exhausted
   and unusable ones need diagnosis and the named retry command. The scheduled pause for
   fatal stages is unchanged; navigation refresh commits beside readers holding their

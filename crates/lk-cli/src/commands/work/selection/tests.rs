@@ -531,6 +531,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
         host: Some(crate::commands::work::state::HostEnd {
             profile: "codex".into(),
             at: jiff::Timestamp::now(),
+            probe_failures: 0,
         }),
     };
     fixture.apply(plan_failed_attempt(&fixture.root, &request, failure()).unwrap());

@@ -23,6 +23,15 @@ fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
 pub(crate) struct HostEnd {
     pub profile: String,
     pub at: jiff::Timestamp,
+    /// How many consecutive probes of this held request, this one included, ended without an
+    /// answer; it spaces the next probe (`work::host::probe_backoff`). Zero for a failure that
+    /// was no probe.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub probe_failures: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 
 /// How a host invocation failed, and which host ended it when. Failures recorded before the
@@ -88,6 +97,15 @@ impl InvocationFailure {
             | Self::Exited { host, .. }
             | Self::InvalidResponse { host, .. }
             | Self::MissingResponse { host, .. } => host.as_ref(),
+        }
+    }
+
+    pub(crate) fn host_mut(&mut self) -> Option<&mut HostEnd> {
+        match self {
+            Self::TimedOut { host, .. }
+            | Self::Exited { host, .. }
+            | Self::InvalidResponse { host, .. }
+            | Self::MissingResponse { host, .. } => host.as_mut(),
         }
     }
 }
@@ -475,7 +493,7 @@ impl Work {
                 attempts.entries.remove(&node.id);
                 None
             }
-            AttemptUpdate::Failed(failure) => {
+            AttemptUpdate::Failed(mut failure) => {
                 failure.validate()?;
                 if attempts.reason(request, contract, &answers)?.is_some() {
                     return Err(fail("inspection already has a current operational hold"));
@@ -489,12 +507,12 @@ impl Work {
                     }) if *previous == canonical_revision
                         && *previous_request == request_revision =>
                     {
-                        answers.exhausts(&failure, Some((prior, *exhausted)))
+                        answers.settle(&mut failure, Some((prior, *exhausted)))
                     }
                     Some(Attempt::Timeout {
                         request_revision: previous,
                         ..
-                    }) if *previous == request_revision => answers.exhausts_legacy(&failure),
+                    }) if *previous == request_revision => answers.settle_legacy(&mut failure),
                     _ => false,
                 };
                 attempts.entries.insert(
@@ -559,6 +577,7 @@ mod tests {
                 host: Some(crate::commands::work::state::HostEnd {
                     profile: "codex".into(),
                     at: jiff::Timestamp::now(),
+                    probe_failures: 0,
                 }),
             }),
             AttemptUpdate::Hold("Review the failed host before another invocation.".into()),
@@ -653,6 +672,7 @@ mod tests {
                         host: Some(crate::commands::work::state::HostEnd {
                             profile: "codex".into(),
                             at: jiff::Timestamp::now(),
+                            probe_failures: 0,
                         }),
                     }),
                 )
@@ -783,6 +803,7 @@ mod tests {
                     host: Some(crate::commands::work::state::HostEnd {
                         profile: "codex".into(),
                         at: jiff::Timestamp::now(),
+                        probe_failures: 0,
                     }),
                 }),
             )
@@ -847,6 +868,7 @@ mod tests {
                 host: Some(crate::commands::work::state::HostEnd {
                     profile: "codex".into(),
                     at: jiff::Timestamp::now(),
+                    probe_failures: 0,
                 }),
             })
         };
@@ -940,6 +962,7 @@ mod tests {
                     host: Some(crate::commands::work::state::HostEnd {
                         profile: "codex".into(),
                         at: jiff::Timestamp::now(),
+                        probe_failures: 0,
                     }),
                 }),
             )

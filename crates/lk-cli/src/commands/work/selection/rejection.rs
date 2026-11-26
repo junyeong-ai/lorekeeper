@@ -293,7 +293,7 @@ pub(in crate::commands::work) fn plan_rejection(
 pub(in crate::commands::work) fn plan_failed_attempt(
     root: &Path,
     request: &Request,
-    failure: super::super::state::InvocationFailure,
+    mut failure: super::super::state::InvocationFailure,
 ) -> miette::Result<MutationPlan> {
     let input_revision = request.input_revision()?;
     let answers = HostAnswers::load(root)?;
@@ -308,8 +308,8 @@ pub(in crate::commands::work) fn plan_failed_attempt(
         {
             return Err(fail("screening packet already has an operational hold"));
         }
-        let exhausted = answers.exhausts(
-            &failure,
+        let exhausted = answers.settle(
+            &mut failure,
             prior
                 .filter(|hold| {
                     hold.request_revision.as_deref() == Some(request.request_revision.as_str())

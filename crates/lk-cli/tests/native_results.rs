@@ -780,6 +780,22 @@ impl Fixture {
             .and_then(Value::as_str)
             == Some(task.cache_hash.as_str())
     }
+    /// Moves every generation hold's failure earlier by `elapsed`, as if that much time had
+    /// passed since it, so its probe backoff can elapse within a test.
+    fn age_generation_holds(&self, elapsed: jiff::SignedDuration) {
+        let store = self
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections");
+        for entry in std::fs::read_dir(store).unwrap() {
+            let path = entry.unwrap().path();
+            let mut receipt: Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let host = &mut receipt["cause"]["failure"]["host"];
+            let at: jiff::Timestamp = host["at"].as_str().unwrap().parse().unwrap();
+            host["at"] = json!((at - elapsed).to_string());
+            std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        }
+    }
     fn calls(&self) -> usize {
         std::fs::read_to_string(self.root().join("calls.jsonl"))
             .map(|raw| raw.lines().count())
@@ -1402,7 +1418,22 @@ fn another_profile_of_the_same_engine_never_releases_a_held_request() {
     let probed = fixture.run();
     assert_eq!(probed["semantic_calls"], 1, "{probed}");
     assert!(receipt()["cause"].get("exhausted").is_none(), "{probed}");
+    assert_eq!(
+        receipt()["cause"]["failure"]["host"]["probe_failures"],
+        1,
+        "{probed}"
+    );
     std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+    let spaced = fixture.run();
+    assert_eq!(
+        spaced["semantic_calls"], 0,
+        "a failed probe spaces the next one: {spaced}"
+    );
+    assert!(
+        spaced.to_string().contains("probed again no earlier than"),
+        "{spaced}"
+    );
+    fixture.age_generation_holds(jiff::SignedDuration::from_mins(6));
     let recovered = fixture.run();
     assert!(fixture.done(&failing), "{recovered}");
 }

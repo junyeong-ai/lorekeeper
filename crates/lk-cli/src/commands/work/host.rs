@@ -119,10 +119,14 @@ impl Standing {
         match self {
             Self::Released => None,
             Self::AwaitingAnswer => Some(format!(
-                "{failure}; retried automatically once the {} host answers another request; {retry} retries it now",
+                "{failure}; retried automatically once the {} host answers another request{}; {retry} retries it now",
                 failure
                     .host()
-                    .map_or(failure.engine().as_str(), |host| host.profile.as_str())
+                    .map_or(failure.engine().as_str(), |host| host.profile.as_str()),
+                next_probe(failure.host()).map_or_else(String::new, |next| format!(
+                    ", or probed again no earlier than {next} after {} failed probe(s)",
+                    failure.host().map_or(0, |host| host.probe_failures)
+                ))
             )),
             Self::NeedsDiagnosis { repeated: true } => Some(format!(
                 "{failure} again after the host answered; diagnose the request, then use {retry}"
@@ -132,6 +136,23 @@ impl Standing {
             }
         }
     }
+}
+
+/// How long a hold whose last `probe_failures` consecutive probes ended without an answer
+/// waits before it may be probed again: five minutes, doubling per further failed probe, at
+/// most a day. A request whose wrapper always fails after the provider served it would
+/// otherwise spend one call every scheduled run, indefinitely.
+pub(in crate::commands) fn probe_backoff(probe_failures: u32) -> jiff::SignedDuration {
+    const FIRST_MINUTES: i64 = 5;
+    const MAX_MINUTES: i64 = 24 * 60;
+    let doublings = probe_failures.saturating_sub(1).min(16);
+    jiff::SignedDuration::from_mins((FIRST_MINUTES << doublings).min(MAX_MINUTES))
+}
+
+/// When a hold that failed on `host` may next be probed, if a failed probe spaced it.
+pub(in crate::commands) fn next_probe(host: Option<&HostEnd>) -> Option<Timestamp> {
+    host.filter(|host| host.probe_failures > 0)
+        .and_then(|host| host.at.checked_add(probe_backoff(host.probe_failures)).ok())
 }
 
 /// What a pending hold's request belongs to, which decides whether a probe can still reach it.
@@ -283,13 +304,6 @@ impl HostAnswers {
         !self.answered_since(None, None) && !self.is_probe(identity, None)
     }
 
-    /// Whether an unanswered failure after a legacy timeout hold exhausts it: like
-    /// [`Self::exhausts`], once any answer released that hold.
-    #[cfg(unix)]
-    pub(in crate::commands) fn exhausts_legacy(&self, failure: &InvocationFailure) -> bool {
-        failure.is_unanswered() && self.answered_since(None, None)
-    }
-
     pub(in crate::commands) fn standing(
         &self,
         identity: &HoldIdentity,
@@ -310,21 +324,52 @@ impl HostAnswers {
         }
     }
 
-    /// Whether a new unanswered failure of a request exhausts it: its prior hold was
-    /// released by an answer the engine gave after that earlier failure. A probe released
-    /// without such an answer renews the hold instead.
+    /// Settles a new failure of a request against its `prior` hold and returns whether it
+    /// exhausts the request: an unanswered failure after an answer of the prior hold's host
+    /// released it. A failure while the prior hold still awaited an answer was its probe: it
+    /// renews the hold, and `failure` records one more consecutive probe failure, which spaces
+    /// the next probe (`probe_backoff`).
     #[cfg(unix)]
-    pub(in crate::commands) fn exhausts(
+    pub(in crate::commands) fn settle(
         &self,
-        failure: &InvocationFailure,
+        failure: &mut InvocationFailure,
         prior: Option<(&InvocationFailure, bool)>,
     ) -> bool {
-        failure.is_unanswered()
-            && prior.is_some_and(|(prior, exhausted)| {
-                prior.is_unanswered()
-                    && !exhausted
-                    && self.answered_since(Some(prior.engine()), prior.host())
-            })
+        let Some((prior, false)) = prior.filter(|(prior, _)| prior.is_unanswered()) else {
+            return false;
+        };
+        let released = self.answered_since(Some(prior.engine()), prior.host());
+        self.settle_renewal(failure, released, prior.host())
+    }
+
+    /// [`Self::settle`] after a legacy timeout hold, which kept neither engine nor time and
+    /// is released by any answer.
+    #[cfg(unix)]
+    pub(in crate::commands) fn settle_legacy(&self, failure: &mut InvocationFailure) -> bool {
+        let released = self.answered_since(None, None);
+        self.settle_renewal(failure, released, None)
+    }
+
+    #[cfg(unix)]
+    fn settle_renewal(
+        &self,
+        failure: &mut InvocationFailure,
+        released: bool,
+        prior: Option<&HostEnd>,
+    ) -> bool {
+        if !failure.is_unanswered() {
+            return false;
+        }
+        if released {
+            return true;
+        }
+        let renewed = prior
+            .map_or(0, |host| host.probe_failures)
+            .saturating_add(1);
+        if let Some(host) = failure.host_mut() {
+            host.probe_failures = renewed;
+        }
+        false
     }
 
     /// The host of a probe an earlier run released and whose host has not answered since:
@@ -340,7 +385,8 @@ impl HostAnswers {
     }
 
     /// The pending holds a probe may release for `scope`, oldest failure first: their
-    /// request is still current, their host has not answered since, and this run has not yet
+    /// request is still current, their probe backoff has elapsed by `now`, their host has
+    /// not answered since, and this run has not yet
     /// invoked that host.
     #[cfg(unix)]
     pub(in crate::commands) fn probe_candidates(
@@ -350,6 +396,7 @@ impl HostAnswers {
         invoked: &InvokedHosts,
         holds: Vec<PendingHold>,
         read: &lk_vault::ReadControl,
+        now: Timestamp,
     ) -> miette::Result<Vec<PendingHold>> {
         let mut candidates = Vec::new();
         let mut queue = None;
@@ -362,6 +409,7 @@ impl HostAnswers {
             if reachable
                 && !invoked.reached(hold.engine, hold.host.as_ref())
                 && !self.answered_since(hold.engine, hold.host.as_ref())
+                && next_probe(hold.host.as_ref()).is_none_or(|next| next <= now)
                 && hold.scope.is_current(root, &mut queue, read)?
             {
                 candidates.push(hold);
@@ -512,6 +560,7 @@ mod tests {
         Some(HostEnd {
             profile: profile.into(),
             at: at(seconds).unwrap(),
+            probe_failures: 0,
         })
     }
 
@@ -582,8 +631,8 @@ mod tests {
         let mut answers = HostAnswers::default();
         let prior = exited(host("synthesis", 10));
         let repeat = exited(host("synthesis", 40));
-        assert!(!answers.exhausts(&repeat, None));
-        assert!(!answers.exhausts(&repeat, Some((&prior, false))));
+        assert!(!answers.settle(&mut repeat.clone(), None));
+        assert!(!answers.settle(&mut repeat.clone(), Some((&prior, false))));
         answers.probe = Some(Probe {
             identity: identity(),
             engine: Some(AgentEngine::Codex),
@@ -603,12 +652,12 @@ mod tests {
             Standing::AwaitingAnswer,
             "a renewed failure is no longer the probe"
         );
-        assert!(!answers.exhausts(&repeat, Some((&prior, false))));
+        assert!(!answers.settle(&mut repeat.clone(), Some((&prior, false))));
         answers
             .profiles
             .insert("inspection".into(), at(20).unwrap());
         assert!(
-            !answers.exhausts(&repeat, Some((&prior, false))),
+            !answers.settle(&mut repeat.clone(), Some((&prior, false))),
             "another host's answer released nothing"
         );
         answers.profiles.insert("synthesis".into(), at(20).unwrap());
@@ -617,13 +666,51 @@ mod tests {
             None,
             "an answer of the probe's host settles it"
         );
-        assert!(answers.exhausts(&repeat, Some((&prior, false))));
-        assert!(!answers.exhausts(&repeat, Some((&exited(host("synthesis", 30)), false))));
+        assert!(answers.settle(&mut repeat.clone(), Some((&prior, false))));
+        assert!(!answers.settle(
+            &mut repeat.clone(),
+            Some((&exited(host("synthesis", 30)), false))
+        ));
     }
 
     #[cfg(unix)]
     #[test]
-    fn probe_candidates_are_current_reachable_unreached_and_oldest_first() {
+    fn each_failed_probe_doubles_the_wait_before_the_next_from_five_minutes_to_a_day() {
+        let minutes = |failures| probe_backoff(failures).as_mins();
+        assert_eq!(
+            [1, 2, 3, 4, 9, 64, u32::MAX].map(minutes),
+            [5, 10, 20, 40, 1_280, 1_440, 1_440]
+        );
+        let answers = HostAnswers::default();
+        let mut first = exited(host("synthesis", 10));
+        assert!(!answers.settle(&mut first, None));
+        assert_eq!(
+            first.host().unwrap().probe_failures,
+            0,
+            "no probe preceded it"
+        );
+        let mut probed = exited(host("synthesis", 400));
+        assert!(!answers.settle(&mut probed, Some((&first, false))));
+        assert_eq!(probed.host().unwrap().probe_failures, 1);
+        let mut again = exited(host("synthesis", 800));
+        assert!(!answers.settle(&mut again, Some((&probed, false))));
+        assert_eq!(again.host().unwrap().probe_failures, 2);
+        assert_eq!(
+            next_probe(again.host()),
+            Some(Timestamp::from_second(800 + 10 * 60).unwrap())
+        );
+        let reason = answers
+            .standing(&identity(), &again, false)
+            .reason(&again, "lore work retry");
+        assert!(
+            reason.is_some_and(|reason| reason.contains("probed again no earlier than")),
+            "the report names when the hold is next probed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn probe_candidates_are_current_reachable_unreached_due_and_oldest_first() {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
         std::fs::write(root.path().join("wiki/concepts/subject.md"), "Subject").unwrap();
@@ -645,6 +732,14 @@ mod tests {
                 hold("newer", "synthesis", &current, 20),
                 hold("older", "inspection", &current, 10),
                 hold("stale", "synthesis", "changed", 5),
+                PendingHold {
+                    host: Some(HostEnd {
+                        profile: "spaced".into(),
+                        at: at(900).unwrap(),
+                        probe_failures: 1,
+                    }),
+                    ..hold("spaced", "spaced", &current, 900)
+                },
             ];
             answers
                 .probe_candidates(
@@ -653,6 +748,7 @@ mod tests {
                     invoked,
                     holds,
                     &lk_vault::ReadControl::default(),
+                    at(1_000).unwrap(),
                 )
                 .unwrap()
                 .into_iter()
