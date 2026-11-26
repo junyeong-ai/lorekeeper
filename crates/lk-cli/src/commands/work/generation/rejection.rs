@@ -347,6 +347,7 @@ pub(in crate::commands::work) fn plan_record(
     } = binding;
     let destination = path(task);
     let prior = read(root, &destination)?;
+    let request_revision = super::digest(request)?;
     let mut cause = cause;
     if let Cause::Invocation {
         failure, exhausted, ..
@@ -355,6 +356,7 @@ pub(in crate::commands::work) fn plan_record(
             _,
             Receipt {
                 input_revision,
+                request_revision: prior_request,
                 cause:
                     Cause::Invocation {
                         failure: prior_failure,
@@ -364,6 +366,7 @@ pub(in crate::commands::work) fn plan_record(
             },
         )) = &prior
         && *input_revision == work.plan.subject_revision
+        && *prior_request == request_revision
     {
         *exhausted =
             HostAnswers::load(root)?.exhausts(failure, Some((prior_failure, *prior_exhausted)));
@@ -375,7 +378,7 @@ pub(in crate::commands::work) fn plan_record(
         cache_hash: task.cache_hash.clone(),
         input_revision: work.plan.subject_revision.clone(),
         input,
-        request_revision: super::digest(request)?,
+        request_revision,
         cause,
     };
     receipt.cause.validate()?;

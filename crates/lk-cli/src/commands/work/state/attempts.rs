@@ -476,10 +476,14 @@ impl Work {
                 let prior = match current {
                     Some(Attempt::Failed {
                         canonical_revision: previous,
+                        request_revision: previous_request,
                         failure,
                         exhausted,
-                        ..
-                    }) if *previous == canonical_revision => Some((failure.clone(), *exhausted)),
+                    }) if *previous == canonical_revision
+                        && *previous_request == request_revision =>
+                    {
+                        Some((failure.clone(), *exhausted))
+                    }
                     Some(Attempt::Timeout {
                         request_revision: previous,
                         ..
@@ -641,13 +645,13 @@ mod tests {
             .unwrap()
             .1
             .unwrap();
-        let fail_again = || {
+        let fail_under = |contract: &str| {
             let (plan, _) = work
                 .plan_inspection_attempt(
                     root.path(),
                     &source,
                     &request,
-                    "contract",
+                    contract,
                     AttemptUpdate::Failed(InvocationFailure::Exited {
                         engine: lk_core::execution::AgentEngine::Codex,
                         code: 1,
@@ -660,6 +664,7 @@ mod tests {
                 .unwrap();
             session.apply(plan).unwrap();
         };
+        let fail_again = || fail_under("contract");
         let hold = || {
             work.load_inspection_hold(root.path(), &request, "contract")
                 .unwrap()
@@ -712,6 +717,13 @@ mod tests {
         assert!(
             hold().unwrap().contains("retried automatically"),
             "an explicit retry starts a fresh judgment"
+        );
+        answer();
+        assert_eq!(hold(), None);
+        fail_under("changed-contract");
+        assert!(
+            hold().unwrap().contains("retried automatically"),
+            "a request under a changed contract is a fresh judgment, not the released retry"
         );
     }
 
