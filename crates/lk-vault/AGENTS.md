@@ -243,7 +243,8 @@ Cards and guard bytes exist only for roster members; `discover_queries` stays co
   (`READONLY_DIRECTORY`, or `CANTOPEN` on a read-only mount or Windows) and neither a
   `-wal` nor a `-journal` file exists, the main database holds every commit and is read
   `immutable=1`. A leftover log, a hot journal (`READONLY_ROLLBACK`/`READONLY_RECOVERY`)
-  and any other failure keep their error.
+  and any other failure keep their error. Immutable reading takes no locks, so it assumes
+  no concurrent writer refreshes the same index through another, writable mount.
   Final graph verification may supply exact file revisions and verified page owners
   for overlapping search inputs. Enumerate the complete search inventory independently,
   check owners and read uncovered paths; never reuse initial or prior-phase proofs.

@@ -199,7 +199,9 @@ paths:
   candidate again only 5 minutes × 2^(n−1) after that failure, at most 24 hours
   (`work::host::probe_backoff`), so a request that always fails after its host served it
   stops spending a call every scheduled run; its hold reason names the next probe time. An
-  answer of its host, or an explicit retry, still releases it at once. Hold reasons
+  answer of its host, or an explicit retry, still releases it at once. The backoff has no
+  terminal cutoff by design: a run sends at most one probe and a hold at most one probe per
+  24 hours, and a multi-day outage must not exhaust holds that only await their host. Hold reasons
   name the state: pending holds are retried automatically once the host answers; exhausted
   and unusable ones need diagnosis and the named retry command. The scheduled pause for
   fatal stages is unchanged; navigation refresh commits beside readers holding their
