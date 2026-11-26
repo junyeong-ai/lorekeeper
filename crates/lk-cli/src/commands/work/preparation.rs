@@ -6,6 +6,9 @@ use lk_vault::{MutationPlan, MutationSession};
 use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+use super::host::{HoldIdentity, HostAnswers, PendingHold};
+
 const QUEUE_DIRECTORY: &str = ".lorekeeper/queue/preparation-attempts";
 const AUDIT_DIRECTORY: &str = ".lorekeeper/audit-preparation-attempts";
 const SCHEMA: &str = "native-preparation-attempt-v1";
@@ -20,7 +23,7 @@ pub enum Stage {
     AuditAssessment,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "kebab-case", deny_unknown_fields)]
 pub(in crate::commands) enum Key {
     ExtractionDiscovery { task_id: String, cache_hash: String },
@@ -63,6 +66,10 @@ impl Key {
 pub(in crate::commands) enum Disposition {
     InvocationFailed {
         failure: super::state::InvocationFailure,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exhausted: bool,
     },
     NeedsAction {
         reason: String,
@@ -70,9 +77,18 @@ pub(in crate::commands) enum Disposition {
 }
 
 impl Disposition {
+    #[cfg(unix)]
+    pub(in crate::commands) fn invocation_failed(failure: super::state::InvocationFailure) -> Self {
+        Self::InvocationFailed {
+            failure,
+            failed_at: Some(jiff::Timestamp::now()),
+            exhausted: false,
+        }
+    }
+
     fn validate(&self) -> miette::Result<()> {
         match self {
-            Self::InvocationFailed { failure } => failure.validate(),
+            Self::InvocationFailed { failure, .. } => failure.validate(),
             Self::NeedsAction { reason } => {
                 if reason.trim().is_empty()
                     || serde_json::to_vec(reason).into_diagnostic()?.len() > 256
@@ -83,14 +99,6 @@ impl Disposition {
                 }
                 Ok(())
             }
-        }
-    }
-
-    #[cfg(unix)]
-    pub fn reason(&self) -> String {
-        match self {
-            Self::InvocationFailed { failure } => failure.to_string(),
-            Self::NeedsAction { reason } => reason.clone(),
         }
     }
 }
@@ -105,6 +113,62 @@ struct Receipt {
     input_revision: String,
     contract_revision: String,
     disposition: Disposition,
+}
+
+#[cfg(unix)]
+impl Receipt {
+    fn host_identity(&self) -> HoldIdentity {
+        HoldIdentity::Preparation {
+            key: self.key.clone(),
+        }
+    }
+
+    fn retry_command(&self) -> String {
+        let scope = match &self.key {
+            Key::ExtractionDiscovery { task_id, .. } | Key::WholeSection { task_id, .. } => {
+                format!("--task-id {task_id}")
+            }
+            Key::AuditDiscovery { path }
+            | Key::AuditScreening { path }
+            | Key::AuditAssessment { path } => format!("--path {path}"),
+        };
+        let stage = serde_json::to_value(&self.key).expect("preparation key serializes")["stage"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        format!(
+            "lore work retry-preparation --stage {stage} {scope} --input-revision {}",
+            self.input_revision
+        )
+    }
+}
+
+/// Every pending unanswered preparation hold of a queue task, for choosing a probe.
+#[cfg(unix)]
+pub(in crate::commands) fn pending_holds(
+    root: &Path,
+) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+    let mut holds = Vec::new();
+    for (_, _, receipt) in entries(root, QUEUE_DIRECTORY)? {
+        if let Disposition::InvocationFailed {
+            failure,
+            failed_at,
+            exhausted: false,
+        } = &receipt.disposition
+            && failure.is_unanswered()
+            && let Some((task, cache)) = receipt.key.task()
+        {
+            holds.push((
+                failure.engine(),
+                PendingHold {
+                    identity: receipt.host_identity(),
+                    task: (task.into(), cache.into()),
+                    failed_at: *failed_at,
+                },
+            ));
+        }
+    }
+    Ok(holds)
 }
 
 fn revision(value: &str, length: usize) -> bool {
@@ -277,21 +341,70 @@ impl Binding {
         })
     }
 
+    /// The retained attempt for this exact input, if one was recorded.
+    fn retained(&self, root: &Path) -> miette::Result<Option<(String, Receipt)>> {
+        Ok(read(root, &self.key.path())?.filter(|(_, receipt)| {
+            receipt.subject == self.subject
+                && receipt.subject_revision == self.subject_revision
+                && receipt.input_revision == self.input_revision
+        }))
+    }
+
     pub fn held(&self, root: &Path) -> miette::Result<Option<String>> {
-        Ok(read(root, &self.key.path())?
-            .filter(|(_, receipt)| receipt.subject == self.subject && receipt.subject_revision == self.subject_revision
-                && receipt.input_revision == self.input_revision)
-            .map(|(_, receipt)| format!("{}; retained preparation input {}; use lore work retry-preparation --help after diagnosis",
-                receipt.disposition.reason(), receipt.input_revision)))
+        let Some((_, receipt)) = self.retained(root)? else {
+            return Ok(None);
+        };
+        let retry = receipt.retry_command();
+        let reason = match &receipt.disposition {
+            Disposition::InvocationFailed {
+                failure,
+                failed_at,
+                exhausted,
+            } => {
+                let Some(reason) = HostAnswers::load(root)?
+                    .standing(&receipt.host_identity(), failure, *failed_at, *exhausted)
+                    .reason(failure, &retry)
+                else {
+                    return Ok(None);
+                };
+                reason
+            }
+            Disposition::NeedsAction { reason } => {
+                format!("{reason}; use {retry} after diagnosis")
+            }
+        };
+        Ok(Some(format!(
+            "{reason}; retained preparation input {}",
+            receipt.input_revision
+        )))
     }
 
     pub fn plan_record(
         &self,
         root: &Path,
-        disposition: Disposition,
+        mut disposition: Disposition,
     ) -> miette::Result<MutationPlan> {
         if self.held(root)?.is_some() {
             return Err(miette::miette!("preparation already has a current hold"));
+        }
+        if let Disposition::InvocationFailed {
+            failure, exhausted, ..
+        } = &mut disposition
+            && let Some((
+                _,
+                Receipt {
+                    disposition:
+                        Disposition::InvocationFailed {
+                            failure: prior,
+                            failed_at,
+                            exhausted: prior_exhausted,
+                        },
+                    ..
+                },
+            )) = self.retained(root)?
+        {
+            *exhausted = HostAnswers::load(root)?
+                .exhausts(failure, Some((&prior, failed_at, prior_exhausted)));
         }
         let path = self.key.path();
         let before = read(root, &path)?.map(|(raw, _)| raw);
@@ -470,12 +583,11 @@ mod tests {
             )
             .unwrap();
             let session = MutationSession::acquire(root).unwrap();
-            let failure = Disposition::InvocationFailed {
-                failure: super::super::state::InvocationFailure::Exited {
+            let failure =
+                Disposition::invocation_failed(super::super::state::InvocationFailure::Exited {
                     engine: lk_core::execution::AgentEngine::Codex,
                     code: 1,
-                },
-            };
+                });
             session
                 .apply(binding.plan_record(root, failure).unwrap())
                 .unwrap();
@@ -492,6 +604,36 @@ mod tests {
             assert!(changed_contract.held(root).unwrap().is_some());
             assert_eq!(std::fs::read(root.join(key.path())).unwrap(), raw);
             assert!(plan_retry(root, &key, &"b".repeat(64)).is_err());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            crate::commands::work::host::record_answer(
+                root,
+                lk_core::execution::AgentEngine::Codex,
+            )
+            .unwrap();
+            assert!(binding.held(root).unwrap().is_none());
+            session
+                .apply(
+                    binding
+                        .plan_record(
+                            root,
+                            Disposition::invocation_failed(
+                                super::super::state::InvocationFailure::Exited {
+                                    engine: lk_core::execution::AgentEngine::Codex,
+                                    code: 1,
+                                },
+                            ),
+                        )
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(
+                binding
+                    .held(root)
+                    .unwrap()
+                    .unwrap()
+                    .contains("again after the host answered")
+            );
+            let raw = std::fs::read(root.join(key.path())).unwrap();
             let preview = plan_retry(root, &key, &binding.input_revision).unwrap();
             preview.validate_addresses(root).unwrap();
             assert_eq!(std::fs::read(root.join(key.path())).unwrap(), raw);
@@ -547,12 +689,12 @@ mod tests {
                 binding
                     .plan_record(
                         root,
-                        Disposition::InvocationFailed {
-                            failure: super::super::state::InvocationFailure::Exited {
+                        Disposition::invocation_failed(
+                            super::super::state::InvocationFailure::Exited {
                                 engine: lk_core::execution::AgentEngine::Codex,
                                 code: 1,
                             },
-                        },
+                        ),
                     )
                     .unwrap(),
             )

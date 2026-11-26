@@ -1,4 +1,7 @@
 use super::*;
+use crate::commands::work::host::{HoldIdentity, HostAnswers};
+#[cfg(unix)]
+use crate::commands::work::host::{PendingHold, Standing};
 
 const SCHEMA: &str = "screening-rejections-v1";
 
@@ -103,6 +106,10 @@ struct SemanticHold {
 struct OperationalHold {
     input_revision: String,
     failure: super::super::state::InvocationFailure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failed_at: Option<jiff::Timestamp>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    exhausted: bool,
 }
 
 /// The latest hold of each kind for one task. A hold names the request it stopped; once
@@ -165,7 +172,18 @@ impl Rejections {
         Ok(Some((path, raw, rejections)))
     }
 
-    fn hold_reason(&self, request: &Request) -> miette::Result<Option<String>> {
+    fn host_identity(&self) -> HoldIdentity {
+        HoldIdentity::Screening {
+            task_id: self.task_id.clone(),
+            cache_hash: self.cache_hash.clone(),
+        }
+    }
+
+    fn hold_reason(
+        &self,
+        request: &Request,
+        answers: &HostAnswers,
+    ) -> miette::Result<Option<String>> {
         if let Some(hold) = &self.semantic
             && hold.request_revision == request.request_revision
         {
@@ -174,20 +192,73 @@ impl Rejections {
         if let Some(hold) = &self.operational
             && hold.input_revision == request.input_revision()?
         {
-            return Ok(Some(format!(
-                "{}; diagnose the host, then use lore work select-retry --task-id {}",
-                hold.failure, self.task_id
-            )));
+            return Ok(answers
+                .standing(
+                    &self.host_identity(),
+                    &hold.failure,
+                    hold.failed_at,
+                    hold.exhausted,
+                )
+                .reason(
+                    &hold.failure,
+                    &format!("lore work select-retry --task-id {}", self.task_id),
+                ));
         }
         Ok(None)
     }
+}
+
+/// Every pending unanswered screening hold, for choosing a probe.
+#[cfg(unix)]
+pub(in crate::commands::work) fn pending_holds(
+    root: &Path,
+) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+    let store = lk_vault::page_path(root, Path::new(STORE)).map_err(fail)?;
+    match std::fs::symlink_metadata(&store) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(fail("screening store must be a direct directory")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(fail(error)),
+    }
+    let mut holds = Vec::new();
+    for entry in std::fs::read_dir(store).map_err(fail)? {
+        let path = Rejections::path(&Path::new(STORE).join(entry.map_err(fail)?.file_name()));
+        let Some(raw) = read_optional(root, &path)? else {
+            continue;
+        };
+        let rejections = Rejections::decode(&raw)?;
+        if Some(path.as_path())
+            != directory(&rejections.task_id, &rejections.cache_hash)
+                .map(|directory| Rejections::path(&directory))
+                .ok()
+                .as_deref()
+        {
+            return Err(fail(
+                "screening rejection receipt is outside its task directory",
+            ));
+        }
+        if let Some(hold) = &rejections.operational
+            && hold.failure.is_unanswered()
+            && !hold.exhausted
+        {
+            holds.push((
+                hold.failure.engine(),
+                PendingHold {
+                    identity: rejections.host_identity(),
+                    task: (rejections.task_id.clone(), rejections.cache_hash.clone()),
+                    failed_at: hold.failed_at,
+                },
+            ));
+        }
+    }
+    Ok(holds)
 }
 
 impl Selection {
     /// Why this exact request must not be sent again, if a retained hold names it.
     pub fn hold_reason(&self, request: &Request) -> miette::Result<Option<String>> {
         match &self.rejections {
-            Some(rejections) => rejections.hold_reason(request),
+            Some(rejections) => rejections.hold_reason(request, &self.answers),
             None => Ok(None),
         }
     }
@@ -234,17 +305,31 @@ pub(in crate::commands::work) fn plan_failed_attempt(
     failure: super::super::state::InvocationFailure,
 ) -> miette::Result<MutationPlan> {
     let input_revision = request.input_revision()?;
+    let answers = HostAnswers::load(root)?;
     plan_update(root, request, |rejections| {
-        if rejections
+        let prior = rejections
             .operational
             .as_ref()
-            .is_some_and(|hold| hold.input_revision == input_revision)
+            .filter(|hold| hold.input_revision == input_revision);
+        if let Some(hold) = prior
+            && answers.standing(
+                &rejections.host_identity(),
+                &hold.failure,
+                hold.failed_at,
+                hold.exhausted,
+            ) != Standing::Released
         {
             return Err(fail("screening packet already has an operational hold"));
         }
+        let exhausted = answers.exhausts(
+            &failure,
+            prior.map(|hold| (&hold.failure, hold.failed_at, hold.exhausted)),
+        );
         rejections.operational = Some(OperationalHold {
             input_revision,
             failure,
+            failed_at: Some(jiff::Timestamp::now()),
+            exhausted,
         });
         Ok(())
     })

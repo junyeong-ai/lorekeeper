@@ -6034,9 +6034,17 @@ fn parallel_native_observer_failure_retains_an_independent_good_receipt() {
                 report["retained_progress"]["action_receipts"], 0,
                 "{report}"
             );
+            // The peer's answer releases an unanswered failure once; an unusable answer stays
+            // held, and the released request's repeat exhausts it.
             let (_, repeated) = fixture.run("knowledge");
-            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(
+                repeated["semantic_calls"],
+                usize::from(mode == "failed"),
+                "{mode}: {repeated}"
+            );
             assert_eq!(repeated["halted"], false, "{repeated}");
+            let (_, exhausted) = fixture.run("knowledge");
+            assert_eq!(exhausted["semantic_calls"], 0, "{mode}: {exhausted}");
             assert_eq!(parallel_receipts(&fixture), 1);
         }
     }
@@ -8077,7 +8085,10 @@ fn failed_only_screening_wave_stops_without_progress_and_requires_exact_explicit
                 }
             }
             let (_, repeated) = fixture.run("process");
-            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(
+                repeated["semantic_calls"], 1,
+                "a run without admissible work probes the unanswered hold once: {repeated}"
+            );
             assert_eq!(repeated["halted"], false, "{repeated}");
             let status = execution_json(&fixture, &["queue", "status", "--json"]);
             let task = status["data"]["tasks"][0]["task_id"].as_str().unwrap();

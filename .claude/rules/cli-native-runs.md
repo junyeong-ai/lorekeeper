@@ -166,6 +166,24 @@ paths:
   host fault. Signal exits,
   process cleanup failure, local I/O, unusable tool-enabled replies and unknown errors
   remain fatal.
+  An unanswered failure cannot tell a host fault from a request the host cannot serve, so
+  its hold (inspection attempt, generation receipt, screening operational hold or
+  preparation attempt) records when it failed and lasts only until that engine answers
+  again (`work/host.rs`). Every run that records an answered step, usable or not, stores
+  the engine's latest answer in `.lorekeeper/queue/host-answers.json`, whichever operation
+  ran it. A pending hold whose engine answered after its failure no longer holds: the
+  request is admitted once more, the retry an operator makes after diagnosing the host.
+  Failing again without an answer after that release exhausts the hold until the explicit
+  retry command clears it; a changed input or request is a fresh judgment. Unusable answers
+  and semantic holds are never released this way. A queue drain with no admissible work
+  releases once per run, as a probe, the oldest pending hold of a current queue task whose
+  engine has not answered since; a probe that fails without an answer renews its failure
+  time and stays pending, so an outage costs at most one unanswered call per run and
+  exhausts nothing. Audit planning reads the same answers but does not probe. Hold reasons
+  name the state: pending holds are retried automatically once the host answers; exhausted
+  and unusable ones need diagnosis and the named retry command. The scheduled pause for
+  fatal stages is unchanged; navigation refresh commits beside readers holding their
+  snapshot because the search index uses write-ahead logging.
   `work retry` clears only a current operational hold or exhausted timeout allowance;
   `work hold` suspends an exact ready node without invoking a host or granting refinement.
   Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.

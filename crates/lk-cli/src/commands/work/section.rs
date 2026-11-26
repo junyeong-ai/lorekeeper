@@ -184,7 +184,7 @@ pub(in crate::commands) fn hold(
     };
     let mut plan = current.binding.plan_record(
         session.root(),
-        super::preparation::Disposition::InvocationFailed { failure },
+        super::preparation::Disposition::invocation_failed(failure),
     )?;
     current.prepared.guard_pages(&mut plan);
     let _queue =

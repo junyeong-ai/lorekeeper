@@ -22,6 +22,8 @@ mod retention;
 #[cfg(unix)]
 pub(crate) use attempts::AttemptUpdate;
 pub(crate) use attempts::InvocationFailure;
+#[cfg(unix)]
+pub(in crate::commands) use attempts::pending_holds as pending_inspection_holds;
 pub(crate) use evidence::ObservationEvidenceError;
 use evidence::validate_output_evidence;
 pub(super) use frontier::FrontierCapture;

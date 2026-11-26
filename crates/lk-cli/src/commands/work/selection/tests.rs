@@ -530,7 +530,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
         code: 97,
     };
     fixture.apply(plan_failed_attempt(&fixture.root, &request, failure.clone()).unwrap());
-    assert!(plan_failed_attempt(&fixture.root, &request, failure).is_err());
+    assert!(plan_failed_attempt(&fixture.root, &request, failure.clone()).is_err());
     let held = fixture.selection();
     assert!(
         held.hold_reason(&request)
@@ -549,7 +549,24 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
             .unwrap()
             .contains("select-retry --task-id retained-task")
     );
-    fixture.apply(other_contract.plan_retry(&fixture.root).unwrap());
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    crate::commands::work::host::record_answer(
+        &fixture.root,
+        lk_core::execution::AgentEngine::Codex,
+    )
+    .unwrap();
+    let answered = fixture.build(&"d".repeat(64), source(), LIMITS).unwrap();
+    assert!(answered.hold_reason(&reissued).unwrap().is_none());
+    fixture.apply(plan_failed_attempt(&fixture.root, &reissued, failure).unwrap());
+    let exhausted = fixture.build(&"d".repeat(64), source(), LIMITS).unwrap();
+    assert!(
+        exhausted
+            .hold_reason(&reissued)
+            .unwrap()
+            .unwrap()
+            .contains("again after the host answered")
+    );
+    fixture.apply(exhausted.plan_retry(&fixture.root).unwrap());
     assert!(
         fixture
             .build(&"d".repeat(64), source(), LIMITS)

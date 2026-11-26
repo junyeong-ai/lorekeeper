@@ -7,6 +7,7 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::super::host::{HoldIdentity, HostAnswers, PendingHold};
 use super::super::state::InvocationFailure;
 use super::super::{Subject, Work};
 
@@ -74,10 +75,22 @@ pub(in crate::commands::work) enum Cause {
     },
     Invocation {
         failure: InvocationFailure,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exhausted: bool,
     },
 }
 
 impl Cause {
+    pub(in crate::commands::work) fn invocation(failure: InvocationFailure) -> Self {
+        Self::Invocation {
+            failure,
+            failed_at: Some(jiff::Timestamp::now()),
+            exhausted: false,
+        }
+    }
+
     pub(in crate::commands::work) fn proposal(
         reply: Value,
         rejection: ProposalRejection,
@@ -123,7 +136,7 @@ impl Cause {
                 }
                 Ok(())
             }
-            Self::Invocation { failure } => failure.validate(),
+            Self::Invocation { failure, .. } => failure.validate(),
         }
     }
 }
@@ -132,7 +145,7 @@ impl std::fmt::Display for Cause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Proposal { rejection, .. } => rejection.fmt(f),
-            Self::Invocation { failure } => failure.fmt(f),
+            Self::Invocation { failure, .. } => failure.fmt(f),
         }
     }
 }
@@ -244,9 +257,82 @@ pub(in crate::commands::work) fn held(
     task: &QueueTask,
     input_revision: &str,
 ) -> miette::Result<Option<String>> {
-    Ok(read(root, &path(task))?.filter(|(_, receipt)| receipt.input_revision == input_revision).map(|(_, receipt)| {
-        format!("{}; retained native generation input {}; use work retry-generation with this exact task and input revision", receipt.cause, receipt.input_revision)
-    }))
+    let Some((_, receipt)) =
+        read(root, &path(task))?.filter(|(_, receipt)| receipt.input_revision == input_revision)
+    else {
+        return Ok(None);
+    };
+    let retry = format!(
+        "lore work retry-generation --task-id {} --input-revision {}",
+        receipt.task_id, receipt.input_revision
+    );
+    Ok(match &receipt.cause {
+        Cause::Invocation {
+            failure,
+            failed_at,
+            exhausted,
+        } => HostAnswers::load(root)?
+            .standing(&identity(&receipt), failure, *failed_at, *exhausted)
+            .reason(failure, &retry),
+        Cause::Proposal { .. } => Some(format!(
+            "{}; retained native generation input {}; use {retry} after diagnosis",
+            receipt.cause, receipt.input_revision
+        )),
+    })
+}
+
+fn identity(receipt: &Receipt) -> HoldIdentity {
+    HoldIdentity::Generation {
+        task_id: receipt.task_id.clone(),
+        cache_hash: receipt.cache_hash.clone(),
+    }
+}
+
+/// Every pending unanswered generation hold, for choosing a probe.
+pub(in crate::commands::work) fn pending_holds(
+    root: &Path,
+) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+    let mut holds = Vec::new();
+    for destination in entries(root)? {
+        let (_, receipt) = read(root, &destination)?.ok_or_else(|| {
+            miette::miette!("native generation rejection disappeared while listing holds")
+        })?;
+        if let Cause::Invocation {
+            failure,
+            failed_at,
+            exhausted: false,
+        } = &receipt.cause
+            && failure.is_unanswered()
+        {
+            holds.push((
+                failure.engine(),
+                PendingHold {
+                    identity: identity(&receipt),
+                    task: (receipt.task_id.clone(), receipt.cache_hash.clone()),
+                    failed_at: *failed_at,
+                },
+            ));
+        }
+    }
+    Ok(holds)
+}
+
+fn entries(root: &Path) -> miette::Result<Vec<PathBuf>> {
+    let absolute = lk_vault::page_path(root, Path::new(DIRECTORY)).into_diagnostic()?;
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(miette::miette!(
+                "native generation rejection store must be a direct directory"
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).into_diagnostic(),
+    }
+    std::fs::read_dir(absolute)
+        .into_diagnostic()?
+        .map(|entry| Ok(Path::new(DIRECTORY).join(entry.into_diagnostic()?.file_name())))
+        .collect()
 }
 
 pub(in crate::commands::work) struct Binding<'a> {
@@ -269,7 +355,30 @@ pub(in crate::commands::work) fn plan_record(
         request,
     } = binding;
     let destination = path(task);
-    let before = read(root, &destination)?.map(|(raw, _)| raw);
+    let prior = read(root, &destination)?;
+    let mut cause = cause;
+    if let Cause::Invocation {
+        failure, exhausted, ..
+    } = &mut cause
+        && let Some((
+            _,
+            Receipt {
+                input_revision,
+                cause:
+                    Cause::Invocation {
+                        failure: prior_failure,
+                        failed_at,
+                        exhausted: prior_exhausted,
+                    },
+                ..
+            },
+        )) = &prior
+        && *input_revision == work.plan.subject_revision
+    {
+        *exhausted = HostAnswers::load(root)?
+            .exhausts(failure, Some((prior_failure, *failed_at, *prior_exhausted)));
+    }
+    let before = prior.map(|(raw, _)| raw);
     let receipt = Receipt {
         schema: Schema::V2,
         task_id: task.task_id.clone(),
@@ -334,21 +443,8 @@ pub(super) fn plan_prune(
     pending: &BTreeSet<(String, String)>,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    let absolute = lk_vault::page_path(root, Path::new(DIRECTORY)).into_diagnostic()?;
-    match std::fs::symlink_metadata(&absolute) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(miette::miette!(
-                "native generation rejection store must be a direct directory"
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error).into_diagnostic(),
-    }
     let mut removed = 0;
-    for entry in std::fs::read_dir(absolute).into_diagnostic()? {
-        let entry = entry.into_diagnostic()?;
-        let destination = Path::new(DIRECTORY).join(entry.file_name());
+    for destination in entries(root)? {
         let (raw, receipt) = read(root, &destination)?.ok_or_else(|| {
             miette::miette!("native generation rejection disappeared during retention")
         })?;
@@ -434,7 +530,22 @@ mod tests {
         .unwrap();
         let reason = held(root, &task, &"b".repeat(64)).unwrap().unwrap();
         assert!(reason.contains("exited with status 7"), "{reason}");
+        assert!(reason.contains("retried automatically"), "{reason}");
         assert!(held(root, &task, &"e".repeat(64)).unwrap().is_none());
+        crate::commands::work::host::record_answer(root, lk_core::execution::AgentEngine::Codex)
+            .unwrap();
+        assert!(
+            held(root, &task, &"b".repeat(64)).unwrap().is_none(),
+            "a hold recorded without its failure time is released by any later answer"
+        );
+        receipt["cause"]["exhausted"] = json!(true);
+        std::fs::write(
+            root.join(&destination),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+        let reason = held(root, &task, &"b".repeat(64)).unwrap().unwrap();
+        assert!(reason.contains("again after the host answered"), "{reason}");
         let mut guarded = json!({"kind":"proposal","reply_revision":proposal["reply_revision"],
             "reply_bytes":proposal["reply_bytes"],"reply":proposal["reply"],
             "rejection":{"reason":"publication-guard","kind":"evidence-scope-changed","detail":"owner left the captured scope"}});

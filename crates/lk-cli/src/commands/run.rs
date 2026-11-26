@@ -828,6 +828,8 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
+        /// Whether this run already released a pending unanswered hold as a host probe.
+        host_probed: bool,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -945,8 +947,54 @@ mod native {
                 && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
             {
                 self.host_failures.remove(&step.host());
+                if let Some(execution) = &step.execution
+                    && let Err(error) =
+                        crate::commands::work::host::record_answer(&self.root, execution.engine)
+                {
+                    self.failure("host answer", error);
+                }
             }
             self.result.work_telemetry.record(step);
+        }
+
+        /// With no admissible queue work and no invocation yet in this run, releases once the
+        /// oldest pending unanswered hold whose engine has not answered since its failure, as
+        /// the probe an operator would send. A run that already invoked a host has its own
+        /// evidence: an answer released such holds, an unanswered call showed the host still
+        /// failing. Returns whether planning should run again.
+        fn release_host_probe(&mut self) -> bool {
+            if self.result.semantic_calls != 0 || std::mem::replace(&mut self.host_probed, true) {
+                return false;
+            }
+            let root = self.root.clone();
+            let probe = (|| -> miette::Result<Option<crate::commands::work::host::PendingHold>> {
+                use crate::commands::work::host;
+                let holds = host::pending_holds(&root)?;
+                let Some(hold) = host::HostAnswers::load(&root)?.select_probe(&root, holds)? else {
+                    return Ok(None);
+                };
+                host::record_probe(&root, &hold)?;
+                Ok(Some(hold))
+            })();
+            match probe {
+                Ok(Some(hold)) => {
+                    self.record(
+                        "host probe",
+                        StageState::Completed,
+                        Some(format!(
+                            "no queue work was admissible; released the oldest pending unanswered hold {} as a probe of its host",
+                            serde_json::to_string(&hold.identity).expect("hold identity serializes")
+                        )),
+                    );
+                    self.queue_replan = QueueReplan::Invalidate;
+                    true
+                }
+                Ok(None) => false,
+                Err(error) => {
+                    self.failure("host probe", error);
+                    false
+                }
+            }
         }
 
         /// Counts an invocation that ended without an answer and was not retried. At
@@ -5484,6 +5532,9 @@ mod native {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
                     }
+                    if self.release_host_probe() {
+                        continue 'planning;
+                    }
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
                         return self.deferred(
                             "queue dependencies",
@@ -6315,9 +6366,7 @@ mod native {
                         }
                     }
                     Some(ResultReply::InvocationFailed(failure)) => Err(
-                        crate::commands::work::preparation::Disposition::InvocationFailed {
-                            failure,
-                        },
+                        crate::commands::work::preparation::Disposition::invocation_failed(failure),
                     ),
                     None => {
                         self.record_work_step(metrics);
@@ -7200,6 +7249,7 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
+            host_probed: false,
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,

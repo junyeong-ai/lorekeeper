@@ -66,8 +66,13 @@ structural readiness, not admission or completion.
 
 ## Native holds and retries
 
-A native failure holds its exact input instead of spending further calls. Diagnose the
-reported cause before clearing a hold. Each command below invokes no agent, changes no
+A native failure holds its exact input instead of spending further calls. An invocation
+that ended without an answer (an exit, a timeout or a missing result) is retried
+automatically, once, after the same engine answers another request; a scheduled queue
+drain with nothing else admissible sends the oldest such request as a probe. Reasons say
+`retried automatically once the … host answers` for these. A request that fails again after
+the host answered, or one the host answered unusably, stays held: diagnose the reported
+cause before clearing it. Each command below invokes no agent, changes no
 paid observation or semantic hold, and accepts `--dry-run` to validate first; HASH and
 REVISION are the retained input values the failed run reported.
 

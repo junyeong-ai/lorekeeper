@@ -250,8 +250,11 @@ fn later_evidence_actions_preserve_ready_prefix_on_both_hosts() {
             let actions = actions["actions"].as_object().unwrap();
             assert_eq!(actions.len(), 1);
             assert!(actions.contains_key(held));
+            // The answered peer releases the failed node once; its repeat exhausts it.
             let (_, repeated) = fixture.run("process");
-            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(repeated["semantic_calls"], 1, "{repeated}");
+            let (_, exhausted) = fixture.run("process");
+            assert_eq!(exhausted["semantic_calls"], 0, "{exhausted}");
             execution_json(&fixture, &["work", "retry", id, first]);
             let before = work_files(&fixture);
             std::fs::write(fixture.root().join("record-prefix"), "").unwrap();
@@ -288,7 +291,11 @@ fn later_evidence_actions_preserve_ready_prefix_on_both_hosts() {
             assert_eq!(repeated["queue_planning"]["attempts"], 1);
             assert_eq!(after, work_files(&fixture));
             let calls = std::fs::read_to_string(fixture.root().join("prefix-calls.jsonl")).unwrap();
-            assert_eq!(calls.lines().count(), 3);
+            assert_eq!(
+                calls.lines().count(),
+                4,
+                "including the released node's one repeat"
+            );
         }
     }
 }

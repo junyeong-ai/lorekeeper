@@ -265,8 +265,9 @@ impl Work {
         {
             return Ok(Some(reason));
         }
+        let answers = crate::commands::work::host::HostAnswers::load(root)?;
         super::attempts::InspectionAttempts::load(root, self, &captured.nodes)?
-            .map(|timeouts| timeouts.reason(request, contract))
+            .map(|timeouts| timeouts.reason(request, contract, &answers))
             .transpose()
             .map(Option::flatten)
     }
@@ -288,6 +289,7 @@ impl Work {
             .transpose()?;
         let progress = evaluated.progress()?;
         let timeouts = super::attempts::InspectionAttempts::load(root, self, &evaluated.nodes)?;
+        let answers = crate::commands::work::host::HostAnswers::load(root)?;
         for id in &progress.ready {
             if progress.ready.first() != Some(id)
                 && !actions
@@ -335,7 +337,7 @@ impl Work {
                 return Ok((progress, Some(reason)));
             }
             if let Some(timeouts) = &timeouts
-                && let Some(reason) = timeouts.reason(&request, &contract(&request)?)?
+                && let Some(reason) = timeouts.reason(&request, &contract(&request)?, &answers)?
             {
                 return Ok((progress, Some(reason)));
             }

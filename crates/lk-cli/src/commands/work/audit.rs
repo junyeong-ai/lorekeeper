@@ -200,7 +200,7 @@ impl WholeSubject {
         let binding = assessment_binding(&self.prepared, &self.revision, request)?;
         mutation.extend(binding.plan_record(
             root,
-            super::preparation::Disposition::InvocationFailed { failure },
+            super::preparation::Disposition::invocation_failed(failure),
         )?);
         Ok(binding)
     }

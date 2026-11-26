@@ -1264,15 +1264,17 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
             assert!(!fixture.work_path(&plan, "final.json").exists(), "{mode}");
             // Codex reads only its result file, so printed text leaves it without an answer.
             let answerless = mode == "exit" || (engine == "codex" && mode == "malformed");
+            // A held needs-action stays zero-call; a run without admissible work probes an
+            // unanswered hold once.
+            let probes = usize::from(answerless);
             if mode == "section-boundary" || answerless {
                 assert_eq!(report["halted"], false, "{report}");
                 let (_, again) = fixture.run();
-                assert_eq!(again["semantic_calls"], 0, "{again}");
-                assert_eq!(fixture.calls().len(), 2);
+                assert_eq!(again["semantic_calls"], probes, "{again}");
             } else if mode != "cancel" {
                 assert_eq!(report["halted"], mode != "changed-target", "{report}");
             }
-            assert_eq!(fixture.calls().len(), 2);
+            assert_eq!(fixture.calls().len(), 2 + probes);
             let step = report["work_steps"]
                 .as_array()
                 .unwrap()

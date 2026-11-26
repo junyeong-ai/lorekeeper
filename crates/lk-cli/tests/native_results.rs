@@ -209,8 +209,92 @@ fn a_failed_finalizer_is_held_while_independent_work_publishes_in_the_same_run()
         fixture.done(&steady),
         "independent work publishes after another target's host failure: {report}"
     );
-    assert_eq!(stages("native result invocation held"), 1, "{report}");
+    assert_eq!(
+        stages("native result invocation held"),
+        2,
+        "the independent answer releases the failed request once and its repeat exhausts it: {report}"
+    );
     assert_eq!(stages("host failures"), 0, "{report}");
+}
+
+#[test]
+fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by_a_repeat() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 64"),
+    )
+    .unwrap();
+    let (failing, _) = fixture.add("failing", lk_queue::TaskKind::SynthesizeConcept, true);
+    std::fs::write(fixture.root().join("mode"), "host-exit-target").unwrap();
+    let receipt = || -> Value {
+        let store = fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections");
+        let path = std::fs::read_dir(store)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    let stage = |report: &Value, name: &str| {
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stage| stage["name"] == name)
+            .map(|stage| stage["detail"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    let held = fixture.run();
+    assert_eq!(held["halted"], false, "{held}");
+    let first = receipt();
+    assert!(first["cause"]["failed_at"].is_string(), "{first}");
+    assert!(first["cause"].get("exhausted").is_none(), "{first}");
+    let calls = fixture.calls();
+
+    let probed = fixture.run();
+    assert_eq!(fixture.calls(), calls + 1, "one probe per run: {probed}");
+    assert_eq!(stage(&probed, "host probe").len(), 1, "{probed}");
+    let renewed = receipt();
+    assert!(
+        renewed["cause"].get("exhausted").is_none(),
+        "an outage exhausts nothing: {renewed}"
+    );
+    assert_ne!(renewed["cause"]["failed_at"], first["cause"]["failed_at"]);
+    assert!(
+        stage(&probed, "queue dependencies")
+            .iter()
+            .any(|detail| detail.contains("retried automatically once the codex host answers")),
+        "{probed}"
+    );
+
+    let (steady, _) = fixture.add("steady", lk_queue::TaskKind::SynthesizeConcept, true);
+    let mut answered = fixture.run();
+    if receipt()["cause"].get("exhausted").is_none() {
+        answered = fixture.run();
+    }
+    assert!(fixture.done(&steady), "{answered}");
+    assert_eq!(receipt()["cause"]["exhausted"], true, "{answered}");
+    assert!(!fixture.done(&failing));
+
+    let calls = fixture.calls();
+    let exhausted = fixture.run();
+    assert_eq!(
+        fixture.calls(),
+        calls,
+        "an exhausted hold is never probed: {exhausted}"
+    );
+    assert!(
+        stage(&exhausted, "queue dependencies")
+            .iter()
+            .any(|detail| detail.contains("again after the host answered; diagnose the request")),
+        "{exhausted}"
+    );
 }
 
 #[test]
@@ -1100,11 +1184,17 @@ fn tool_enabled_host_exits_hold_only_their_exact_input_until_guarded_retry() {
         assert_eq!(receipt["cause"]["failure"]["kind"], "exited", "{receipt}");
         assert_eq!(receipt["cause"]["failure"]["code"], 7);
         let calls = fixture.calls();
+        let probed = fixture.run();
+        assert_eq!(
+            probed["semantic_calls"], 1,
+            "a run without admissible work probes the hold once: {mode}: {probed}"
+        );
+        assert_eq!(probed["halted"], false, "{probed}");
+        let renewed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_ne!(renewed["cause"]["failed_at"], receipt["cause"]["failed_at"]);
+        assert!(renewed["cause"].get("exhausted").is_none(), "{renewed}");
+        let calls = calls + 1;
         std::fs::write(fixture.root().join("mode"), "complete").unwrap();
-        let held = fixture.run();
-        assert_eq!(held["semantic_calls"], 0, "{mode}: {held}");
-        assert_eq!(held["halted"], false, "{held}");
-        assert_eq!(std::fs::read(&path).unwrap(), raw);
         let retried = fixture
             .command()
             .args([

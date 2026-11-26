@@ -10,7 +10,7 @@ use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod rejection;
+pub(super) mod rejection;
 mod retention;
 pub(in crate::commands) mod retired;
 pub(in crate::commands) use rejection::ScreeningRejection;
@@ -697,6 +697,7 @@ pub(super) struct Selection {
     max_reason_json_bytes: usize,
     ledger: CapturedLedger,
     rejections: Option<rejection::Rejections>,
+    answers: crate::commands::work::host::HostAnswers,
 }
 
 /// The rows of one discovery capture in owner order, before a source context keys them.
@@ -892,6 +893,7 @@ impl Selection {
                 identity.cache_hash,
             )?
             .map(|(_, _, rejections)| rejections),
+            answers: crate::commands::work::host::HostAnswers::load(root)?,
             directory,
             contract_revision: identity.contract_revision.into(),
             source,

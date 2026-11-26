@@ -588,7 +588,7 @@ pub(in crate::commands) fn hold_selected_controlled(
             input: rejection::Input::Selected,
             request,
         },
-        rejection::Cause::Invocation { failure },
+        rejection::Cause::invocation(failure),
         &mut plan,
     )?;
     session.apply(plan).into_diagnostic()?;

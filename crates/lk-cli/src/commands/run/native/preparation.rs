@@ -33,13 +33,13 @@ impl Runner<'_> {
         metrics: &WorkStepMetrics,
     ) -> Disposition {
         let bytes = serde_json::to_vec(response).expect("decoded response serializes");
-        Disposition::InvocationFailed {
-            failure: crate::commands::work::state::InvocationFailure::InvalidResponse {
+        Disposition::invocation_failed(
+            crate::commands::work::state::InvocationFailure::InvalidResponse {
                 engine: self.agent_profile(metrics).engine(),
                 revision: lk_core::rss_original::digest(&bytes),
                 bytes: bytes.len(),
             },
-        }
+        )
     }
 
     pub(super) async fn hold_audit_screening(
@@ -282,7 +282,7 @@ impl Runner<'_> {
         let response = self.request_result(&request, &schema, &mut metrics).await;
         let outcome = match response {
             Some(ResultReply::InvocationFailed(failure)) => {
-                Err(Disposition::InvocationFailed { failure })
+                Err(Disposition::invocation_failed(failure))
             }
             Some(ResultReply::Complete(response)) => {
                 match execution::preparation::discovery_outcomes(
@@ -470,11 +470,7 @@ impl Runner<'_> {
             }
             Some(ResultReply::InvocationFailed(failure)) => subjects
                 .iter()
-                .map(|_| {
-                    Err(Disposition::InvocationFailed {
-                        failure: failure.clone(),
-                    })
-                })
+                .map(|_| Err(Disposition::invocation_failed(failure.clone())))
                 .collect(),
             None => {
                 self.record_work_step(metrics);

@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(unix)]
+use crate::commands::work::host::PendingHold;
+use crate::commands::work::host::{HoldIdentity, HostAnswers};
 
 const MAX_TIMEOUTS: usize = 2;
 const MAX_HOLD_REASON_BYTES: usize = 256;
@@ -46,6 +49,15 @@ impl InvocationFailure {
     /// one.
     pub(crate) fn is_unanswered(&self) -> bool {
         !matches!(self, Self::InvalidResponse { .. })
+    }
+
+    pub(crate) fn engine(&self) -> lk_core::execution::AgentEngine {
+        match self {
+            Self::TimedOut { engine }
+            | Self::Exited { engine, .. }
+            | Self::InvalidResponse { engine, .. }
+            | Self::MissingResponse { engine } => *engine,
+        }
     }
 }
 
@@ -99,6 +111,10 @@ enum Attempt {
         canonical_revision: String,
         request_revision: String,
         failure: InvocationFailure,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_at: Option<jiff::Timestamp>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        exhausted: bool,
     },
     Held {
         canonical_revision: String,
@@ -193,6 +209,7 @@ impl InspectionAttempts {
                     canonical_revision,
                     request_revision,
                     failure,
+                    ..
                 } => {
                     require_id(canonical_revision)?;
                     require_id(request_revision)?;
@@ -220,13 +237,38 @@ impl InspectionAttempts {
         self.entries.contains_key(id)
     }
 
-    pub(super) fn reason(&self, request: &Value, contract: &str) -> miette::Result<Option<String>> {
+    pub(super) fn reason(
+        &self,
+        request: &Value,
+        contract: &str,
+        answers: &HostAnswers,
+    ) -> miette::Result<Option<String>> {
         let id = request["node_id"]
             .as_str()
             .ok_or_else(|| fail("inspection has no node"))?;
         let Some(entry) = self.entries.get(id) else {
             return Ok(None);
         };
+        let retry = format!("lore work retry {} {id}", self.work_id);
+        if let Attempt::Failed {
+            canonical_revision,
+            failure,
+            failed_at,
+            exhausted,
+            ..
+        } = entry
+        {
+            if *canonical_revision != revision(request)? {
+                return Ok(None);
+            }
+            let identity = HoldIdentity::Inspection {
+                work_id: self.work_id.clone(),
+                node_id: id.into(),
+            };
+            return Ok(answers
+                .standing(&identity, failure, *failed_at, *exhausted)
+                .reason(failure, &retry));
+        }
         let reason = match entry {
             Attempt::Timeout {
                 request_revision,
@@ -238,24 +280,83 @@ impl InspectionAttempts {
                     "inspection {id} reached its {MAX_TIMEOUTS} session timeouts"
                 ))
             }
-            Attempt::Failed {
-                canonical_revision,
-                failure,
-                ..
-            } if *canonical_revision == revision(request)? => Some(failure.to_string()),
             Attempt::Held {
                 canonical_revision,
                 reason,
             } if *canonical_revision == revision(request)? => Some(reason.clone()),
             _ => None,
         };
-        Ok(reason.map(|reason| {
-            format!(
-                "{reason}; diagnose the host, then use lore work retry {} {id}",
-                self.work_id
-            )
-        }))
+        Ok(reason.map(|reason| format!("{reason}; diagnose the host, then use {retry}")))
     }
+}
+
+/// Every pending unanswered inspection hold of a queue Work, for choosing a probe.
+#[cfg(unix)]
+pub(in crate::commands) fn pending_holds(
+    root: &Path,
+) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
+    let store = lk_vault::page_path(root, Path::new(".lorekeeper/work")).map_err(fail)?;
+    let entries = match std::fs::read_dir(store) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(fail(error)),
+    };
+    let mut holds = Vec::new();
+    for entry in entries {
+        let name = entry.map_err(fail)?.file_name();
+        let Some(work_id) = name.to_str().filter(|name| require_id(name).is_ok()) else {
+            continue;
+        };
+        let Some(raw) = read_optional(root, &work_path(work_id, "inspection-timeouts.json")?)?
+        else {
+            continue;
+        };
+        let StoredAttempts::Attempts { entries, .. } =
+            super::super::receipt::decode(&raw).map_err(fail)?
+        else {
+            continue;
+        };
+        let pending = entries
+            .into_iter()
+            .filter_map(|(node_id, entry)| match entry {
+                Attempt::Failed {
+                    failure,
+                    failed_at,
+                    exhausted: false,
+                    ..
+                } if failure.is_unanswered() => Some((node_id, failure.engine(), failed_at)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            continue;
+        }
+        let plan = read_optional(root, &work_path(work_id, "plan.json")?)?
+            .ok_or_else(|| fail("inspection attempts outlived their Work plan"))?;
+        let plan = lk_core::json::decode_object(plan.as_bytes()).map_err(fail)?;
+        let subject = &plan["context"]["subject"];
+        let (Some("queue"), Some(task_id), Some(cache_hash)) = (
+            subject["kind"].as_str(),
+            subject["task_id"].as_str(),
+            subject["cache_hash"].as_str(),
+        ) else {
+            continue;
+        };
+        for (node_id, engine, failed_at) in pending {
+            holds.push((
+                engine,
+                PendingHold {
+                    identity: HoldIdentity::Inspection {
+                        work_id: work_id.into(),
+                        node_id,
+                    },
+                    task: (task_id.into(), cache_hash.into()),
+                    failed_at,
+                },
+            ));
+        }
+    }
+    Ok(holds)
 }
 
 fn validate_reason(reason: &str) -> miette::Result<()> {
@@ -302,6 +403,7 @@ impl Work {
         };
         let request_revision = inspection::request_revision(request, contract)?;
         let canonical_revision = revision(request)?;
+        let answers = HostAnswers::load(root)?;
         let current = attempts.entries.get(&node.id);
         let remaining = match update {
             AttemptUpdate::Retry => {
@@ -331,7 +433,7 @@ impl Work {
                 MAX_TIMEOUTS
             }
             AttemptUpdate::TimedOut => {
-                if attempts.reason(request, contract)?.is_some() {
+                if attempts.reason(request, contract, &answers)?.is_some() {
                     return Err(fail(
                         "inspection timeout allowance is already exhausted or held",
                     ));
@@ -354,22 +456,42 @@ impl Work {
             }
             AttemptUpdate::Failed(failure) => {
                 failure.validate()?;
-                if attempts.reason(request, contract)?.is_some() {
+                if attempts.reason(request, contract, &answers)?.is_some() {
                     return Err(fail("inspection already has a current operational hold"));
                 }
+                let prior = match current {
+                    Some(Attempt::Failed {
+                        canonical_revision: previous,
+                        failure,
+                        failed_at,
+                        exhausted,
+                        ..
+                    }) if *previous == canonical_revision => {
+                        Some((failure.clone(), *failed_at, *exhausted))
+                    }
+                    _ => None,
+                };
+                let exhausted = answers.exhausts(
+                    &failure,
+                    prior
+                        .as_ref()
+                        .map(|(failure, failed_at, exhausted)| (failure, *failed_at, *exhausted)),
+                );
                 attempts.entries.insert(
                     node.id.clone(),
                     Attempt::Failed {
                         canonical_revision,
                         request_revision,
                         failure,
+                        failed_at: Some(jiff::Timestamp::now()),
+                        exhausted,
                     },
                 );
                 0
             }
             AttemptUpdate::Hold(reason) => {
                 validate_reason(&reason)?;
-                if attempts.reason(request, contract)?.is_some() {
+                if attempts.reason(request, contract, &answers)?.is_some() {
                     return Err(fail("inspection already has a current operational hold"));
                 }
                 attempts.entries.insert(
@@ -481,6 +603,82 @@ mod tests {
             );
             assert_eq!(work.progress(root.path(), &source).unwrap().completed, 0);
         }
+    }
+
+    #[test]
+    fn an_unanswered_failure_is_retried_once_after_its_host_answers() {
+        let root = tempfile::tempdir().unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let source = resources();
+        let work =
+            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let request = work
+            .prepare_inspection(root.path(), &source)
+            .unwrap()
+            .1
+            .unwrap();
+        let fail_again = || {
+            let (plan, _) = work
+                .plan_inspection_attempt(
+                    root.path(),
+                    &source,
+                    &request,
+                    "contract",
+                    AttemptUpdate::Failed(InvocationFailure::Exited {
+                        engine: lk_core::execution::AgentEngine::Codex,
+                        code: 1,
+                    }),
+                )
+                .unwrap();
+            session.apply(plan).unwrap();
+        };
+        let hold = || {
+            work.load_inspection_hold(root.path(), &request, "contract")
+                .unwrap()
+        };
+        let answer = || {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            crate::commands::work::host::record_answer(
+                root.path(),
+                lk_core::execution::AgentEngine::Codex,
+            )
+            .unwrap();
+        };
+        fail_again();
+        assert!(
+            hold()
+                .unwrap()
+                .contains("retried automatically once the codex host answers")
+        );
+        crate::commands::work::host::record_answer(
+            root.path(),
+            lk_core::execution::AgentEngine::ClaudeCode,
+        )
+        .unwrap();
+        assert!(hold().is_some(), "another engine's answer proves nothing");
+        answer();
+        assert_eq!(hold(), None);
+        fail_again();
+        let exhausted = hold().unwrap();
+        assert!(exhausted.contains("again after the host answered; diagnose the request"));
+        answer();
+        assert_eq!(hold(), Some(exhausted));
+        let (plan, _) = work
+            .plan_inspection_attempt(
+                root.path(),
+                &source,
+                &request,
+                "contract",
+                AttemptUpdate::Retry,
+            )
+            .unwrap();
+        session.apply(plan).unwrap();
+        assert_eq!(hold(), None);
+        fail_again();
+        assert!(
+            hold().unwrap().contains("retried automatically"),
+            "an explicit retry starts a fresh judgment"
+        );
     }
 
     #[test]

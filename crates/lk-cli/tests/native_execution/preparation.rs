@@ -227,7 +227,11 @@ fn native_discovery_holds_failed_inputs_and_explicit_actions_without_pausing_ope
                     usize::from(action)
                 );
                 let (_, repeated) = fixture.run(operation);
-                assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+                assert_eq!(
+                    repeated["semantic_calls"],
+                    usize::from(!audit && !action),
+                    "only a queue drain without admissible work probes an unanswered hold: {repeated}"
+                );
                 assert_eq!(repeated["halted"], false, "{repeated}");
                 let directory = fixture.root().join(if audit {
                     "vault/.lorekeeper/audit-preparation-attempts"
@@ -345,7 +349,11 @@ fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progre
             assert_eq!(first["retained_progress"]["action_receipts"], 0);
             assert_eq!(first["retained_progress"]["staged_requests"], 0);
             let (_, repeated) = fixture.run("process");
-            assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
+            assert_eq!(
+                repeated["semantic_calls"],
+                usize::from(kind != "invalid-response"),
+                "a run without admissible work probes only an unanswered hold: {engine}/{kind}: {repeated}"
+            );
             assert_eq!(repeated["halted"], false, "{repeated}");
             let path = std::fs::read_dir(
                 fixture

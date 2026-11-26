@@ -16,6 +16,7 @@ pub(in crate::commands) use open_review::{
 };
 #[cfg(unix)]
 pub(super) mod generation;
+pub(super) mod host;
 #[cfg(unix)]
 pub(super) mod native;
 pub(super) mod preparation;
@@ -4135,7 +4136,7 @@ pub(super) fn hold_result(
                     },
                     request: &result.request,
                 },
-                generation::rejection::Cause::Invocation { failure },
+                generation::rejection::Cause::invocation(failure),
                 &mut plan,
             )?;
             session.apply(plan).into_diagnostic()?;
@@ -4148,8 +4149,7 @@ pub(super) fn hold_result(
                 &result.request,
             )?;
             plan.extend(
-                binding
-                    .plan_record(root, preparation::Disposition::InvocationFailed { failure })?,
+                binding.plan_record(root, preparation::Disposition::invocation_failed(failure))?,
             );
             session.apply(plan).into_diagnostic()?;
             let reason = binding
@@ -4207,7 +4207,7 @@ pub(super) fn hold_section(
             },
             request: &section.request,
         },
-        generation::rejection::Cause::Invocation { failure },
+        generation::rejection::Cause::invocation(failure),
         &mut plan,
     )?;
     session.apply(plan).into_diagnostic()?;
