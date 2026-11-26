@@ -296,7 +296,7 @@ pub(in crate::commands::work) fn pending_holds(root: &Path) -> miette::Result<Ve
         {
             holds.push(PendingHold {
                 identity: identity(&receipt),
-                engine: failure.engine(),
+                engine: Some(failure.engine()),
                 scope: HoldScope::Queue {
                     task_id: receipt.task_id.clone(),
                     cache_hash: receipt.cache_hash.clone(),

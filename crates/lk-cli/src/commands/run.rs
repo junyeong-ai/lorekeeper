@@ -423,7 +423,7 @@ mod native {
         /// The host of a probe an earlier run released but may not have sent; until that host
         /// gives an outcome, this run treats it as its own probe.
         inherited: Option<(
-            lk_core::execution::AgentEngine,
+            Option<lk_core::execution::AgentEngine>,
             Option<crate::commands::work::state::HostEnd>,
         )>,
     }
@@ -444,7 +444,7 @@ mod native {
             &self,
         ) -> impl Iterator<
             Item = (
-                lk_core::execution::AgentEngine,
+                Option<lk_core::execution::AgentEngine>,
                 Option<&crate::commands::work::state::HostEnd>,
             ),
         > {
@@ -1083,7 +1083,9 @@ mod native {
                     serde_json::to_string(&hold.identity).expect("hold identity serializes"),
                     hold.host
                         .as_ref()
-                        .map_or(hold.engine.as_str(), |host| host.profile.as_str()),
+                        .map(|host| host.profile.as_str())
+                        .or(hold.engine.map(|engine| engine.as_str()))
+                        .unwrap_or("first answering"),
                 )),
             );
             // The vault keeps one probe, so this release replaces the other drain's and any

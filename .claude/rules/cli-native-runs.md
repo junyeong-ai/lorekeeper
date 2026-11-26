@@ -145,7 +145,8 @@ paths:
   changes. Attempts persist separately from observations and semantic actions through the
   mutation journal; they are not retained semantic progress. Timeout counts written before
   a timeout became an unanswered failure read as pending holds whose host and time were
-  not kept, so any recorded answer releases them once.
+  not kept, so any recorded answer releases them once, a probe scan reaches them, and an
+  unanswered failure after that release exhausts them by the same any-host rule.
   A confirmed timeout, numeric nonzero exit or answerless exit of a tool-enabled finalizer, after completed process-group cleanup, holds only
   its exact request: each queue task's input in its
   native generation receipt, each audit subject's context as an audit-assessment

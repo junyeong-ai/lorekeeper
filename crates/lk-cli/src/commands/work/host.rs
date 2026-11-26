@@ -40,7 +40,9 @@ pub(in crate::commands) enum HoldIdentity {
 #[serde(deny_unknown_fields)]
 struct Probe {
     identity: HoldIdentity,
-    engine: AgentEngine,
+    /// `None` for a legacy hold that kept no engine, released by any answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine: Option<AgentEngine>,
     /// The host and time of the failure released, so a renewed failure is no longer the probe.
     host: Option<HostEnd>,
 }
@@ -81,11 +83,17 @@ impl InvokedHosts {
         self.profiles.insert(profile.to_owned());
     }
 
-    /// Whether this run already invoked the host a hold failed on.
-    pub(in crate::commands) fn reached(&self, engine: AgentEngine, host: Option<&HostEnd>) -> bool {
-        match host {
-            Some(host) => self.profiles.contains(&host.profile),
-            None => self.engines.contains(&engine),
+    /// Whether this run already invoked the host a hold failed on: its profile, else its
+    /// engine, else (a legacy hold that kept neither) any host.
+    pub(in crate::commands) fn reached(
+        &self,
+        engine: Option<AgentEngine>,
+        host: Option<&HostEnd>,
+    ) -> bool {
+        match (host, engine) {
+            (Some(host), _) => self.profiles.contains(&host.profile),
+            (None, Some(engine)) => self.engines.contains(&engine),
+            (None, None) => !self.engines.is_empty(),
         }
     }
 }
@@ -202,7 +210,8 @@ pub(in crate::commands) enum ProbeScope {
 #[derive(Clone, Debug)]
 pub(in crate::commands) struct PendingHold {
     pub identity: HoldIdentity,
-    pub engine: AgentEngine,
+    /// The engine that failed; `None` for a legacy timeout that kept none.
+    pub engine: Option<AgentEngine>,
     pub scope: HoldScope,
     /// The host that ended the failed request, if it was recorded.
     pub host: Option<HostEnd>,
@@ -248,15 +257,37 @@ impl HostAnswers {
     }
 
     /// Whether the host a failure was recorded on answered after it ended; a failure that kept
-    /// no host follows any answer of its engine.
-    fn answered_since(&self, engine: AgentEngine, host: Option<&HostEnd>) -> bool {
-        match host {
-            Some(host) => self
+    /// no host follows any answer of its engine, and a legacy one that kept no engine follows
+    /// any answer. Admission, exhaustion and probing all match hosts through this.
+    fn answered_since(&self, engine: Option<AgentEngine>, host: Option<&HostEnd>) -> bool {
+        match (host, engine) {
+            (Some(host), _) => self
                 .profiles
                 .get(&host.profile)
                 .is_some_and(|answered| *answered > host.at),
-            None => self.answers.contains_key(&engine),
+            (None, Some(engine)) => self.answers.contains_key(&engine),
+            (None, None) => self.has_answer(),
         }
+    }
+
+    /// Whether `identity`, failed at `failed_at`, is the vault's released probe.
+    fn is_probe(&self, identity: &HoldIdentity, failed_at: Option<Timestamp>) -> bool {
+        self.probe.as_ref().is_some_and(|probe| {
+            probe.identity == *identity && probe.host.as_ref().map(|host| host.at) == failed_at
+        })
+    }
+
+    /// Whether a legacy timeout hold, which kept neither engine nor time, still holds: no host
+    /// has answered and it is not the released probe.
+    pub(in crate::commands) fn holds_legacy(&self, identity: &HoldIdentity) -> bool {
+        !self.answered_since(None, None) && !self.is_probe(identity, None)
+    }
+
+    /// Whether an unanswered failure after a legacy timeout hold exhausts it: like
+    /// [`Self::exhausts`], once any answer released that hold.
+    #[cfg(unix)]
+    pub(in crate::commands) fn exhausts_legacy(&self, failure: &InvocationFailure) -> bool {
+        failure.is_unanswered() && self.answered_since(None, None)
     }
 
     pub(in crate::commands) fn standing(
@@ -270,11 +301,9 @@ impl HostAnswers {
                 repeated: exhausted,
             };
         }
-        let failed_at = failure.host().map(|host| host.at);
-        let probed = self.probe.as_ref().is_some_and(|probe| {
-            probe.identity == *identity && probe.host.as_ref().map(|host| host.at) == failed_at
-        });
-        if probed || self.answered_since(failure.engine(), failure.host()) {
+        if self.is_probe(identity, failure.host().map(|host| host.at))
+            || self.answered_since(Some(failure.engine()), failure.host())
+        {
             Standing::Released
         } else {
             Standing::AwaitingAnswer
@@ -294,14 +323,16 @@ impl HostAnswers {
             && prior.is_some_and(|(prior, exhausted)| {
                 prior.is_unanswered()
                     && !exhausted
-                    && self.answered_since(prior.engine(), prior.host())
+                    && self.answered_since(Some(prior.engine()), prior.host())
             })
     }
 
     /// The host of a probe an earlier run released and whose host has not answered since:
     /// the run may have ended before sending it, so this run treats it as its own probe.
     #[cfg(unix)]
-    pub(in crate::commands) fn pending_probe(&self) -> Option<(AgentEngine, Option<HostEnd>)> {
+    pub(in crate::commands) fn pending_probe(
+        &self,
+    ) -> Option<(Option<AgentEngine>, Option<HostEnd>)> {
         self.probe
             .as_ref()
             .filter(|probe| !self.answered_since(probe.engine, probe.host.as_ref()))
@@ -555,12 +586,12 @@ mod tests {
         assert!(!answers.exhausts(&repeat, Some((&prior, false))));
         answers.probe = Some(Probe {
             identity: identity(),
-            engine: AgentEngine::Codex,
+            engine: Some(AgentEngine::Codex),
             host: host("synthesis", 10),
         });
         assert_eq!(
             answers.pending_probe(),
-            Some((AgentEngine::Codex, host("synthesis", 10))),
+            Some((Some(AgentEngine::Codex), host("synthesis", 10))),
             "an unanswered released probe carries into the next run"
         );
         assert_eq!(
@@ -602,7 +633,7 @@ mod tests {
                 work_id: "w".repeat(64),
                 node_id: node.into(),
             },
-            engine: AgentEngine::Codex,
+            engine: Some(AgentEngine::Codex),
             scope: HoldScope::Audit {
                 path: "wiki/concepts/subject.md".into(),
                 subject_revision: subject_revision.into(),

@@ -171,7 +171,7 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
             };
             holds.push(PendingHold {
                 identity: receipt.host_identity(),
-                engine: failure.engine(),
+                engine: Some(failure.engine()),
                 scope,
                 host: failure.host().cloned(),
             });

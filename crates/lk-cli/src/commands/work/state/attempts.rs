@@ -302,7 +302,10 @@ impl InspectionAttempts {
             Attempt::Timeout {
                 request_revision, ..
             } if *request_revision == inspection::request_revision(request, contract)?
-                && !answers.has_answer() =>
+                && answers.holds_legacy(&HoldIdentity::Inspection {
+                    work_id: self.work_id.clone(),
+                    node_id: id.into(),
+                }) =>
             {
                 Some(format!(
                     "native invocation reached its session timeout; retried automatically once a host answers another request; {retry} retries it now"
@@ -337,24 +340,28 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
         else {
             continue;
         };
-        let StoredAttempts::Attempts { entries, .. } =
-            super::super::receipt::decode(&raw).map_err(fail)?
-        else {
-            continue;
+        // Legacy timeout counts, in either schema, are pending holds that kept neither engine
+        // nor time.
+        let pending = match super::super::receipt::decode(&raw).map_err(fail)? {
+            StoredAttempts::Timeouts { entries, .. } => entries
+                .into_keys()
+                .map(|node_id| (node_id, None, None))
+                .collect::<Vec<_>>(),
+            StoredAttempts::Attempts { entries, .. } => entries
+                .into_iter()
+                .filter_map(|(node_id, entry)| match entry {
+                    Attempt::Failed {
+                        failure,
+                        exhausted: false,
+                        ..
+                    } if failure.is_unanswered() => {
+                        Some((node_id, Some(failure.engine()), failure.host().cloned()))
+                    }
+                    Attempt::Timeout { .. } => Some((node_id, None, None)),
+                    _ => None,
+                })
+                .collect(),
         };
-        let pending = entries
-            .into_iter()
-            .filter_map(|(node_id, entry)| match entry {
-                Attempt::Failed {
-                    failure,
-                    exhausted: false,
-                    ..
-                } if failure.is_unanswered() => {
-                    Some((node_id, failure.engine(), failure.host().cloned()))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
         if pending.is_empty() {
             continue;
         }
@@ -473,35 +480,23 @@ impl Work {
                 if attempts.reason(request, contract, &answers)?.is_some() {
                     return Err(fail("inspection already has a current operational hold"));
                 }
-                let prior = match current {
+                let exhausted = match current {
                     Some(Attempt::Failed {
                         canonical_revision: previous,
                         request_revision: previous_request,
-                        failure,
+                        failure: prior,
                         exhausted,
                     }) if *previous == canonical_revision
                         && *previous_request == request_revision =>
                     {
-                        Some((failure.clone(), *exhausted))
+                        answers.exhausts(&failure, Some((prior, *exhausted)))
                     }
                     Some(Attempt::Timeout {
                         request_revision: previous,
                         ..
-                    }) if *previous == request_revision => Some((
-                        InvocationFailure::TimedOut {
-                            engine: failure.engine(),
-                            host: None,
-                        },
-                        false,
-                    )),
-                    _ => None,
+                    }) if *previous == request_revision => answers.exhausts_legacy(&failure),
+                    _ => false,
                 };
-                let exhausted = answers.exhausts(
-                    &failure,
-                    prior
-                        .as_ref()
-                        .map(|(failure, exhausted)| (failure, *exhausted)),
-                );
                 attempts.entries.insert(
                     node.id.clone(),
                     Attempt::Failed {
@@ -732,8 +727,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
-        let work =
-            Work::create(&session, &source, "subject", context("subject"), limits()).unwrap();
+        let mut audit = context("subject");
+        audit["subject"] = json!({"kind": "audit", "path": "wiki/concepts/subject.md",
+            "file_revision": "f".repeat(64), "input_revision": "e".repeat(64)});
+        let work = Work::create(&session, &source, "subject", audit, limits()).unwrap();
         let nodes = work.nodes().unwrap();
         let request = work
             .prepare_inspection(root.path(), &source)
@@ -759,15 +756,22 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
         let duplicate = raw.replacen("\"count\":2", "\"count\":1,\"count\":2", 1);
         assert!(InspectionAttempts::decode(&duplicate, &work, &nodes).is_err());
+        let pending = pending_holds(root.path()).unwrap();
+        assert_eq!(pending.len(), 1, "a probe scan reaches a legacy timeout");
+        assert_eq!((pending[0].engine, pending[0].host.as_ref()), (None, None));
+        crate::commands::work::host::record_probe(root.path(), Some(&pending[0])).unwrap();
+        assert_eq!(hold(), None, "a released legacy probe is admitted");
+        crate::commands::work::host::record_probe(root.path(), None).unwrap();
+        assert!(hold().is_some());
         crate::commands::work::host::record_answer(
             root.path(),
-            lk_core::execution::AgentEngine::Codex,
-            "codex",
+            lk_core::execution::AgentEngine::ClaudeCode,
+            "claude",
             jiff::Timestamp::now(),
-            &["codex"],
+            &["claude"],
         )
         .unwrap();
-        assert_eq!(hold(), None);
+        assert_eq!(hold(), None, "any host's answer releases a legacy timeout");
         let (plan, held) = work
             .plan_inspection_attempt(
                 root.path(),
@@ -786,7 +790,7 @@ mod tests {
         session.apply(plan).unwrap();
         assert!(
             held.unwrap().contains("again after the host answered"),
-            "a timeout after the release exhausts rather than resetting an allowance"
+            "a timeout after the release exhausts by the same host rule that released it"
         );
     }
 
