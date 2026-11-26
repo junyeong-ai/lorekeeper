@@ -7483,6 +7483,12 @@ mod native {
             } else {
                 *campaign_root = Some(pin.clone());
             }
+            if runner.automation.is_some()
+                && let Err(error) = execution::preflight_hosts(&runner.config.execution)
+            {
+                runner.failure("host environment", error);
+                return runner.finish();
+            }
             match operation {
                 Operation::Daily => {
                     runner.drain().await;

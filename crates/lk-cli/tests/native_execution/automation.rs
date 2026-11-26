@@ -360,6 +360,51 @@ fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() 
     }
 }
 
+#[test]
+fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning() {
+    let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+    configure(&fixture, Some(20), 60);
+    let missing = fixture.root().join("deleted-account");
+    let output = fixture
+        .command()
+        .env("CODEX_HOME", &missing)
+        .args(["run", "knowledge", "--scheduled", "--json"])
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(calls(&report), 0, "{report}");
+    let run = &report["runs"][0];
+    assert_eq!(run["halted"], true, "{report}");
+    let stage = run["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["name"] == "host environment")
+        .unwrap_or_else(|| panic!("{report}"));
+    let detail = stage["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("CODEX_HOME") && detail.contains("deleted-account"),
+        "{detail}"
+    );
+    assert!(
+        !usage(&fixture)["paused"].as_object().unwrap().is_empty(),
+        "the operation pauses with a configuration cause: {report}"
+    );
+    for store in [
+        "vault/.lorekeeper/audit-preparation-attempts",
+        "vault/.lorekeeper/queue/generation-rejections",
+    ] {
+        assert!(!fixture.root().join(store).exists(), "{store}: {report}");
+    }
+    assert!(
+        walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper"))
+            .into_iter()
+            .map(Result::unwrap)
+            .all(|entry| entry.file_name() != "inspection-timeouts.json"),
+        "no item is held"
+    );
+}
+
 fn configure(fixture: &Fixture, calls: Option<usize>, seconds: u64) {
     let calls = calls.map_or_else(|| "null".to_owned(), |calls| calls.to_string());
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(

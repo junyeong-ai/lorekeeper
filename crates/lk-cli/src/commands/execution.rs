@@ -956,6 +956,61 @@ pub(super) fn lore_command(
     Ok(command)
 }
 
+/// Checks, before a scheduled run plans anything, that each host its operation may use can
+/// start in this job's environment: the executable resolves to an executable file, and the
+/// account directory the host reads (`CODEX_HOME`, or `CLAUDE_CONFIG_DIR` unless the profile
+/// names its own) exists. A job definition captures that environment when it is generated, so
+/// a directory removed since then fails every call in milliseconds; this names it once as a
+/// configuration cause instead of holding each request.
+#[cfg(unix)]
+pub(super) fn preflight_hosts(
+    execution: &lk_core::execution::ExecutionConfig,
+) -> miette::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let names = execution
+        .selected_profile()
+        .into_iter()
+        .chain(execution.stages.values().map(String::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    for name in names {
+        let profile = execution
+            .profiles
+            .get(name)
+            .ok_or_else(|| miette::miette!("unknown execution profile '{name}'"))?;
+        let executable = executable_path(profile.executable())
+            .map_err(|error| miette::miette!("profile {name}: {error}"))?;
+        if !std::fs::metadata(&executable)
+            .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        {
+            return Err(miette::miette!(
+                "profile {name}: agent executable {} is not an executable file",
+                executable.display()
+            ));
+        }
+        let directory = match profile {
+            ExecutionProfile::ClaudeCode {
+                config_directory: Some(path),
+                ..
+            } => Some(("config_directory", path.as_os_str().to_owned())),
+            ExecutionProfile::ClaudeCode { .. } => {
+                std::env::var_os("CLAUDE_CONFIG_DIR").map(|value| ("CLAUDE_CONFIG_DIR", value))
+            }
+            ExecutionProfile::Codex { .. } => {
+                std::env::var_os("CODEX_HOME").map(|value| ("CODEX_HOME", value))
+            }
+        };
+        if let Some((key, value)) = directory
+            && (value.is_empty() || !Path::new(&value).is_dir())
+        {
+            return Err(miette::miette!(
+                "profile {name}: the job environment's {key} ({}) is not an existing directory; regenerate the scheduled job definitions from the user's real environment",
+                Path::new(&value).display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn executable_path(path: &Path) -> miette::Result<PathBuf> {
     if path.is_absolute() {
         return Ok(path.to_owned());
