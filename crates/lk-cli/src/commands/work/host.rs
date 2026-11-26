@@ -228,6 +228,42 @@ impl HostAnswers {
     }
 }
 
+/// The entries of one hold store. A probe scans without holding the vault, so a store or
+/// entry an explicit retry or retention removed meanwhile is simply gone.
+#[cfg(unix)]
+pub(in crate::commands) fn store_entries(
+    root: &Path,
+    directory: &Path,
+) -> miette::Result<Vec<std::path::PathBuf>> {
+    let absolute = lk_vault::page_path(root, directory).into_diagnostic()?;
+    let gone = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(miette::miette!(
+                "hold store {} must be a direct directory",
+                directory.display()
+            ));
+        }
+        Err(error) if gone(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error).into_diagnostic(),
+    }
+    let entries = match std::fs::read_dir(&absolute) {
+        Ok(entries) => entries,
+        Err(error) if gone(&error) => return Ok(Vec::new()),
+        Err(error) => return Err(error).into_diagnostic(),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(entry) => paths.push(directory.join(entry.file_name())),
+            Err(error) if gone(&error) => {}
+            Err(error) => return Err(error).into_diagnostic(),
+        }
+    }
+    Ok(paths)
+}
+
 /// Every pending unanswered hold of every store, for choosing a probe.
 #[cfg(unix)]
 pub(in crate::commands) fn pending_holds(
@@ -348,6 +384,24 @@ mod tests {
         answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
         assert!(answers.exhausts(&exited(), Some((&prior, at(10), false))));
         assert!(!answers.exhausts(&exited(), Some((&prior, at(30), false))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hold_store_removed_during_a_scan_is_empty_but_an_aliased_one_refuses() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Path::new(".lorekeeper/queue/generation-rejections");
+        assert!(store_entries(root.path(), store).unwrap().is_empty());
+        std::fs::create_dir_all(root.path().join(store)).unwrap();
+        std::fs::write(root.path().join(store).join("receipt.json"), "{}").unwrap();
+        assert_eq!(
+            store_entries(root.path(), store).unwrap(),
+            [store.join("receipt.json")]
+        );
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::rename(root.path().join(store), &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.path().join(store)).unwrap();
+        assert!(store_entries(root.path(), store).is_err());
     }
 
     #[cfg(unix)]

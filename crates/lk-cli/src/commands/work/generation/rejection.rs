@@ -293,10 +293,10 @@ pub(in crate::commands::work) fn pending_holds(
     root: &Path,
 ) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
     let mut holds = Vec::new();
-    for destination in entries(root)? {
-        let (_, receipt) = read(root, &destination)?.ok_or_else(|| {
-            miette::miette!("native generation rejection disappeared while listing holds")
-        })?;
+    for destination in super::super::host::store_entries(root, Path::new(DIRECTORY))? {
+        let Some((_, receipt)) = read(root, &destination)? else {
+            continue;
+        };
         if let Cause::Invocation {
             failure,
             failed_at,

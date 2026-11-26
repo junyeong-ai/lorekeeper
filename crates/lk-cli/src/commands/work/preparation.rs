@@ -149,7 +149,10 @@ pub(in crate::commands) fn pending_holds(
     root: &Path,
 ) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
     let mut holds = Vec::new();
-    for (_, _, receipt) in entries(root, QUEUE_DIRECTORY)? {
+    for path in super::host::store_entries(root, Path::new(QUEUE_DIRECTORY))? {
+        let Some((_, receipt)) = read(root, &path)? else {
+            continue;
+        };
         if let Disposition::InvocationFailed {
             failure,
             failed_at,

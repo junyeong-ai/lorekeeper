@@ -213,16 +213,9 @@ impl Rejections {
 pub(in crate::commands::work) fn pending_holds(
     root: &Path,
 ) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
-    let store = lk_vault::page_path(root, Path::new(STORE)).map_err(fail)?;
-    match std::fs::symlink_metadata(&store) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => return Err(fail("screening store must be a direct directory")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(fail(error)),
-    }
     let mut holds = Vec::new();
-    for entry in std::fs::read_dir(store).map_err(fail)? {
-        let path = Rejections::path(&Path::new(STORE).join(entry.map_err(fail)?.file_name()));
+    for task_directory in crate::commands::work::host::store_entries(root, Path::new(STORE))? {
+        let path = Rejections::path(&task_directory);
         let Some(raw) = read_optional(root, &path)? else {
             continue;
         };

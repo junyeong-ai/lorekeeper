@@ -295,16 +295,15 @@ impl InspectionAttempts {
 pub(in crate::commands) fn pending_holds(
     root: &Path,
 ) -> miette::Result<Vec<(lk_core::execution::AgentEngine, PendingHold)>> {
-    let store = lk_vault::page_path(root, Path::new(".lorekeeper/work")).map_err(fail)?;
-    let entries = match std::fs::read_dir(store) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(fail(error)),
-    };
     let mut holds = Vec::new();
-    for entry in entries {
-        let name = entry.map_err(fail)?.file_name();
-        let Some(work_id) = name.to_str().filter(|name| require_id(name).is_ok()) else {
+    for directory in
+        crate::commands::work::host::store_entries(root, Path::new(".lorekeeper/work"))?
+    {
+        let Some(work_id) = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| require_id(name).is_ok())
+        else {
             continue;
         };
         let Some(raw) = read_optional(root, &work_path(work_id, "inspection-timeouts.json")?)?
@@ -331,8 +330,9 @@ pub(in crate::commands) fn pending_holds(
         if pending.is_empty() {
             continue;
         }
-        let plan = read_optional(root, &work_path(work_id, "plan.json")?)?
-            .ok_or_else(|| fail("inspection attempts outlived their Work plan"))?;
+        let Some(plan) = read_optional(root, &work_path(work_id, "plan.json")?)? else {
+            continue;
+        };
         let plan = lk_core::json::decode_object(plan.as_bytes()).map_err(fail)?;
         let subject = &plan["context"]["subject"];
         let (Some("queue"), Some(task_id), Some(cache_hash)) = (
