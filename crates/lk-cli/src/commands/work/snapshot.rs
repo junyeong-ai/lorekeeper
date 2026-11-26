@@ -232,9 +232,29 @@ fn compose(stored: &str, current: &str) -> String {
             if let (Some((_, old)), Some((range, new))) =
                 (body(stored, heading), body(current, heading))
             {
+                let kept = old.trim();
+                let content = new.trim();
+                if kept == content {
+                    continue;
+                }
                 let trailing = &new[new.trim_end().len()..];
-                let kept = old.trim_end();
-                spans.push((range, format!("{kept}{trailing}")));
+                let newline = if current.contains("\r\n") {
+                    "\r\n"
+                } else {
+                    "\n"
+                };
+                let leading = &old[..old.len() - old.trim_start().len()];
+                let opening = if current[..range.start].ends_with('\n') || leading.contains('\n') {
+                    leading.to_owned()
+                } else {
+                    format!("{newline}{leading}")
+                };
+                let closing = if range.end == current.len() || trailing.matches('\n').count() >= 2 {
+                    trailing.to_owned()
+                } else {
+                    newline.repeat(2)
+                };
+                spans.push((range, format!("{opening}{kept}{closing}")));
             }
         }
     }
@@ -310,6 +330,19 @@ mod tests {
         );
 
         let at_end = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.";
+        let adjacent =
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n## Notes\nOwner: data.\n";
+        assert_eq!(
+            compose(&page("Limit is 5.", "Owner: platform."), adjacent),
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n\nLimit is 5.\n\n## Notes\nOwner: data.\n",
+            "an emptied current section still separates its content from the next heading"
+        );
+        let crlf = adjacent.replace('\n', "\r\n");
+        assert!(
+            compose(&page("Limit is 5.", "Owner: platform."), &crlf)
+                .contains("Limit is 5.\r\n\r\n## Notes"),
+            "the page's own line ending separates them"
+        );
         let extended = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 7.\n\nNotes\n-----\nOwner: data.\n";
         assert_eq!(
             compose(at_end, extended),
