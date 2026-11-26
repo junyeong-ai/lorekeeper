@@ -586,6 +586,7 @@ pub(in crate::commands) fn decode_response(
             }
             response
                 .get("structured_output")
+                .filter(|output| !output.is_null())
                 .cloned()
                 .ok_or_else(|| miette::miette!("Claude returned no structured observation"))?
         }
@@ -648,6 +649,8 @@ mod tests {
             ),
         ] {
             assert!(is_answerless(engine, raw.as_bytes()), "{engine:?}: {raw}");
+            assert!(decode_response(engine, raw.as_bytes(), 32768).is_err());
+            assert!(response_failure(engine, raw.as_bytes()).is_unanswered());
         }
         for (engine, raw) in [
             (AgentEngine::Codex, "not JSON"),
