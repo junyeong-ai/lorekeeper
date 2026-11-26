@@ -223,6 +223,61 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
 }
 
 #[test]
+fn a_probe_wave_sends_one_call_until_its_host_gives_an_outcome() {
+    // Each call marks itself in flight; a detached watcher clears the mark once the process
+    // (the same pid after `exec`) ends, so the count a call takes shows its overlapping calls.
+    let tracked = r#"if [ -f "$TEST_EXECUTION_ROOT/fail" ]; then exit 7; fi
+mkdir -p "$TEST_EXECUTION_ROOT/inflight"
+mark="$TEST_EXECUTION_ROOT/inflight/$$"
+touch "$mark"
+(while kill -0 $$ 2>/dev/null; do sleep 0.1; done; rm -f "$mark") </dev/null >/dev/null 2>&1 &
+sleep 1
+ls "$TEST_EXECUTION_ROOT/inflight" | wc -l | tr -d ' ' >> "$TEST_EXECUTION_ROOT/concurrency"
+"#;
+    for engine in ["codex", "claude-code"] {
+        let behavior = format!("{tracked}{RECORD_BOUNDED_AUDIT}");
+        let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 64}", "max_calls: 64, max_parallel: 4}");
+        std::fs::write(&fixture.config, config).unwrap();
+        configure(&fixture, Some(1), 60);
+        std::fs::write(fixture.root().join("fail"), "").unwrap();
+        let held = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&held), 1, "{held}");
+        std::fs::remove_file(fixture.root().join("fail")).unwrap();
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls_per_day: 1,", "max_calls_per_day: 20,");
+        std::fs::write(&fixture.config, config).unwrap();
+
+        let probed = run(&fixture, "knowledge", false);
+        assert!(
+            probed["runs"][0]["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == "host probe"),
+            "{probed}"
+        );
+        let concurrency = std::fs::read_to_string(fixture.root().join("concurrency"))
+            .unwrap()
+            .lines()
+            .map(|line| line.parse::<usize>().unwrap())
+            .collect::<Vec<_>>();
+        assert!(concurrency.len() >= 3, "{concurrency:?}: {probed}");
+        assert_eq!(
+            concurrency[0], 1,
+            "the probe is sent alone until its host gives an outcome: {probed}"
+        );
+        assert!(
+            concurrency[1..].iter().any(|count| *count > 1),
+            "the host's answer restores parallel waves: {concurrency:?}"
+        );
+    }
+}
+
+#[test]
 fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() {
     for engine in ["codex", "claude-code"] {
         let behavior = RECORD_BOUNDED_AUDIT.replacen("if action=='inspect':", r#"if action=='inspect':

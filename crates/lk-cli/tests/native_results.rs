@@ -306,6 +306,73 @@ fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by
 }
 
 #[test]
+fn a_probe_passes_over_holds_that_cannot_run_to_a_reachable_hold_in_the_same_run() {
+    let fixture = Fixture::new("codex");
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 64"),
+    )
+    .unwrap();
+    std::fs::write(fixture.root().join("mode"), "host-exit").unwrap();
+    let waiting = ["first", "second"].map(|name| {
+        fixture
+            .add(name, lk_queue::TaskKind::SynthesizeConcept, false)
+            .0
+    });
+    fixture.run();
+    let (reachable, _) = fixture.add("reachable", lk_queue::TaskKind::SynthesizeConcept, false);
+    fixture.run();
+    let holds = std::fs::read_dir(
+        fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections"),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(holds, 3, "every finalizer is held");
+    for name in ["first", "second"] {
+        let path = fixture
+            .root()
+            .join(format!("vault/wiki/documents/evidence-{name}.md"));
+        let raw = std::fs::read_to_string(&path).unwrap().replacen(
+            "---\ntype: document\n",
+            &format!(
+                "---\ntype: document\nllm_inputs:\n  summary: {}\n",
+                "a".repeat(32)
+            ),
+            1,
+        );
+        std::fs::write(path, raw).unwrap();
+    }
+    std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+
+    let calls = fixture.calls();
+    let report = fixture.run();
+    assert_eq!(report["halted"], false, "{report}");
+    assert_eq!(
+        fixture.calls(),
+        calls + 1,
+        "only the reachable hold is sent: {report}"
+    );
+    assert!(fixture.done(&reachable), "{report}");
+    assert!(waiting.iter().all(|task| !fixture.done(task)), "{report}");
+    let probes = report["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|stage| stage["name"] == "host probe")
+        .map(|stage| stage["detail"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        probes.len(),
+        3,
+        "the two older holds whose synthesis awaits its source are withdrawn within the run: {report}"
+    );
+    assert!(probes[2].contains(&reachable.task_id), "{report}");
+}
+
+#[test]
 fn a_task_retired_while_its_finalizer_failed_is_prepared_afresh_not_fatal() {
     let fixture = Fixture::new("codex");
     let (task, _) = fixture.add("retired", lk_queue::TaskKind::SynthesizeConcept, false);
