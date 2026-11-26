@@ -1192,7 +1192,7 @@ mod native {
                     self.record(
                         name,
                         StageState::Failed,
-                        Some("the vault changed while navigation was captured; the previous snapshot stays and a later run refreshes it".into()),
+                        Some("navigation capture could not complete (the vault changed while it read, or another connection held the search index); the previous snapshot stays and a later run refreshes it".into()),
                     );
                     self.configuration_is_current()
                 }

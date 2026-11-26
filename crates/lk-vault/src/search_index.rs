@@ -2566,6 +2566,57 @@ mod tests {
     }
 
     #[test]
+    fn converting_a_held_rollback_journal_index_is_busy_and_keeps_its_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/topic.md";
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Topic\n---\nOriginal.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let first = prepare_search(&session, &dirs).unwrap();
+        let journal: String = Connection::open(root.path().join(INDEX_PATH))
+            .unwrap()
+            .pragma_update_and_check(None, "journal_mode", "DELETE", |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal, "delete");
+        let mut reader = Connection::open_with_flags(
+            root.path().join(INDEX_PATH),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let held = reader.transaction().unwrap();
+        let read = |transaction: &rusqlite::Transaction<'_>| -> String {
+            transaction
+                .query_row("SELECT id FROM snapshot", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(read(&held), first.snapshot);
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Topic\n---\nChanged.\n",
+        );
+        let Err(busy) = prepare_search(&session, &dirs) else {
+            panic!("converting a held index must not succeed");
+        };
+        assert!(busy.is_search_index_busy(), "{busy}");
+        assert_eq!(read(&held), first.snapshot);
+        drop(held);
+        drop(reader);
+        assert_eq!(
+            inspect_search_snapshot(root.path(), &dirs)
+                .unwrap()
+                .snapshot,
+            first.snapshot
+        );
+        let converted = prepare_search(&session, &dirs).unwrap();
+        assert_ne!(converted.snapshot, first.snapshot);
+    }
+
+    #[test]
     fn snapshot_inspection_is_read_only_and_does_not_certify_current_pages() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();

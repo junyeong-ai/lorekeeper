@@ -183,7 +183,8 @@ paths:
   name the state: pending holds are retried automatically once the host answers; exhausted
   and unusable ones need diagnosis and the named retry command. The scheduled pause for
   fatal stages is unchanged; navigation refresh commits beside readers holding their
-  snapshot because the search index uses write-ahead logging.
+  snapshot because the search index uses write-ahead logging, and a refresh that still finds
+  the index busy exits 75 like a changed capture, so the run defers instead of pausing.
   `work retry` clears only a current operational hold or exhausted timeout allowance;
   `work hold` suspends an exact ready node without invoking a host or granting refinement.
   Both use fresh Work/input guards; dry runs publish/recover nothing and invoke no host.

@@ -1302,8 +1302,9 @@ pub(super) fn refuse_navigation_inbox_overlap(
     Ok(())
 }
 
-/// Exit status of a refresh whose capture saw the vault change while it read (sysexits
-/// `EX_TEMPFAIL`): nothing was published, the previous snapshot stays, and a later
+/// Exit status of a refresh whose capture could not complete for a reason a later attempt
+/// outlasts (sysexits `EX_TEMPFAIL`): the vault changed while it read, or another connection
+/// held the search index. Nothing was published, the previous snapshot stays, and a later
 /// refresh repeats the capture. Native runs defer on it rather than halting.
 pub(crate) const REFRESH_CAPTURE_CHANGED_EXIT: i32 = 75;
 
@@ -1343,7 +1344,10 @@ pub async fn run_refresh_with_wait(
             .is_some_and(|config| config.graph.scope.follow_links),
     ) {
         Ok(snapshot) => snapshot,
-        Err(error @ lk_vault::VaultError::CitationCapture(_)) => {
+        Err(error)
+            if matches!(error, lk_vault::VaultError::CitationCapture(_))
+                || error.is_search_index_busy() =>
+        {
             drop(session);
             eprintln!("Error: prepare discovery snapshot: {error}");
             std::process::exit(REFRESH_CAPTURE_CHANGED_EXIT);

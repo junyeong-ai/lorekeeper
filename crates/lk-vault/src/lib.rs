@@ -162,3 +162,18 @@ pub enum VaultError {
     #[error("serialization: {0}")]
     Serialization(String),
 }
+
+impl VaultError {
+    /// Whether the search index was busy with another connection, which a later attempt
+    /// can outlast; the previous snapshot is unchanged.
+    pub fn is_search_index_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::SearchIndex(rusqlite::Error::SqliteFailure(failure, _))
+                if matches!(
+                    failure.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                )
+        )
+    }
+}
