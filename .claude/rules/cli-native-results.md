@@ -114,10 +114,14 @@ paths:
   context on every finalization path (selected, root and frontier) without a call. A proposal citing an origin both as a page and
   by its RSS events keeps the events. The run then replans; the review enters the concept's scope through `subjects`,
   so the next finalization completes against it. `needs-review` is only for an issue no
-  open review in scope records. Whether an issue is already recorded is the finalizer's
-  judgment over every scoped review it reads, whatever its kind: a distinct issue of an open
-  review's kind gets its own review, with its own evidence and resolution, and Rust never
-  approximates that judgment by kind. A proposal repeating a scoped review exactly (kind,
+  open review in scope records. One open review of a kind carries that kind of question for a
+  concept: while an open review of the proposal's kind names the concept (its verified owner,
+  among every review in the vault's review inventory, whoever wrote it and whether or not the
+  Work read it), the proposal is refused, naming that review, and the finalizer references it
+  and states any distinct question in the synthesis until the review is resolved. A new
+  review makes its concept owed a resynthesis, so a rephrased question would otherwise open
+  review after review. A proposal of another kind, or after the review resolves, still
+  publishes. A proposal repeating a scoped review exactly (kind,
   title, judgment and evidence, whatever its status, compared against every review the
   Work's scope depends on) is that review: it publishes nothing and is refused, so its task is
   reconsidered once with that refusal and then held while its inputs stay current. A new review never takes an address that folds (case, NFC) onto a

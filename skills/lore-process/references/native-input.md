@@ -131,9 +131,11 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
   links no concept page; `evidence` indexes the cited source pages or RSS event payloads
   it rests on. Rust publishes it as an open review of the concept recording its `kind`
-  and replans. When an open review in `open_reviews` already records the same issue, complete
-  the synthesis and list it in `review_refs` instead; a distinct issue, even of an open
-  review's kind, gets its own review. A concept publishes at most one review per run.
+  and replans. While an open review of the same kind names the concept, complete the
+  synthesis and list it in `review_refs` instead, stating any distinct question in the
+  synthesis until that review is resolved: Rust refuses a further review of that kind and
+  names the open one. A review of another kind may still be proposed. A concept publishes at
+  most one review per run.
   When the task or Work supplies `review_refusal`, Rust refused this task's previous review
   proposal for the same inputs for that reason and this request is its one reconsideration:
   never resubmit that proposal unchanged; correct it, or complete the synthesis.

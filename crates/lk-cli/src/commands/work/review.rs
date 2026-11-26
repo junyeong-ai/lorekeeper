@@ -3,13 +3,16 @@
 //! material evidence gap: it proposes one durable review, and Rust publishes it as an open review
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
 //!
-//! Whether a question is already recorded is the finalizer's judgment over every scoped review
-//! it reads, so an open review never blocks a distinct question about the same concept. A
-//! proposal repeating a scoped review exactly (kind, title, judgment and evidence) is that
-//! review, not a new one: it publishes nothing and holds the task while its inputs stay
-//! current. The run bounds the rest: a target publishes at most one review per run, and a
-//! further proposal waits unrecorded for a later run, whose request then scopes the reviews
-//! published.
+//! One open review of a kind per concept carries that kind of question: while an open
+//! `conflict` or `evidence-gap` review names the concept, by any author and whether or not this
+//! Work read it, a proposal of the same kind is refused, naming that review, and the finalizer
+//! references it and states any distinct question in the synthesis until it is resolved. A new
+//! review would make the concept owed a resynthesis, so a rephrased question could otherwise
+//! open review after review. A proposal repeating a scoped review exactly (kind, title,
+//! judgment and evidence) is that review: it publishes nothing and holds the task while its
+//! inputs stay current. Either refusal goes through the review refusal's one reconsideration.
+//! The run bounds the rest: a target publishes at most one review per run, and a further
+//! proposal waits unrecorded for a later run, whose request then scopes the reviews published.
 
 use std::path::{Path, PathBuf};
 
@@ -138,6 +141,17 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
+    let open = open_of_kind(root, config, &task.target.vault_path, proposal.kind)?;
+    if !open.is_empty() {
+        return Ok(Err(format!(
+            "the open {} review {} already carries this concept's question of that kind; reference it in the synthesis and state any distinct question there until that review is resolved",
+            serde_json::to_value(proposal.kind)
+                .into_diagnostic()?
+                .as_str()
+                .unwrap_or_default(),
+            open.join(", ")
+        )));
+    }
     let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash});
     let content = format!(
@@ -234,6 +248,44 @@ fn recorded(
         }
     }
     Ok(None)
+}
+
+/// The open reviews of `kind` that name `concept` under its verified owner, among every review
+/// in the vault: the shared inventory, not only the reviews this Work read.
+fn open_of_kind(
+    root: &Path,
+    config: &lk_core::config::Config,
+    concept: &str,
+    kind: lk_vault::ReviewKind,
+) -> miette::Result<Vec<String>> {
+    let owner = |address: &str| lk_vault::resolve_page_owner(root, Path::new(address)).ok();
+    let Some(concept_owner) = owner(concept) else {
+        return Ok(Vec::new());
+    };
+    let mut inventory =
+        lk_vault::ReviewInventory::load(root, &config.vault.dirs).into_diagnostic()?;
+    let naming = inventory
+        .paths()
+        .filter(|path| {
+            inventory.subjects(path).is_some_and(|subjects| {
+                subjects
+                    .iter()
+                    .any(|subject| owner(subject).as_ref() == Some(&concept_owner))
+            })
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok(naming
+        .into_iter()
+        .filter(|path| {
+            inventory
+                .load_report(path)
+                .and_then(|report| report.review)
+                .is_some_and(|review| {
+                    review.status == lk_vault::ReviewStatus::Open && review.kind == Some(kind)
+                })
+        })
+        .collect())
 }
 
 /// A review judgment as compared for an exact repeat: without the blank lines framing it,

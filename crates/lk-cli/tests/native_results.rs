@@ -106,11 +106,11 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
             refusal=item.get('review_refusal') or request.get('review_refusal')
             if refusal: (root/'review-refusal').write_text(json.dumps(refusal))
-            if (mode in ['needs-review-always','needs-review-stubborn'] or not any(authority(entry)=='review' for entry in roster)) and not (refusal and mode!='needs-review-stubborn'):
+            if (mode in ['needs-review-always','needs-review-stubborn','needs-review-gap-always'] or not any(authority(entry)=='review' for entry in roster)) and not (refusal and mode!='needs-review-stubborn'):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
                 (root/'review-proposals').write_text(str(proposals))
-                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement',
+                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode in ['needs-review-gap','needs-review-gap-always'] else 'conflict','title':'Deployment status disagreement',
                     'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
@@ -873,7 +873,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             "a rewritten synthesis owes nothing further: {report}"
         );
 
-        for mode in ["needs-review-always", "needs-review-stubborn"] {
+        let with_open_review = |mode: &str, status: &str| {
             let fixture = Fixture::new("codex");
             fixture.route_synthesis();
             std::fs::write(fixture.root().join("mode"), mode).unwrap();
@@ -884,61 +884,85 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             std::fs::write(
                 explorations.join("rollback-principle.md"),
                 format!(
-                    "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  kind: conflict\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
+                    "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: {status}\n  kind: conflict\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n  resolution: {}\n---\n# Rollback principle\n\nAnother author's open question about this concept.\n",
                     task.target.vault_path,
                     cited["path"].as_str().unwrap(),
-                    cited["revision"].as_str().unwrap()
+                    cited["revision"].as_str().unwrap(),
+                    if status == "open" { "null" } else { "The operator settled it." }
                 ),
             )
             .unwrap();
-            let report = fixture.run();
-            assert!(!fixture.done(&task), "{planned}: {report}");
-            assert_eq!(report["halted"], false, "{report}");
-            assert_eq!(
-                report["retained_progress"]["synthesis_reviews"], 1,
-                "{report}"
-            );
-            assert_eq!(
-                explorations.read_dir().unwrap().count(),
-                2,
-                "an open review of the same kind about a distinct issue never refuses a new review"
-            );
-            let report = fixture.run();
+            (fixture, task, explorations)
+        };
+        for mode in ["needs-review-always", "needs-review-stubborn"] {
+            let (fixture, task, explorations) = with_open_review(mode, "open");
+            let mut report = fixture.run();
             assert_eq!(report["halted"], false, "{report}");
             assert_eq!(
                 report["retained_progress"]["synthesis_reviews"], 0,
-                "a proposal repeating its scoped review publishes nothing: {report}"
+                "an open review of the same kind refuses a new one: {report}"
             );
             assert!(
                 std::fs::read_to_string(fixture.root().join("review-refusal"))
                     .unwrap()
-                    .contains("repeats the scoped review"),
-                "the refused proposal's task is reconsidered once with the refusal: {report}"
+                    .contains("wiki/explorations/rollback-principle.md"),
+                "the refusal names the open review to reference: {report}"
             );
+            if !fixture.done(&task) && mode == "needs-review-always" {
+                report = fixture.run();
+            }
             assert_eq!(
                 explorations.read_dir().unwrap().count(),
-                2,
-                "the repeated proposal converges on the review it repeats"
+                1,
+                "a rephrased question opens no further review: {report}"
             );
             if mode == "needs-review-always" {
                 assert!(
                     fixture.done(&task),
-                    "the reconsidered finalizer completes against the review it repeated: {planned}: {report}"
+                    "the reconsidered finalizer completes against the open review: {planned}: {report}"
                 );
                 continue;
             }
-            assert!(!fixture.done(&task), "{report}");
-            assert_eq!(
-                report["retained_progress"]["action_receipts"], 2,
-                "a refusal after the reconsideration holds the task: {report}"
-            );
+            if fixture.calls() < 3 {
+                fixture.run();
+            }
+            assert!(!fixture.done(&task));
             let calls = fixture.calls();
             let report = fixture.run();
             assert_eq!(
                 fixture.calls(),
                 calls,
-                "the held request spends no further call: {report}"
+                "a refusal after the reconsideration holds the task: {report}"
             );
+        }
+        for (mode, status, reason) in [
+            (
+                "needs-review-gap-always",
+                "open",
+                "an open review of another kind does not refuse an evidence gap",
+            ),
+            (
+                "needs-review-always",
+                "resolved",
+                "a resolved review no longer refuses a new one",
+            ),
+        ] {
+            let (fixture, task, explorations) = with_open_review(mode, status);
+            let report = fixture.run();
+            assert_eq!(
+                report["retained_progress"]["synthesis_reviews"], 1,
+                "{reason}: {report}"
+            );
+            assert_eq!(explorations.read_dir().unwrap().count(), 2);
+            let report = fixture.run();
+            assert!(
+                std::fs::read_to_string(fixture.root().join("review-refusal"))
+                    .unwrap()
+                    .contains("wiki/explorations/deployment-status-disagreement.md"),
+                "the next rephrasing is refused, naming the review just published: {report}"
+            );
+            assert_eq!(explorations.read_dir().unwrap().count(), 2, "{report}");
+            assert!(fixture.done(&task), "{report}");
         }
 
         let fixture = Fixture::new("codex");
