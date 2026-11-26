@@ -201,12 +201,12 @@ fn owned_sections(format: &str) -> &'static [SectionKey] {
     }
 }
 
-/// `current` with the content of each section Lore owns on its page format taken from
-/// `stored`, where both pages declare that format and carry that section once. The current
-/// body's trailing whitespace stays, so the next section keeps its separator, and frontmatter
-/// and every other section stay current: an authored correction is read at once
-/// while a neighbor's rewrite of its derived sections is not. Equal pages compose to
-/// themselves.
+/// `current` with each section Lore owns on its page format taken byte for byte from
+/// `stored`, where both pages declare that format and carry that section once, so a page
+/// whose only changes are Lore's rewrites composes to `stored`. Frontmatter and every other
+/// section stay current: an authored correction is read at once while a neighbor's rewrite of
+/// its derived sections is not. A kept body takes the current page's line ending, and gains a
+/// line break only where it would otherwise run into the current text around it.
 fn compose(stored: &str, current: &str) -> String {
     let format = |raw: &str| {
         lk_core::frontmatter::parse_page(raw).ok().and_then(|page| {
@@ -232,29 +232,28 @@ fn compose(stored: &str, current: &str) -> String {
             if let (Some((_, old)), Some((range, new))) =
                 (body(stored, heading), body(current, heading))
             {
-                let kept = old.trim();
-                let content = new.trim();
-                if kept == content {
+                if old == new {
                     continue;
                 }
-                let trailing = &new[new.trim_end().len()..];
-                let newline = if current.contains("\r\n") {
-                    "\r\n"
+                let crlf = current.contains("\r\n");
+                let newline = if crlf { "\r\n" } else { "\n" };
+                let mut kept = if crlf && !old.contains('\r') {
+                    old.replace('\n', newline)
                 } else {
-                    "\n"
+                    old.to_owned()
                 };
-                let leading = &old[..old.len() - old.trim_start().len()];
-                let opening = if current[..range.start].ends_with('\n') || leading.contains('\n') {
-                    leading.to_owned()
-                } else {
-                    format!("{newline}{leading}")
-                };
-                let closing = if range.end == current.len() || trailing.matches('\n').count() >= 2 {
-                    trailing.to_owned()
-                } else {
-                    newline.repeat(2)
-                };
-                spans.push((range, format!("{opening}{kept}{closing}")));
+                if !kept.is_empty()
+                    && !kept.starts_with(['\r', '\n'])
+                    && !current[..range.start].ends_with('\n')
+                {
+                    kept.insert_str(0, newline);
+                }
+                if range.end < current.len() {
+                    let needed: usize = if kept.trim().is_empty() { 1 } else { 2 };
+                    let present = kept[kept.trim_end().len()..].matches('\n').count();
+                    kept.push_str(&newline.repeat(needed.saturating_sub(present)));
+                }
+                spans.push((range, kept));
             }
         }
     }
@@ -347,7 +346,23 @@ mod tests {
         assert_eq!(
             compose(at_end, extended),
             "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.\n\nNotes\n-----\nOwner: data.\n",
-            "the current separator before a following section stays"
+            "a following section is separated from the kept body"
+        );
+        let filled = page("Limit is 5.", "Owner: platform.").replace(
+            "## Related\n\n## Sources",
+            "## Related\n\nA neighbor's new related list.\n\n## Sources",
+        );
+        let stored = page("Limit is 5.", "Owner: platform.");
+        assert_eq!(
+            compose(&stored, &filled),
+            stored,
+            "a section a neighbor filled composes to its recorded empty body"
+        );
+        let indented = page("    let limit = 5;", "Owner: platform.");
+        assert_eq!(
+            compose(&indented, &page("let limit = 5;", "Owner: platform.")),
+            indented,
+            "significant indentation is part of the recorded body"
         );
     }
 
