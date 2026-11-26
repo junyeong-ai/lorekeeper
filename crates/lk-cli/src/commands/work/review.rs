@@ -12,7 +12,8 @@
 //! judgment and evidence) is that review: it publishes nothing and holds the task while its
 //! inputs stay current. Either refusal goes through the review refusal's one reconsideration.
 //! The run bounds the rest: a target publishes at most one review per run, and a further
-//! proposal waits unrecorded for a later run, whose request then scopes the reviews published.
+//! proposal of another kind waits unrecorded for a later run, whose request then scopes the
+//! reviews published. The same-kind refusal comes first, so that bound never postpones it.
 
 use std::path::{Path, PathBuf};
 
@@ -141,16 +142,8 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
-    let open = open_of_kind(root, config, &task.target.vault_path, proposal.kind)?;
-    if !open.is_empty() {
-        return Ok(Err(format!(
-            "the open {} review {} already carries this concept's question of that kind; reference it in the synthesis and state any distinct question there until that review is resolved",
-            serde_json::to_value(proposal.kind)
-                .into_diagnostic()?
-                .as_str()
-                .unwrap_or_default(),
-            open.join(", ")
-        )));
+    if let Some(refusal) = same_kind_refusal(root, config, task, proposal.kind)? {
+        return Ok(Err(refusal));
     }
     let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash});
@@ -179,6 +172,29 @@ pub(in crate::commands) fn admit(
         Err(lk_vault::VaultError::Io(error)) => Err(error).into_diagnostic(),
         Err(error) => Ok(Err(format!("the review cannot be published: {error}"))),
     }
+}
+
+/// The refusal of a proposal of `kind` while an open review of that kind names the task's
+/// concept. It holds whatever else the run allows, so a target that already published a
+/// review this run still receives the refusal's reconsideration.
+pub(in crate::commands) fn same_kind_refusal(
+    root: &Path,
+    config: &lk_core::config::Config,
+    task: &QueueTask,
+    kind: lk_vault::ReviewKind,
+) -> miette::Result<Option<String>> {
+    let open = open_of_kind(root, config, &task.target.vault_path, kind)?;
+    if open.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "the open {} review {} already carries this concept's question of that kind; reference it in the synthesis and state any distinct question there until that review is resolved",
+        serde_json::to_value(kind)
+            .into_diagnostic()?
+            .as_str()
+            .unwrap_or_default(),
+        open.join(", ")
+    )))
 }
 
 /// The scoped review of `concept` this Work read that records the same question: the same

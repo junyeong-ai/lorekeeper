@@ -128,6 +128,8 @@ paths:
   removed review whose absence the request guards. A target publishes at most one review per run, spent
   when it publishes: a further proposal in that run publishes and records nothing and
   defers only that target, and a repeating finalizer cannot loop through paid calls. The
+  same-kind refusal is evaluated first, so a further proposal of a kind with an open review
+  is refused and reconsidered rather than deferred to a later paid call. The
   published review records its `kind` and `judged_citation_digest`, the concept citations
   it was judged against.
 - A synthesis capture lists every open review whose subject owner is the concept in

@@ -1021,13 +1021,13 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
                 "{reason}: {report}"
             );
             assert_eq!(explorations.read_dir().unwrap().count(), 2);
-            let report = fixture.run();
             assert!(
                 std::fs::read_to_string(fixture.root().join("review-refusal"))
                     .unwrap()
                     .contains("wiki/explorations/deployment-status-disagreement.md"),
-                "the next rephrasing is refused, naming the review just published: {report}"
+                "the next rephrasing in the same run is refused, naming the review just published, before the run's review allowance defers it: {report}"
             );
+            let report = fixture.run();
             assert_eq!(explorations.read_dir().unwrap().count(), 2, "{report}");
             assert!(fixture.done(&task), "{report}");
         }

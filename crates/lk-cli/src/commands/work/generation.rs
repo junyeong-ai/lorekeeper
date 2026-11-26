@@ -291,10 +291,16 @@ pub(super) fn assemble_prepared(
         work.plan.max_result_bytes,
     )?;
     Ok(match outcome {
-        Outcome::NeedsReview(_, reason) if review == ReviewAllowance::Spent => {
-            Outcome::ReviewDeferred(format!(
-                "{reason} (this target already published a review in this run; the proposal waits for a later run)"
-            ))
+        Outcome::NeedsReview(proposal, reason) if review == ReviewAllowance::Spent => {
+            match super::review::same_kind_refusal(root, config, task, proposal.kind)? {
+                Some(refusal) => Outcome::ReviewRefused {
+                    reason: format!("{reason} (review refused: {refusal})"),
+                    refusal,
+                },
+                None => Outcome::ReviewDeferred(format!(
+                    "{reason} (this target already published a review in this run; the proposal waits for a later run)"
+                )),
+            }
         }
         Outcome::NeedsReview(proposal, reason) => {
             match super::review::admit(root, config, task, prepared, proposal)? {
