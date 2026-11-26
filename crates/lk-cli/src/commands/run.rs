@@ -424,7 +424,7 @@ mod native {
         /// gives an outcome, this run treats it as its own probe.
         inherited: Option<(
             Option<lk_core::execution::AgentEngine>,
-            Option<crate::commands::work::state::HostEnd>,
+            Option<crate::commands::work::host::ProfileKey>,
         )>,
     }
 
@@ -445,19 +445,22 @@ mod native {
         ) -> impl Iterator<
             Item = (
                 Option<lk_core::execution::AgentEngine>,
-                Option<&crate::commands::work::state::HostEnd>,
+                Option<crate::commands::work::host::ProfileKey>,
             ),
         > {
             [&self.queue, &self.audit]
                 .into_iter()
                 .flatten()
                 .filter_map(|probe| probe.released.as_ref())
-                .map(|hold| (hold.engine, hold.host.as_ref()))
-                .chain(
-                    self.inherited
-                        .as_ref()
-                        .map(|(engine, host)| (*engine, host.as_ref())),
-                )
+                .map(|hold| {
+                    (
+                        hold.engine,
+                        hold.host.as_ref().map(|host| {
+                            crate::commands::work::host::ProfileKey::from_profile(&host.profile)
+                        }),
+                    )
+                })
+                .chain(self.inherited.clone())
         }
     }
 
@@ -1014,13 +1017,6 @@ mod native {
                     execution.engine,
                     &host.profile,
                     host.at,
-                    &self
-                        .config
-                        .execution
-                        .profiles
-                        .keys()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
                 )
             {
                 self.failure("host answer", error);
@@ -1126,10 +1122,9 @@ mod native {
         /// whether the host serves requests.
         fn wave_limit(&self, budget: lk_core::execution::SemanticWorkConfig) -> usize {
             let limit = budget.max_parallel.min(self.remaining_calls(budget));
-            let probing = self
-                .host_probes
-                .released()
-                .any(|(engine, host)| !self.hosts_invoked.reached(engine, host));
+            let probing = self.host_probes.released().any(|(engine, profile)| {
+                !self.hosts_invoked.reached_profile(engine, profile.as_ref())
+            });
             if probing { limit.min(1) } else { limit }
         }
 

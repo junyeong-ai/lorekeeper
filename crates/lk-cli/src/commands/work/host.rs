@@ -21,10 +21,58 @@ use super::state::{HostEnd, InvocationFailure};
 
 const PATH: &str = ".lorekeeper/queue/host-answers.json";
 const SCHEMA: &str = "host-answers-v1";
-/// The ledger keeps an answer per engine and per profile of the current configuration, and
-/// one probe, so this bound admits several hundred profiles; a ledger beyond it is refused
-/// before it is written, never written for every later read to reject.
+/// The ledger keeps an answer per engine, the latest answers of at most `MAX_PROFILES`
+/// profiles under fixed-length keys (about 100 bytes each), and one probe, whose identity
+/// names at most a vault path. Whatever configurations share the vault, that stays well inside
+/// this bound; a ledger beyond it is refused before it is written, never left for later reads
+/// to reject.
 const MAX_BYTES: usize = 65_536;
+/// The profiles whose latest answer the ledger keeps, most recent first. Several
+/// configurations may share one vault, so no run's configuration decides which to keep.
+const MAX_PROFILES: usize = 256;
+
+/// A profile name as the ledger keys it: a fixed-length digest, so the ledger's size never
+/// depends on how long a configuration names its profiles.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(in crate::commands) struct ProfileKey(String);
+
+impl ProfileKey {
+    pub(in crate::commands) fn from_profile(profile: &str) -> Self {
+        Self(lk_core::rss_original::digest(profile.as_bytes()))
+    }
+}
+
+impl TryFrom<String> for ProfileKey {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if lk_core::rss_original::is_valid_digest(&value) {
+            Ok(Self(value))
+        } else {
+            Err("a host answer profile key must be a digest".into())
+        }
+    }
+}
+
+impl From<ProfileKey> for String {
+    fn from(key: ProfileKey) -> Self {
+        key.0
+    }
+}
+
+/// The host a failure ended on, as the ledger compares it: its profile's key and the time.
+fn host_key(host: Option<&HostEnd>) -> Option<(ProfileKey, Timestamp)> {
+    host.map(|host| (ProfileKey::from_profile(&host.profile), host.at))
+}
+
+/// The host and time of the failure a probe released.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProbeHost {
+    profile: ProfileKey,
+    at: Timestamp,
+}
 
 /// The retained hold an unanswered failure created, named by the store that keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,7 +92,7 @@ struct Probe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     engine: Option<AgentEngine>,
     /// The host and time of the failure released, so a renewed failure is no longer the probe.
-    host: Option<HostEnd>,
+    host: Option<ProbeHost>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -53,7 +101,7 @@ struct Stored {
     schema: String,
     answers: BTreeMap<AgentEngine, Timestamp>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    profiles: BTreeMap<String, Timestamp>,
+    profiles: BTreeMap<ProfileKey, Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     probe: Option<Probe>,
 }
@@ -63,7 +111,7 @@ struct Stored {
 #[derive(Debug, Default)]
 pub(in crate::commands) struct HostAnswers {
     answers: BTreeMap<AgentEngine, Timestamp>,
-    profiles: BTreeMap<String, Timestamp>,
+    profiles: BTreeMap<ProfileKey, Timestamp>,
     probe: Option<Probe>,
 }
 
@@ -73,25 +121,34 @@ pub(in crate::commands) struct HostAnswers {
 #[derive(Debug, Default)]
 pub(in crate::commands) struct InvokedHosts {
     engines: std::collections::BTreeSet<AgentEngine>,
-    profiles: std::collections::BTreeSet<String>,
+    profiles: std::collections::BTreeSet<ProfileKey>,
 }
 
 #[cfg(unix)]
 impl InvokedHosts {
     pub(in crate::commands) fn insert(&mut self, engine: AgentEngine, profile: &str) {
         self.engines.insert(engine);
-        self.profiles.insert(profile.to_owned());
+        self.profiles.insert(ProfileKey::from_profile(profile));
     }
 
-    /// Whether this run already invoked the host a hold failed on: its profile, else its
-    /// engine, else (a legacy hold that kept neither) any host.
+    /// Whether this run already invoked the host a hold failed on.
     pub(in crate::commands) fn reached(
         &self,
         engine: Option<AgentEngine>,
         host: Option<&HostEnd>,
     ) -> bool {
-        match (host, engine) {
-            (Some(host), _) => self.profiles.contains(&host.profile),
+        self.reached_profile(engine, host_key(host).map(|(key, _)| key).as_ref())
+    }
+
+    /// Whether this run already invoked the host of `profile`, else of `engine`, else (a
+    /// legacy hold that kept neither) any host.
+    pub(in crate::commands) fn reached_profile(
+        &self,
+        engine: Option<AgentEngine>,
+        profile: Option<&ProfileKey>,
+    ) -> bool {
+        match (profile, engine) {
+            (Some(profile), _) => self.profiles.contains(profile),
             (None, Some(engine)) => self.engines.contains(&engine),
             (None, None) => !self.engines.is_empty(),
         }
@@ -280,12 +337,16 @@ impl HostAnswers {
     /// Whether the host a failure was recorded on answered after it ended; a failure that kept
     /// no host follows any answer of its engine, and a legacy one that kept no engine follows
     /// any answer. Admission, exhaustion and probing all match hosts through this.
-    fn answered_since(&self, engine: Option<AgentEngine>, host: Option<&HostEnd>) -> bool {
+    fn answered_since(
+        &self,
+        engine: Option<AgentEngine>,
+        host: Option<(ProfileKey, Timestamp)>,
+    ) -> bool {
         match (host, engine) {
-            (Some(host), _) => self
+            (Some((profile, at)), _) => self
                 .profiles
-                .get(&host.profile)
-                .is_some_and(|answered| *answered > host.at),
+                .get(&profile)
+                .is_some_and(|answered| *answered > at),
             (None, Some(engine)) => self.answers.contains_key(&engine),
             (None, None) => self.has_answer(),
         }
@@ -316,7 +377,7 @@ impl HostAnswers {
             };
         }
         if self.is_probe(identity, failure.host().map(|host| host.at))
-            || self.answered_since(Some(failure.engine()), failure.host())
+            || self.answered_since(Some(failure.engine()), host_key(failure.host()))
         {
             Standing::Released
         } else {
@@ -338,7 +399,7 @@ impl HostAnswers {
         let Some((prior, false)) = prior.filter(|(prior, _)| prior.is_unanswered()) else {
             return false;
         };
-        let released = self.answered_since(Some(prior.engine()), prior.host());
+        let released = self.answered_since(Some(prior.engine()), host_key(prior.host()));
         self.settle_renewal(failure, released, prior.host())
     }
 
@@ -377,11 +438,19 @@ impl HostAnswers {
     #[cfg(unix)]
     pub(in crate::commands) fn pending_probe(
         &self,
-    ) -> Option<(Option<AgentEngine>, Option<HostEnd>)> {
+    ) -> Option<(Option<AgentEngine>, Option<ProfileKey>)> {
         self.probe
             .as_ref()
-            .filter(|probe| !self.answered_since(probe.engine, probe.host.as_ref()))
-            .map(|probe| (probe.engine, probe.host.clone()))
+            .filter(|probe| {
+                let host = probe.host.clone().map(|host| (host.profile, host.at));
+                !self.answered_since(probe.engine, host)
+            })
+            .map(|probe| {
+                (
+                    probe.engine,
+                    probe.host.as_ref().map(|host| host.profile.clone()),
+                )
+            })
     }
 
     /// The pending holds a probe may release for `scope`, oldest failure first: their
@@ -408,7 +477,7 @@ impl HostAnswers {
             );
             if reachable
                 && !invoked.reached(hold.engine, hold.host.as_ref())
-                && !self.answered_since(hold.engine, hold.host.as_ref())
+                && !self.answered_since(hold.engine, host_key(hold.host.as_ref()))
                 && next_probe(hold.host.as_ref()).is_none_or(|next| next <= now)
                 && hold.scope.is_current(root, &mut queue, read)?
             {
@@ -441,7 +510,7 @@ impl HostAnswers {
         .into_diagnostic()?;
         if raw.len() > MAX_BYTES {
             return Err(miette::miette!(
-                "host answers for {} configured profiles exceed their storage bound",
+                "host answers for {} profiles exceed their storage bound",
                 self.profiles.len()
             ));
         }
@@ -497,15 +566,15 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
 
 /// Records that the host configuration `profile` of `engine` answered a request when it
 /// ended at `answered_at`. Only a later answer advances either record, and the ledger keeps
-/// only the `configured` profiles, so renamed or removed profiles do not accumulate. Runs hold
-/// the workflow lease while they invoke hosts, so these writes do not race.
+/// the `MAX_PROFILES` most recently answering profiles, so renamed or removed profiles age
+/// out without any configuration deciding for another sharing the vault. Runs hold the
+/// workflow lease while they invoke hosts, so these writes do not race.
 #[cfg(unix)]
 pub(in crate::commands) fn record_answer(
     root: &Path,
     engine: AgentEngine,
     profile: &str,
     answered_at: Timestamp,
-    configured: &[&str],
 ) -> miette::Result<()> {
     fn advance<K: Ord>(answers: &mut BTreeMap<K, Timestamp>, key: K, at: Timestamp) -> bool {
         if answers.get(&key).is_some_and(|answered| *answered >= at) {
@@ -515,14 +584,22 @@ pub(in crate::commands) fn record_answer(
         true
     }
     let mut answers = HostAnswers::load(root)?;
-    let before = answers.profiles.len();
-    answers
-        .profiles
-        .retain(|kept, _| configured.contains(&kept.as_str()));
-    let pruned = answers.profiles.len() != before;
     let engine_advanced = advance(&mut answers.answers, engine, answered_at);
-    let profile_advanced = advance(&mut answers.profiles, profile.to_owned(), answered_at);
-    if pruned || engine_advanced || profile_advanced {
+    let profile_advanced = advance(
+        &mut answers.profiles,
+        ProfileKey::from_profile(profile),
+        answered_at,
+    );
+    while answers.profiles.len() > MAX_PROFILES {
+        let oldest = answers
+            .profiles
+            .iter()
+            .min_by_key(|(key, answered)| (**answered, (*key).clone()))
+            .map(|(key, _)| key.clone())
+            .expect("profiles beyond the bound");
+        answers.profiles.remove(&oldest);
+    }
+    if engine_advanced || profile_advanced {
         answers.store(root)?;
     }
     Ok(())
@@ -539,7 +616,10 @@ pub(in crate::commands) fn record_probe(
     let probe = hold.map(|hold| Probe {
         identity: hold.identity.clone(),
         engine: hold.engine,
-        host: hold.host.clone(),
+        host: hold.host.as_ref().map(|host| ProbeHost {
+            profile: ProfileKey::from_profile(&host.profile),
+            at: host.at,
+        }),
     });
     if answers.probe == probe {
         return Ok(());
@@ -588,15 +668,19 @@ mod tests {
         answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
         answers
             .profiles
-            .insert("inspection".into(), at(20).unwrap());
+            .insert(ProfileKey::from_profile("inspection"), at(20).unwrap());
         assert_eq!(
             standing(&answers),
             Standing::AwaitingAnswer,
             "another profile of the same engine is another host"
         );
-        answers.profiles.insert("synthesis".into(), at(10).unwrap());
+        answers
+            .profiles
+            .insert(ProfileKey::from_profile("synthesis"), at(10).unwrap());
         assert_eq!(standing(&answers), Standing::AwaitingAnswer);
-        answers.profiles.insert("synthesis".into(), at(11).unwrap());
+        answers
+            .profiles
+            .insert(ProfileKey::from_profile("synthesis"), at(11).unwrap());
         assert_eq!(standing(&answers), Standing::Released);
         assert!(
             Standing::AwaitingAnswer
@@ -636,11 +720,17 @@ mod tests {
         answers.probe = Some(Probe {
             identity: identity(),
             engine: Some(AgentEngine::Codex),
-            host: host("synthesis", 10),
+            host: Some(ProbeHost {
+                profile: ProfileKey::from_profile("synthesis"),
+                at: at(10).unwrap(),
+            }),
         });
         assert_eq!(
             answers.pending_probe(),
-            Some((Some(AgentEngine::Codex), host("synthesis", 10))),
+            Some((
+                Some(AgentEngine::Codex),
+                Some(ProfileKey::from_profile("synthesis"))
+            )),
             "an unanswered released probe carries into the next run"
         );
         assert_eq!(
@@ -655,12 +745,14 @@ mod tests {
         assert!(!answers.settle(&mut repeat.clone(), Some((&prior, false))));
         answers
             .profiles
-            .insert("inspection".into(), at(20).unwrap());
+            .insert(ProfileKey::from_profile("inspection"), at(20).unwrap());
         assert!(
             !answers.settle(&mut repeat.clone(), Some((&prior, false))),
             "another host's answer released nothing"
         );
-        answers.profiles.insert("synthesis".into(), at(20).unwrap());
+        answers
+            .profiles
+            .insert(ProfileKey::from_profile("synthesis"), at(20).unwrap());
         assert_eq!(
             answers.pending_probe(),
             None,
@@ -775,7 +867,9 @@ mod tests {
             ["newer"],
             "a host this run already reached needs no probe; another profile still does"
         );
-        answers.profiles.insert("synthesis".into(), at(30).unwrap());
+        answers
+            .profiles
+            .insert(ProfileKey::from_profile("synthesis"), at(30).unwrap());
         assert_eq!(candidates(&answers, ProbeScope::Audit, &none), ["older"]);
     }
 
@@ -799,54 +893,46 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_ledger_keeps_configured_profiles_and_never_writes_what_it_cannot_read() {
+    fn the_ledger_keeps_the_most_recent_profiles_within_its_read_bound() {
         let root = tempfile::tempdir().unwrap();
-        record_answer(
-            root.path(),
-            AgentEngine::Codex,
-            "retired",
-            at(10).unwrap(),
-            &["retired"],
-        )
-        .unwrap();
-        record_answer(
-            root.path(),
-            AgentEngine::Codex,
-            "current",
-            at(20).unwrap(),
-            &["current"],
-        )
-        .unwrap();
-        let loaded = HostAnswers::load(root.path()).unwrap();
-        assert_eq!(
-            loaded.profiles.keys().collect::<Vec<_>>(),
-            ["current"],
-            "a profile the configuration no longer names is dropped"
-        );
-        let names = (0..2_000)
-            .map(|index| format!("profile-{index:04}"))
+        let long = "p".repeat(10_000);
+        let names = (0..MAX_PROFILES + 40)
+            .map(|index| format!("{long}-{index:04}"))
             .collect::<Vec<_>>();
-        let configured = names.iter().map(String::as_str).collect::<Vec<_>>();
-        let before = std::fs::read(root.path().join(PATH)).unwrap();
-        let mut refused = None;
         for (index, name) in names.iter().enumerate() {
-            if let Err(error) = record_answer(
+            record_answer(
                 root.path(),
                 AgentEngine::Codex,
                 name,
-                at(30 + index as i64).unwrap(),
-                &configured,
-            ) {
-                refused = Some(error);
-                break;
-            }
+                at(100 + index as i64).unwrap(),
+            )
+            .expect("however long or many the profile names, the ledger stays bounded");
         }
+        let raw = std::fs::read(root.path().join(PATH)).unwrap();
+        assert!(raw.len() <= MAX_BYTES, "{}", raw.len());
+        let loaded = HostAnswers::load(root.path()).unwrap();
+        assert_eq!(loaded.profiles.len(), MAX_PROFILES);
         assert!(
-            refused.is_some_and(|error| error.to_string().contains("storage bound")),
-            "a ledger beyond the read bound is refused"
+            !loaded
+                .profiles
+                .contains_key(&ProfileKey::from_profile(&names[0])),
+            "the least recently answering profile ages out"
         );
-        assert_ne!(std::fs::read(root.path().join(PATH)).unwrap(), before);
-        HostAnswers::load(root.path()).expect("every written ledger stays readable");
+        assert!(
+            loaded
+                .profiles
+                .contains_key(&ProfileKey::from_profile(names.last().unwrap())),
+            "whichever configuration answered last keeps its evidence"
+        );
+        std::fs::write(
+            root.path().join(PATH),
+            br#"{"schema":"host-answers-v1","answers":{},"profiles":{"primary":"2026-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        assert!(
+            HostAnswers::load(root.path()).is_err(),
+            "a profile is stored only by its key"
+        );
     }
 
     #[cfg(unix)]
@@ -859,7 +945,6 @@ mod tests {
             AgentEngine::Codex,
             "synthesis",
             at(20).unwrap(),
-            &["synthesis"],
         )
         .unwrap();
         record_answer(
@@ -867,12 +952,11 @@ mod tests {
             AgentEngine::Codex,
             "synthesis",
             at(10).unwrap(),
-            &["synthesis"],
         )
         .unwrap();
         let loaded = HostAnswers::load(root.path()).unwrap();
         assert_eq!(
-            loaded.profiles["synthesis"],
+            loaded.profiles[&ProfileKey::from_profile("synthesis")],
             at(20).unwrap(),
             "an answer settled later but given earlier never moves the record back"
         );

@@ -176,8 +176,10 @@ paths:
   completion time as its profile's and engine's latest answer in
   `.lorekeeper/queue/host-answers.json`, whichever operation ran it; a launch failure or an
   answerless exit is no answer, and a parallel wave's settlement order never reorders them.
-  Recording an answer keeps only the profiles the current configuration names, and a ledger
-  beyond its read bound is refused before it is written, never left for later reads to reject.
+  The ledger keys profiles by a fixed-length digest of their name and keeps the 256 most
+  recently answering, so no configuration sharing the vault erases another's evidence and
+  its size never depends on name length; a ledger beyond its read bound is refused before
+  it is written, never left for later reads to reject.
   A hold recorded before its host was kept follows any answer of its engine. A pending hold
   whose host answered after its failure no longer holds: the request is admitted once more,
   the retry an operator makes after diagnosing the host. Failing again without an answer

@@ -621,7 +621,6 @@ mod tests {
                 lk_core::execution::AgentEngine::Codex,
                 "codex",
                 jiff::Timestamp::now(),
-                &["codex"],
             )
             .unwrap();
             assert!(binding.held(root).unwrap().is_none());

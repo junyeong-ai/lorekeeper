@@ -309,7 +309,12 @@ fn release_held_node_as_probe(fixture: &Fixture) {
     answers["probe"] = serde_json::json!({
         "identity": {"store": "inspection", "work_id": held["work_id"], "node_id": node},
         "engine": failure["engine"],
-        "host": failure["host"],
+        "host": {
+            "profile": lk_core::rss_original::digest(
+                failure["host"]["profile"].as_str().unwrap().as_bytes()
+            ),
+            "at": failure["host"]["at"],
+        },
     });
     std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     std::fs::write(ledger, serde_json::to_vec(&answers).unwrap()).unwrap();
