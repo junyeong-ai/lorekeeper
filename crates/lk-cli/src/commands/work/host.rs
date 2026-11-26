@@ -1,11 +1,13 @@
 //! Whether a request whose invocation ended without an answer is still held.
 //!
 //! An unanswered failure (an exit, a timeout or a missing result) cannot tell a host fault
-//! from a request the host cannot serve. Its hold therefore lasts only until the same engine
-//! answers a later request: that answer shows the host serves requests, so the held request is
-//! retried once. Failing again after that answer exhausts it until an explicit retry. While no
-//! engine answers, one run with no admissible work releases the oldest pending hold as the
-//! probe an operator would send; a probe that fails again only renews its hold.
+//! from a request the host cannot serve. Its hold therefore lasts only until the host
+//! configuration that served it (its execution profile) answers a later request: that answer
+//! shows the host serves requests, so the held request is retried once. Failing again after
+//! that answer exhausts it until an explicit retry. While no answer comes, a run with no
+//! admissible work releases the oldest pending hold as the probe an operator would send; a
+//! probe that fails again only renews its hold. A hold recorded before its host was kept
+//! follows any answer of its engine.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,7 +17,7 @@ use lk_core::execution::AgentEngine;
 use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 
-use super::state::InvocationFailure;
+use super::state::{HostEnd, InvocationFailure};
 
 const PATH: &str = ".lorekeeper/queue/host-answers.json";
 const SCHEMA: &str = "host-answers-v1";
@@ -43,15 +45,44 @@ struct Probe {
 struct Stored {
     schema: String,
     answers: BTreeMap<AgentEngine, Timestamp>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    profiles: BTreeMap<String, Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     probe: Option<Probe>,
 }
 
-/// The latest answer each engine gave, and the one pending hold released as a probe.
+/// The latest answer each host configuration and each engine gave, and the one pending hold
+/// released as a probe.
 #[derive(Debug, Default)]
 pub(in crate::commands) struct HostAnswers {
     answers: BTreeMap<AgentEngine, Timestamp>,
+    profiles: BTreeMap<String, Timestamp>,
     probe: Option<Probe>,
+}
+
+/// The hosts a run has invoked: the profiles it reached, and their engines for holds that
+/// kept no profile.
+#[cfg(unix)]
+#[derive(Debug, Default)]
+pub(in crate::commands) struct InvokedHosts {
+    engines: std::collections::BTreeSet<AgentEngine>,
+    profiles: std::collections::BTreeSet<String>,
+}
+
+#[cfg(unix)]
+impl InvokedHosts {
+    pub(in crate::commands) fn insert(&mut self, engine: AgentEngine, profile: &str) {
+        self.engines.insert(engine);
+        self.profiles.insert(profile.to_owned());
+    }
+
+    /// Whether this run already invoked the host a hold failed on.
+    pub(in crate::commands) fn reached(&self, engine: AgentEngine, host: Option<&HostEnd>) -> bool {
+        match host {
+            Some(host) => self.profiles.contains(&host.profile),
+            None => self.engines.contains(&engine),
+        }
+    }
 }
 
 /// What a retained invocation failure means for its request now.
@@ -76,7 +107,9 @@ impl Standing {
             Self::Released => None,
             Self::AwaitingAnswer => Some(format!(
                 "{failure}; retried automatically once the {} host answers another request; {retry} retries it now",
-                failure.engine().as_str()
+                failure
+                    .host()
+                    .map_or(failure.engine().as_str(), |host| host.profile.as_str())
             )),
             Self::NeedsDiagnosis { repeated: true } => Some(format!(
                 "{failure} again after the host answered; diagnose the request, then use {retry}"
@@ -150,7 +183,8 @@ pub(in crate::commands) struct PendingHold {
     pub identity: HoldIdentity,
     pub engine: AgentEngine,
     pub scope: HoldScope,
-    pub failed_at: Option<Timestamp>,
+    /// The host that ended the failed request, if it was recorded.
+    pub host: Option<HostEnd>,
 }
 
 impl HostAnswers {
@@ -181,6 +215,7 @@ impl HostAnswers {
         }
         Ok(Self {
             answers: stored.answers,
+            profiles: stored.profiles,
             probe: stored.probe,
         })
     }
@@ -191,10 +226,16 @@ impl HostAnswers {
         !self.answers.is_empty()
     }
 
-    fn answered_after(&self, engine: AgentEngine, failed_at: Option<Timestamp>) -> bool {
-        self.answers
-            .get(&engine)
-            .is_some_and(|answered| failed_at.is_none_or(|failed| *answered > failed))
+    /// Whether the host a failure was recorded on answered after it ended; a failure that kept
+    /// no host follows any answer of its engine.
+    fn answered_since(&self, engine: AgentEngine, host: Option<&HostEnd>) -> bool {
+        match host {
+            Some(host) => self
+                .profiles
+                .get(&host.profile)
+                .is_some_and(|answered| *answered > host.at),
+            None => self.answers.contains_key(&engine),
+        }
     }
 
     pub(in crate::commands) fn standing(
@@ -208,12 +249,12 @@ impl HostAnswers {
                 repeated: exhausted,
             };
         }
-        let failed_at = failure.failed_at();
+        let failed_at = failure.host().map(|host| host.at);
         let probed = self
             .probe
             .as_ref()
             .is_some_and(|probe| probe.identity == *identity && probe.failed_at == failed_at);
-        if probed || self.answered_after(failure.engine(), failed_at) {
+        if probed || self.answered_since(failure.engine(), failure.host()) {
             Standing::Released
         } else {
             Standing::AwaitingAnswer
@@ -233,19 +274,19 @@ impl HostAnswers {
             && prior.is_some_and(|(prior, exhausted)| {
                 prior.is_unanswered()
                     && !exhausted
-                    && self.answered_after(prior.engine(), prior.failed_at())
+                    && self.answered_since(prior.engine(), prior.host())
             })
     }
 
     /// The pending holds a probe may release for `scope`, oldest failure first: their
-    /// request is still current, their engine has not answered since, and this run has not
-    /// yet invoked that engine.
+    /// request is still current, their host has not answered since, and this run has not yet
+    /// invoked that host.
     #[cfg(unix)]
     pub(in crate::commands) fn probe_candidates(
         &self,
         root: &Path,
         scope: ProbeScope,
-        invoked: &std::collections::BTreeSet<AgentEngine>,
+        invoked: &InvokedHosts,
         holds: Vec<PendingHold>,
     ) -> miette::Result<Vec<PendingHold>> {
         let mut candidates = Vec::new();
@@ -256,15 +297,16 @@ impl HostAnswers {
                     | (HoldScope::Audit { .. }, ProbeScope::Audit)
             );
             if reachable
-                && !invoked.contains(&hold.engine)
-                && !self.answered_after(hold.engine, hold.failed_at)
+                && !invoked.reached(hold.engine, hold.host.as_ref())
+                && !self.answered_since(hold.engine, hold.host.as_ref())
                 && hold.scope.is_current(root)?
             {
                 candidates.push(hold);
             }
         }
         candidates.sort_by(|left, right| {
-            left.failed_at.cmp(&right.failed_at).then_with(|| {
+            let failed_at = |hold: &PendingHold| hold.host.as_ref().map(|host| host.at);
+            failed_at(left).cmp(&failed_at(right)).then_with(|| {
                 serde_json::to_string(&left.identity)
                     .ok()
                     .cmp(&serde_json::to_string(&right.identity).ok())
@@ -282,6 +324,7 @@ impl HostAnswers {
         let raw = serde_json::to_vec(&Stored {
             schema: SCHEMA.into(),
             answers: self.answers.clone(),
+            profiles: self.profiles.clone(),
             probe: self.probe.clone(),
         })
         .into_diagnostic()?;
@@ -335,25 +378,30 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
     Ok(holds)
 }
 
-/// Records that `engine` answered a request when its host ended at `answered_at`. Only a
-/// later answer advances the record. Runs hold the workflow lease while they invoke hosts,
-/// so these writes do not race.
+/// Records that the host configuration `profile` of `engine` answered a request when it
+/// ended at `answered_at`. Only a later answer advances either record. Runs hold the workflow
+/// lease while they invoke hosts, so these writes do not race.
 #[cfg(unix)]
 pub(in crate::commands) fn record_answer(
     root: &Path,
     engine: AgentEngine,
+    profile: &str,
     answered_at: Timestamp,
 ) -> miette::Result<()> {
-    let mut answers = HostAnswers::load(root)?;
-    if answers
-        .answers
-        .get(&engine)
-        .is_some_and(|answered| *answered >= answered_at)
-    {
-        return Ok(());
+    fn advance<K: Ord>(answers: &mut BTreeMap<K, Timestamp>, key: K, at: Timestamp) -> bool {
+        if answers.get(&key).is_some_and(|answered| *answered >= at) {
+            return false;
+        }
+        answers.insert(key, at);
+        true
     }
-    answers.answers.insert(engine, answered_at);
-    answers.store(root)
+    let mut answers = HostAnswers::load(root)?;
+    let engine_advanced = advance(&mut answers.answers, engine, answered_at);
+    let profile_advanced = advance(&mut answers.profiles, profile.to_owned(), answered_at);
+    if engine_advanced || profile_advanced {
+        answers.store(root)?;
+    }
+    Ok(())
 }
 
 /// Releases `hold` as this vault's probe, replacing any earlier probe, or withdraws the
@@ -366,7 +414,7 @@ pub(in crate::commands) fn record_probe(
     let mut answers = HostAnswers::load(root)?;
     let probe = hold.map(|hold| Probe {
         identity: hold.identity.clone(),
-        failed_at: hold.failed_at,
+        failed_at: hold.host.as_ref().map(|host| host.at),
     });
     if answers.probe == probe {
         return Ok(());
@@ -379,11 +427,22 @@ pub(in crate::commands) fn record_probe(
 mod tests {
     use super::*;
 
-    fn exited(failed_at: Option<Timestamp>) -> InvocationFailure {
+    fn at(seconds: i64) -> Option<Timestamp> {
+        Some(Timestamp::from_second(seconds).unwrap())
+    }
+
+    fn host(profile: &str, seconds: i64) -> Option<HostEnd> {
+        Some(HostEnd {
+            profile: profile.into(),
+            at: at(seconds).unwrap(),
+        })
+    }
+
+    fn exited(host: Option<HostEnd>) -> InvocationFailure {
         InvocationFailure::Exited {
             engine: AgentEngine::Codex,
             code: 1,
-            failed_at,
+            host,
         }
     }
 
@@ -394,38 +453,45 @@ mod tests {
         }
     }
 
-    fn at(seconds: i64) -> Option<Timestamp> {
-        Some(Timestamp::from_second(seconds).unwrap())
-    }
-
     #[test]
-    fn an_unanswered_hold_waits_for_a_later_answer_of_its_engine() {
+    fn an_unanswered_hold_waits_for_a_later_answer_of_its_own_host() {
         let mut answers = HostAnswers::default();
-        let standing =
-            |answers: &HostAnswers| answers.standing(&identity(), &exited(at(10)), false);
+        let failed = exited(host("synthesis", 10));
+        let standing = |answers: &HostAnswers| answers.standing(&identity(), &failed, false);
         assert_eq!(standing(&answers), Standing::AwaitingAnswer);
+        answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
         answers
-            .answers
-            .insert(AgentEngine::ClaudeCode, at(20).unwrap());
+            .profiles
+            .insert("inspection".into(), at(20).unwrap());
+        assert_eq!(
+            standing(&answers),
+            Standing::AwaitingAnswer,
+            "another profile of the same engine is another host"
+        );
+        answers.profiles.insert("synthesis".into(), at(10).unwrap());
         assert_eq!(standing(&answers), Standing::AwaitingAnswer);
-        answers.answers.insert(AgentEngine::Codex, at(10).unwrap());
-        assert_eq!(standing(&answers), Standing::AwaitingAnswer);
-        answers.answers.insert(AgentEngine::Codex, at(11).unwrap());
+        answers.profiles.insert("synthesis".into(), at(11).unwrap());
         assert_eq!(standing(&answers), Standing::Released);
+        assert!(
+            Standing::AwaitingAnswer
+                .reason(&failed, "retry")
+                .unwrap()
+                .contains("once the synthesis host answers")
+        );
         assert_eq!(
             answers.standing(&identity(), &exited(None), false),
             Standing::Released,
-            "a hold recorded before failure times were kept is released by any answer"
+            "a hold that kept no host follows any answer of its engine"
         );
         assert_eq!(
-            answers.standing(&identity(), &exited(at(10)), true),
+            answers.standing(&identity(), &failed, true),
             Standing::NeedsDiagnosis { repeated: true }
         );
         let unusable = InvocationFailure::InvalidResponse {
             engine: AgentEngine::Codex,
             revision: "a".repeat(64),
             bytes: 2,
-            failed_at: at(10),
+            host: host("synthesis", 10),
         };
         assert_eq!(
             answers.standing(&identity(), &unusable, false),
@@ -437,8 +503,8 @@ mod tests {
     #[test]
     fn only_a_failure_after_an_answered_release_exhausts_and_a_probe_renews() {
         let mut answers = HostAnswers::default();
-        let prior = exited(at(10));
-        let repeat = exited(at(40));
+        let prior = exited(host("synthesis", 10));
+        let repeat = exited(host("synthesis", 40));
         assert!(!answers.exhausts(&repeat, None));
         assert!(!answers.exhausts(&repeat, Some((&prior, false))));
         answers.probe = Some(Probe {
@@ -450,14 +516,21 @@ mod tests {
             Standing::Released
         );
         assert_eq!(
-            answers.standing(&identity(), &exited(at(30)), false),
+            answers.standing(&identity(), &exited(host("synthesis", 30)), false),
             Standing::AwaitingAnswer,
             "a renewed failure is no longer the probe"
         );
         assert!(!answers.exhausts(&repeat, Some((&prior, false))));
-        answers.answers.insert(AgentEngine::Codex, at(20).unwrap());
+        answers
+            .profiles
+            .insert("inspection".into(), at(20).unwrap());
+        assert!(
+            !answers.exhausts(&repeat, Some((&prior, false))),
+            "another host's answer released nothing"
+        );
+        answers.profiles.insert("synthesis".into(), at(20).unwrap());
         assert!(answers.exhausts(&repeat, Some((&prior, false))));
-        assert!(!answers.exhausts(&repeat, Some((&exited(at(30)), false))));
+        assert!(!answers.exhausts(&repeat, Some((&exited(host("synthesis", 30)), false))));
     }
 
     #[cfg(unix)]
@@ -467,27 +540,27 @@ mod tests {
         std::fs::create_dir_all(root.path().join("wiki/concepts")).unwrap();
         std::fs::write(root.path().join("wiki/concepts/subject.md"), "Subject").unwrap();
         let current = lk_core::concept::file_revision("Subject");
-        let hold = |node: &str, engine, subject_revision: &str, failed_at| PendingHold {
+        let hold = |node: &str, profile: &str, subject_revision: &str, seconds| PendingHold {
             identity: HoldIdentity::Inspection {
                 work_id: "w".repeat(64),
                 node_id: node.into(),
             },
-            engine,
+            engine: AgentEngine::Codex,
             scope: HoldScope::Audit {
                 path: "wiki/concepts/subject.md".into(),
                 subject_revision: subject_revision.into(),
             },
-            failed_at,
+            host: host(profile, seconds),
         };
-        let holds = || {
-            vec![
-                hold("newer", AgentEngine::Codex, &current, at(20)),
-                hold("older", AgentEngine::ClaudeCode, &current, at(10)),
-                hold("stale", AgentEngine::Codex, "changed", at(5)),
-            ]
-        };
-        let nodes = |candidates: Vec<PendingHold>| {
-            candidates
+        let candidates = |answers: &HostAnswers, scope, invoked: &InvokedHosts| {
+            let holds = vec![
+                hold("newer", "synthesis", &current, 20),
+                hold("older", "inspection", &current, 10),
+                hold("stale", "synthesis", "changed", 5),
+            ];
+            answers
+                .probe_candidates(root.path(), scope, invoked, holds)
+                .unwrap()
                 .into_iter()
                 .map(|hold| match hold.identity {
                     HoldIdentity::Inspection { node_id, .. } => node_id,
@@ -496,41 +569,24 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let mut answers = HostAnswers::default();
-        let none = std::collections::BTreeSet::new();
+        let none = InvokedHosts::default();
         assert_eq!(
-            nodes(
-                answers
-                    .probe_candidates(root.path(), ProbeScope::Audit, &none, holds())
-                    .unwrap()
-            ),
+            candidates(&answers, ProbeScope::Audit, &none),
             ["older", "newer"]
         );
         assert!(
-            answers
-                .probe_candidates(root.path(), ProbeScope::Queue, &none, holds())
-                .unwrap()
-                .is_empty(),
+            candidates(&answers, ProbeScope::Queue, &none).is_empty(),
             "a queue drain cannot reach an audit subject"
         );
-        let invoked = std::collections::BTreeSet::from([AgentEngine::ClaudeCode]);
+        let mut invoked = InvokedHosts::default();
+        invoked.insert(AgentEngine::Codex, "inspection");
         assert_eq!(
-            nodes(
-                answers
-                    .probe_candidates(root.path(), ProbeScope::Audit, &invoked, holds())
-                    .unwrap()
-            ),
+            candidates(&answers, ProbeScope::Audit, &invoked),
             ["newer"],
-            "an engine this run already reached needs no probe"
+            "a host this run already reached needs no probe; another profile still does"
         );
-        answers.answers.insert(AgentEngine::Codex, at(30).unwrap());
-        assert_eq!(
-            nodes(
-                answers
-                    .probe_candidates(root.path(), ProbeScope::Audit, &none, holds())
-                    .unwrap()
-            ),
-            ["older"]
-        );
+        answers.profiles.insert("synthesis".into(), at(30).unwrap());
+        assert_eq!(candidates(&answers, ProbeScope::Audit, &none), ["older"]);
     }
 
     #[cfg(unix)]
@@ -556,13 +612,27 @@ mod tests {
     fn answers_persist_monotonically_and_refuse_unknown_state() {
         let root = tempfile::tempdir().unwrap();
         assert!(HostAnswers::load(root.path()).unwrap().answers.is_empty());
-        record_answer(root.path(), AgentEngine::Codex, at(20).unwrap()).unwrap();
-        record_answer(root.path(), AgentEngine::Codex, at(10).unwrap()).unwrap();
+        record_answer(
+            root.path(),
+            AgentEngine::Codex,
+            "synthesis",
+            at(20).unwrap(),
+        )
+        .unwrap();
+        record_answer(
+            root.path(),
+            AgentEngine::Codex,
+            "synthesis",
+            at(10).unwrap(),
+        )
+        .unwrap();
+        let loaded = HostAnswers::load(root.path()).unwrap();
         assert_eq!(
-            HostAnswers::load(root.path()).unwrap().answers[&AgentEngine::Codex],
+            loaded.profiles["synthesis"],
             at(20).unwrap(),
             "an answer settled later but given earlier never moves the record back"
         );
+        assert_eq!(loaded.answers[&AgentEngine::Codex], at(20).unwrap());
         let path = root.path().join(PATH);
         std::fs::write(
             &path,

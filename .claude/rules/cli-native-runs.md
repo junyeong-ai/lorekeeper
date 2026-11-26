@@ -144,7 +144,7 @@ paths:
   tool-free Inspect/Reduce hold only that node's exact input across instruction-contract
   changes. Attempts persist separately from observations and semantic actions through the
   mutation journal; they are not retained semantic progress. Timeout counts written before
-  a timeout became an unanswered failure read as pending holds whose engine and time were
+  a timeout became an unanswered failure read as pending holds whose host and time were
   not kept, so any recorded answer releases them once.
   A confirmed timeout, numeric nonzero exit or answerless exit of a tool-enabled finalizer, after completed process-group cleanup, holds only
   its exact request: each queue task's input in its
@@ -168,23 +168,26 @@ paths:
   remain fatal.
   An unanswered failure cannot tell a host fault from a request the host cannot serve, so
   its hold (inspection attempt, generation receipt, screening operational hold or
-  preparation attempt) records when its host ended (`InvocationFailure.failed_at`) and lasts
-  only until that engine answers again (`work/host.rs`). A step whose host returned a
-  response, usable or not, stores its own completion time as the engine's latest answer in
+  preparation attempt) records the host that served it, its execution profile, and when
+  that host ended (`InvocationFailure.host`), and lasts only until that profile answers
+  again (`work/host.rs`); another profile of the same engine, even with another executable,
+  is another host. A step whose host returned a response, usable or not, stores its own
+  completion time as its profile's and engine's latest answer in
   `.lorekeeper/queue/host-answers.json`, whichever operation ran it; a launch failure or an
-  answerless exit is no answer, and a parallel wave's settlement order never reorders them. A pending hold whose engine answered after its failure no longer holds: the
-  request is admitted once more, the retry an operator makes after diagnosing the host.
-  Failing again without an answer after that release exhausts the hold until the explicit
-  retry command clears it; a changed input or request is a fresh judgment. Unusable answers
-  and semantic holds are never released this way. When planning finds nothing admissible,
-  a queue drain (or a knowledge audit, for its subjects) releases as a probe the oldest
-  pending hold whose request is still current, whose engine has not answered since and
-  which this run has not invoked yet; if replanning still admits no call, that probe is
-  withdrawn and the next oldest is tried, within the same run, until one admits a call or
-  none remains. While the probe's engine has given no outcome in the run, waves send one
-  call at a time. A probe that fails without an answer renews its failure time and stays
-  pending, so an outage costs at most one unanswered call per engine per run and exhausts
-  nothing. Hold reasons
+  answerless exit is no answer, and a parallel wave's settlement order never reorders them.
+  A hold recorded before its host was kept follows any answer of its engine. A pending hold
+  whose host answered after its failure no longer holds: the request is admitted once more,
+  the retry an operator makes after diagnosing the host. Failing again without an answer
+  after that release exhausts the hold until the explicit retry command clears it; a
+  changed input or request is a fresh judgment. Unusable answers and semantic holds are
+  never released this way. When planning finds nothing admissible, a queue drain (or a
+  knowledge audit, for its subjects) releases as a probe the oldest pending hold whose
+  request is still current, whose host has not answered since and which this run has not
+  invoked yet; if replanning still admits no call, that probe is withdrawn and the next
+  oldest is tried, within the same run, until one admits a call or none remains. While the
+  probe's host has given no outcome in the run, waves send one call at a time. A probe that
+  fails without an answer renews its failure time and stays pending, so an outage costs at
+  most one unanswered call per host per run and exhausts nothing. Hold reasons
   name the state: pending holds are retried automatically once the host answers; exhausted
   and unusable ones need diagnosis and the named retry command. The scheduled pause for
   fatal stages is unchanged; navigation refresh commits beside readers holding their

@@ -528,7 +528,10 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
     let failure = || crate::commands::work::state::InvocationFailure::Exited {
         engine: lk_core::execution::AgentEngine::Codex,
         code: 97,
-        failed_at: Some(jiff::Timestamp::now()),
+        host: Some(crate::commands::work::state::HostEnd {
+            profile: "codex".into(),
+            at: jiff::Timestamp::now(),
+        }),
     };
     fixture.apply(plan_failed_attempt(&fixture.root, &request, failure()).unwrap());
     assert!(plan_failed_attempt(&fixture.root, &request, failure()).is_err());
@@ -554,6 +557,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
     crate::commands::work::host::record_answer(
         &fixture.root,
         lk_core::execution::AgentEngine::Codex,
+        "codex",
         jiff::Timestamp::now(),
     )
     .unwrap();
@@ -574,6 +578,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
     crate::commands::work::host::record_answer(
         &fixture.root,
         lk_core::execution::AgentEngine::Codex,
+        "codex",
         jiff::Timestamp::now(),
     )
     .unwrap();

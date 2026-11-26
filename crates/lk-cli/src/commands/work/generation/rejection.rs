@@ -301,7 +301,7 @@ pub(in crate::commands::work) fn pending_holds(root: &Path) -> miette::Result<Ve
                     task_id: receipt.task_id.clone(),
                     cache_hash: receipt.cache_hash.clone(),
                 },
-                failed_at: failure.failed_at(),
+                host: failure.host().cloned(),
             });
         }
     }
@@ -525,6 +525,7 @@ mod tests {
         crate::commands::work::host::record_answer(
             root,
             lk_core::execution::AgentEngine::Codex,
+            "codex",
             jiff::Timestamp::now(),
         )
         .unwrap();

@@ -31,6 +31,8 @@ if mode=='host-empty' and request.get('schema') in ['native-selected-results-v4'
 if mode=='host-exit-retired' and request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']:
     for queued in (root/'vault/.lorekeeper/queue').glob('*.jsonl'): queued.unlink()
     raise SystemExit(7)
+if mode=='host-exit-synthesizer' and '--model=stage-synthesis' in sys.argv:
+    raise SystemExit(7)
 if mode=='host-exit-target' and request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5'] and 'concepts/failing.md' in raw:
     raise SystemExit(7)
 if mode in ['host-failure','host-envelope-error']:
@@ -254,7 +256,7 @@ fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by
     assert_eq!(held["halted"], false, "{held}");
     let first = receipt();
     assert!(
-        first["cause"]["failure"]["failed_at"].is_string(),
+        first["cause"]["failure"]["host"]["at"].is_string(),
         "{first}"
     );
     assert!(first["cause"].get("exhausted").is_none(), "{first}");
@@ -269,13 +271,13 @@ fn an_unanswered_hold_is_probed_then_released_once_by_an_answer_and_exhausted_by
         "an outage exhausts nothing: {renewed}"
     );
     assert_ne!(
-        renewed["cause"]["failure"]["failed_at"],
-        first["cause"]["failure"]["failed_at"]
+        renewed["cause"]["failure"]["host"]["at"],
+        first["cause"]["failure"]["host"]["at"]
     );
     assert!(
         stage(&probed, "queue dependencies")
             .iter()
-            .any(|detail| detail.contains("retried automatically once the codex host answers")),
+            .any(|detail| detail.contains("retried automatically once the primary host answers")),
         "{probed}"
     );
 
@@ -1198,8 +1200,8 @@ fn tool_enabled_host_exits_hold_only_their_exact_input_until_guarded_retry() {
         assert_eq!(probed["halted"], false, "{probed}");
         let renewed: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_ne!(
-            renewed["cause"]["failure"]["failed_at"],
-            receipt["cause"]["failure"]["failed_at"]
+            renewed["cause"]["failure"]["host"]["at"],
+            receipt["cause"]["failure"]["host"]["at"]
         );
         assert!(renewed["cause"].get("exhausted").is_none(), "{renewed}");
         let calls = calls + 1;
@@ -1274,6 +1276,44 @@ fn scheduled_controller_recovers_a_cooperating_writers_journal_before_preparing_
         "the prepared request reads the recovered page: {calls}"
     );
     assert!(fixture.done(&task), "{report}");
+}
+
+#[test]
+fn another_profile_of_the_same_engine_never_releases_a_held_request() {
+    let fixture = Fixture::new("codex");
+    fixture.route_synthesis();
+    let (extraction, _) = fixture.add("extract", lk_queue::TaskKind::ExtractConcepts, false);
+    let (failing, _) = fixture.add("failing", lk_queue::TaskKind::SynthesizeConcept, false);
+    std::fs::write(fixture.root().join("mode"), "host-exit-synthesizer").unwrap();
+    let receipt = || -> Value {
+        let store = fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections");
+        let path = std::fs::read_dir(store)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    let report = fixture.run();
+    assert!(fixture.done(&extraction), "{report}");
+    assert!(!fixture.done(&failing), "{report}");
+    assert_eq!(
+        receipt()["cause"]["failure"]["host"]["profile"],
+        "synthesizer"
+    );
+    assert!(
+        receipt()["cause"].get("exhausted").is_none(),
+        "the primary profile's answer does not release the synthesizer's hold: {report}"
+    );
+    let probed = fixture.run();
+    assert_eq!(probed["semantic_calls"], 1, "{probed}");
+    assert!(receipt()["cause"].get("exhausted").is_none(), "{probed}");
+    std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+    let recovered = fixture.run();
+    assert!(fixture.done(&failing), "{recovered}");
 }
 
 #[test]

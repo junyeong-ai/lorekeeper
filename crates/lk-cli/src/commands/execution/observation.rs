@@ -553,16 +553,16 @@ pub(in crate::commands) fn is_answerless(engine: AgentEngine, bytes: &[u8]) -> b
 pub(in crate::commands) fn response_failure(
     engine: AgentEngine,
     bytes: &[u8],
-    failed_at: Option<jiff::Timestamp>,
+    host: Option<crate::commands::work::state::HostEnd>,
 ) -> crate::commands::work::state::InvocationFailure {
     if is_answerless(engine, bytes) {
-        crate::commands::work::state::InvocationFailure::MissingResponse { engine, failed_at }
+        crate::commands::work::state::InvocationFailure::MissingResponse { engine, host }
     } else {
         crate::commands::work::state::InvocationFailure::InvalidResponse {
             engine,
             revision: lk_core::rss_original::digest(bytes),
             bytes: bytes.len(),
-            failed_at,
+            host,
         }
     }
 }

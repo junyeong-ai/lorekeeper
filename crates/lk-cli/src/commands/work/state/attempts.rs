@@ -16,33 +16,42 @@ fn storage_bound(nodes: &[Node]) -> miette::Result<usize> {
         .ok_or_else(|| fail("inspection attempt storage bound overflow"))
 }
 
-/// How a host invocation failed, and when the host finished it. Failures recorded before
-/// that time was kept have none.
+/// The host configuration (execution profile) that served an invocation, and when the
+/// host ended it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HostEnd {
+    pub profile: String,
+    pub at: jiff::Timestamp,
+}
+
+/// How a host invocation failed, and which host ended it when. Failures recorded before the
+/// host was kept have none.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum InvocationFailure {
     TimedOut {
         engine: lk_core::execution::AgentEngine,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
+        host: Option<HostEnd>,
     },
     Exited {
         engine: lk_core::execution::AgentEngine,
         code: i32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
+        host: Option<HostEnd>,
     },
     InvalidResponse {
         engine: lk_core::execution::AgentEngine,
         revision: String,
         bytes: usize,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
+        host: Option<HostEnd>,
     },
     MissingResponse {
         engine: lk_core::execution::AgentEngine,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        failed_at: Option<jiff::Timestamp>,
+        host: Option<HostEnd>,
     },
 }
 
@@ -72,13 +81,13 @@ impl InvocationFailure {
         }
     }
 
-    /// When the host finished the failed invocation, if that was recorded.
-    pub(crate) fn failed_at(&self) -> Option<jiff::Timestamp> {
+    /// The host that ended the failed invocation and when, if that was recorded.
+    pub(crate) fn host(&self) -> Option<&HostEnd> {
         match self {
-            Self::TimedOut { failed_at, .. }
-            | Self::Exited { failed_at, .. }
-            | Self::InvalidResponse { failed_at, .. }
-            | Self::MissingResponse { failed_at, .. } => *failed_at,
+            Self::TimedOut { host, .. }
+            | Self::Exited { host, .. }
+            | Self::InvalidResponse { host, .. }
+            | Self::MissingResponse { host, .. } => host.as_ref(),
         }
     }
 }
@@ -341,7 +350,7 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
                     exhausted: false,
                     ..
                 } if failure.is_unanswered() => {
-                    Some((node_id, failure.engine(), failure.failed_at()))
+                    Some((node_id, failure.engine(), failure.host().cloned()))
                 }
                 _ => None,
             })
@@ -371,7 +380,7 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
             },
             _ => continue,
         };
-        for (node_id, engine, failed_at) in pending {
+        for (node_id, engine, host) in pending {
             holds.push(PendingHold {
                 identity: HoldIdentity::Inspection {
                     work_id: work_id.into(),
@@ -379,7 +388,7 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
                 },
                 engine,
                 scope: scope.clone(),
-                failed_at,
+                host,
             });
         }
     }
@@ -477,7 +486,7 @@ impl Work {
                     }) if *previous == request_revision => Some((
                         InvocationFailure::TimedOut {
                             engine: failure.engine(),
-                            failed_at: None,
+                            host: None,
                         },
                         false,
                     )),
@@ -548,7 +557,10 @@ mod tests {
             AttemptUpdate::Failed(InvocationFailure::Exited {
                 engine: lk_core::execution::AgentEngine::Codex,
                 code: 1,
-                failed_at: Some(jiff::Timestamp::now()),
+                host: Some(crate::commands::work::state::HostEnd {
+                    profile: "codex".into(),
+                    at: jiff::Timestamp::now(),
+                }),
             }),
             AttemptUpdate::Hold("Review the failed host before another invocation.".into()),
         ] {
@@ -639,7 +651,10 @@ mod tests {
                     AttemptUpdate::Failed(InvocationFailure::Exited {
                         engine: lk_core::execution::AgentEngine::Codex,
                         code: 1,
-                        failed_at: Some(jiff::Timestamp::now()),
+                        host: Some(crate::commands::work::state::HostEnd {
+                            profile: "codex".into(),
+                            at: jiff::Timestamp::now(),
+                        }),
                     }),
                 )
                 .unwrap();
@@ -654,6 +669,7 @@ mod tests {
             crate::commands::work::host::record_answer(
                 root.path(),
                 lk_core::execution::AgentEngine::Codex,
+                "codex",
                 jiff::Timestamp::now(),
             )
             .unwrap();
@@ -667,10 +683,11 @@ mod tests {
         crate::commands::work::host::record_answer(
             root.path(),
             lk_core::execution::AgentEngine::ClaudeCode,
+            "claude",
             jiff::Timestamp::now(),
         )
         .unwrap();
-        assert!(hold().is_some(), "another engine's answer proves nothing");
+        assert!(hold().is_some(), "another host's answer proves nothing");
         answer();
         assert_eq!(hold(), None);
         fail_again();
@@ -731,6 +748,7 @@ mod tests {
         crate::commands::work::host::record_answer(
             root.path(),
             lk_core::execution::AgentEngine::Codex,
+            "codex",
             jiff::Timestamp::now(),
         )
         .unwrap();
@@ -743,7 +761,10 @@ mod tests {
                 "contract",
                 AttemptUpdate::Failed(InvocationFailure::TimedOut {
                     engine: lk_core::execution::AgentEngine::Codex,
-                    failed_at: Some(jiff::Timestamp::now()),
+                    host: Some(crate::commands::work::state::HostEnd {
+                        profile: "codex".into(),
+                        at: jiff::Timestamp::now(),
+                    }),
                 }),
             )
             .unwrap();
@@ -804,7 +825,10 @@ mod tests {
         let timed_out = || {
             AttemptUpdate::Failed(InvocationFailure::TimedOut {
                 engine: lk_core::execution::AgentEngine::Codex,
-                failed_at: Some(jiff::Timestamp::now()),
+                host: Some(crate::commands::work::state::HostEnd {
+                    profile: "codex".into(),
+                    at: jiff::Timestamp::now(),
+                }),
             })
         };
         let (plan, held) = work
@@ -894,7 +918,10 @@ mod tests {
                 "contract",
                 AttemptUpdate::Failed(InvocationFailure::TimedOut {
                     engine: lk_core::execution::AgentEngine::Codex,
-                    failed_at: Some(jiff::Timestamp::now()),
+                    host: Some(crate::commands::work::state::HostEnd {
+                        profile: "codex".into(),
+                        at: jiff::Timestamp::now(),
+                    }),
                 }),
             )
             .unwrap();

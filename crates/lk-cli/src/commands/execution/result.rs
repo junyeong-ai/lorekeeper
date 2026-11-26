@@ -19,13 +19,13 @@ pub(in crate::commands) struct Output {
 }
 
 impl Output {
-    /// Decodes the host's terminal result. `finished_at` is when the host ended, which a
-    /// failure it returned records.
+    /// Decodes the host's terminal result. `host` is the host that ended the invocation and
+    /// when, which a failure it returned records.
     pub fn response(
         &self,
         stdout: &[u8],
         max_result_bytes: usize,
-        finished_at: jiff::Timestamp,
+        host: Option<super::super::work::state::HostEnd>,
     ) -> Result<Value, ResponseError> {
         let bytes = match self.engine {
             AgentEngine::ClaudeCode => stdout.to_vec(),
@@ -45,7 +45,7 @@ impl Output {
                             failure:
                                 super::super::work::state::InvocationFailure::MissingResponse {
                                     engine: self.engine,
-                                    failed_at: Some(finished_at),
+                                    host,
                                 },
                             detail: miette::miette!(
                                 "native host returned no required terminal result"
@@ -77,7 +77,7 @@ impl Output {
                             engine: self.engine,
                             revision: lk_core::rss_original::digest(&bytes),
                             bytes: bytes.len(),
-                            failed_at: Some(finished_at),
+                            host,
                         },
                         detail: miette::miette!(
                             "native terminal result exceeds its transport bound"
@@ -89,11 +89,7 @@ impl Output {
         };
         super::observation::decode_response(self.engine, &bytes, max_result_bytes).map_err(
             |detail| ResponseError::Remote {
-                failure: super::observation::response_failure(
-                    self.engine,
-                    &bytes,
-                    Some(finished_at),
-                ),
+                failure: super::observation::response_failure(self.engine, &bytes, host),
                 detail,
             },
         )
@@ -189,7 +185,7 @@ mod tests {
             _directory: directory,
         };
         assert!(matches!(
-            invocation.response(br#"{"type":"item.completed"}"#, 64, jiff::Timestamp::now()),
+            invocation.response(br#"{"type":"item.completed"}"#, 64, None),
             Err(ResponseError::Remote {
                 failure: super::super::super::work::state::InvocationFailure::MissingResponse { .. },
                 ..
@@ -198,56 +194,44 @@ mod tests {
         std::fs::write(&path, br#"{"value":"exact"}"#).unwrap();
         assert_eq!(
             invocation
-                .response(b"unbounded tool events", 64, jiff::Timestamp::now())
+                .response(b"unbounded tool events", 64, None)
                 .unwrap(),
             json!({"value":"exact"})
         );
         invocation.transport_limit = usize::MAX;
         assert_eq!(
-            invocation
-                .response(b"", 64, jiff::Timestamp::now())
-                .unwrap(),
+            invocation.response(b"", 64, None).unwrap(),
             json!({"value":"exact"})
         );
         invocation.transport_limit = 128;
         std::fs::write(&path, "x".repeat(129)).unwrap();
         assert!(matches!(
-            invocation.response(b"", 64, jiff::Timestamp::now()),
+            invocation.response(b"", 64, None),
             Err(ResponseError::Remote { .. })
         ));
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(matches!(
-            invocation.response(b"", 64, jiff::Timestamp::now()),
+            invocation.response(b"", 64, None),
             Err(ResponseError::Local(_))
         ));
         std::fs::remove_dir(&path).unwrap();
         invocation.engine = AgentEngine::ClaudeCode;
         let result = br#"{"type":"result","subtype":"success","is_error":false,"structured_output":{"value":"exact"}}"#;
         assert_eq!(
-            invocation
-                .response(result, 64, jiff::Timestamp::now())
-                .unwrap(),
+            invocation.response(result, 64, None).unwrap(),
             json!({"value":"exact"})
         );
-        assert!(
-            invocation
-                .response(result, 2, jiff::Timestamp::now())
-                .is_err()
-        );
+        assert!(invocation.response(result, 2, None).is_err());
         assert!(
             invocation
                 .response(
                     br#"{"type":"result","subtype":"success","is_error":false,"result":"text"}"#,
                     64,
-                    jiff::Timestamp::now(),
+                    None,
                 )
                 .is_err()
         );
-        assert!(
-            invocation
-                .response(b"{}\n{}", 64, jiff::Timestamp::now())
-                .is_err()
-        );
+        assert!(invocation.response(b"{}\n{}", 64, None).is_err());
     }
 }

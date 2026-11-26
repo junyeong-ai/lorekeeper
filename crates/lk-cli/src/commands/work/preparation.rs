@@ -173,7 +173,7 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
                 identity: receipt.host_identity(),
                 engine: failure.engine(),
                 scope,
-                failed_at: failure.failed_at(),
+                host: failure.host().cloned(),
             });
         }
     }
@@ -591,7 +591,10 @@ mod tests {
                 Disposition::invocation_failed(super::super::state::InvocationFailure::Exited {
                     engine: lk_core::execution::AgentEngine::Codex,
                     code: 1,
-                    failed_at: Some(jiff::Timestamp::now()),
+                    host: Some(crate::commands::work::state::HostEnd {
+                        profile: "codex".into(),
+                        at: jiff::Timestamp::now(),
+                    }),
                 });
             session
                 .apply(binding.plan_record(root, failure).unwrap())
@@ -613,6 +616,7 @@ mod tests {
             crate::commands::work::host::record_answer(
                 root,
                 lk_core::execution::AgentEngine::Codex,
+                "codex",
                 jiff::Timestamp::now(),
             )
             .unwrap();
@@ -626,7 +630,10 @@ mod tests {
                                 super::super::state::InvocationFailure::Exited {
                                     engine: lk_core::execution::AgentEngine::Codex,
                                     code: 1,
-                                    failed_at: Some(jiff::Timestamp::now()),
+                                    host: Some(crate::commands::work::state::HostEnd {
+                                        profile: "codex".into(),
+                                        at: jiff::Timestamp::now(),
+                                    }),
                                 },
                             ),
                         )
@@ -700,7 +707,10 @@ mod tests {
                             super::super::state::InvocationFailure::Exited {
                                 engine: lk_core::execution::AgentEngine::Codex,
                                 code: 1,
-                                failed_at: Some(jiff::Timestamp::now()),
+                                host: Some(crate::commands::work::state::HostEnd {
+                                    profile: "codex".into(),
+                                    at: jiff::Timestamp::now(),
+                                }),
                             },
                         ),
                     )

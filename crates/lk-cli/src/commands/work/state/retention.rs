@@ -523,7 +523,10 @@ mod tests {
                 "contract",
                 super::super::AttemptUpdate::Failed(super::super::InvocationFailure::TimedOut {
                     engine: lk_core::execution::AgentEngine::Codex,
-                    failed_at: Some(jiff::Timestamp::now()),
+                    host: Some(crate::commands::work::state::HostEnd {
+                        profile: "codex".into(),
+                        at: jiff::Timestamp::now(),
+                    }),
                 }),
             )
             .unwrap();

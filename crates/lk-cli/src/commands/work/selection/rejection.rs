@@ -238,7 +238,7 @@ pub(in crate::commands::work) fn pending_holds(root: &Path) -> miette::Result<Ve
                     task_id: rejections.task_id.clone(),
                     cache_hash: rejections.cache_hash.clone(),
                 },
-                failed_at: hold.failure.failed_at(),
+                host: hold.failure.host().cloned(),
             });
         }
     }

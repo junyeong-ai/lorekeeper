@@ -149,9 +149,9 @@ mod native {
         /// terminal result), as distinct from answering with an unusable one.
         #[serde(skip)]
         unanswered: bool,
-        /// When the host ended this step's invocation.
+        /// The host configuration that ended this step's invocation, and when.
         #[serde(skip)]
-        finished_at: Option<jiff::Timestamp>,
+        host_end: Option<crate::commands::work::state::HostEnd>,
         /// The host returned a response, usable or not: only such a step shows that the
         /// engine serves requests. A failure to launch or an answerless exit never does.
         #[serde(skip)]
@@ -186,7 +186,7 @@ mod native {
                 host_failure: None,
                 channel: HostChannel::Observation,
                 unanswered: false,
-                finished_at: None,
+                host_end: None,
                 answered: false,
                 work_id: None,
                 node_id: None,
@@ -837,8 +837,8 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
-        /// Engines this run invoked; a host it already reached needs no probe.
-        engines_invoked: std::collections::BTreeSet<lk_core::execution::AgentEngine>,
+        /// Hosts this run invoked; a host it already reached needs no probe.
+        hosts_invoked: crate::commands::work::host::InvokedHosts,
         /// The probe this run is choosing, once it found no admissible work.
         host_probe: Option<HostProbe>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
@@ -957,15 +957,16 @@ mod native {
             {
                 self.host_failures.remove(&step.host());
             }
-            if let (Some(execution), Some(_)) = (&step.execution, step.finished_at) {
-                self.engines_invoked.insert(execution.engine);
+            if let (Some(execution), Some(host)) = (&step.execution, &step.host_end) {
+                self.hosts_invoked.insert(execution.engine, &host.profile);
             }
             if step.answered
-                && let (Some(execution), Some(answered_at)) = (&step.execution, step.finished_at)
+                && let (Some(execution), Some(host)) = (&step.execution, &step.host_end)
                 && let Err(error) = crate::commands::work::host::record_answer(
                     &self.root,
                     execution.engine,
-                    answered_at,
+                    &host.profile,
+                    host.at,
                 )
             {
                 self.failure("host answer", error);
@@ -988,7 +989,7 @@ mod native {
                         host::HostAnswers::load(&root)?.probe_candidates(
                             &root,
                             scope,
-                            &self.engines_invoked,
+                            &self.hosts_invoked,
                             holds,
                         )
                     });
@@ -1007,7 +1008,7 @@ mod native {
             probe.released = None;
             let next = loop {
                 match probe.remaining.pop_front() {
-                    Some(hold) if self.engines_invoked.contains(&hold.engine) => {}
+                    Some(hold) if self.hosts_invoked.reached(hold.engine, hold.host.as_ref()) => {}
                     next => break next,
                 }
             };
@@ -1025,12 +1026,28 @@ mod native {
                 Some(format!(
                     "no work was admissible; released the oldest pending unanswered hold {} as a probe of its {} host",
                     serde_json::to_string(&hold.identity).expect("hold identity serializes"),
-                    hold.engine.as_str(),
+                    hold.host
+                        .as_ref()
+                        .map_or(hold.engine.as_str(), |host| host.profile.as_str()),
                 )),
             );
             self.host_probe.as_mut().expect("probe candidates").released = Some(hold);
             self.queue_replan = QueueReplan::Invalidate;
             true
+        }
+
+        /// The host configuration that served a step whose host ended at `finished_at`.
+        fn host_end(
+            metrics: &WorkStepMetrics,
+            finished_at: jiff::Timestamp,
+        ) -> Option<crate::commands::work::state::HostEnd> {
+            metrics
+                .execution
+                .as_ref()
+                .map(|execution| crate::commands::work::state::HostEnd {
+                    profile: execution.profile.clone(),
+                    at: finished_at,
+                })
         }
 
         /// The calls a wave may send at once. While a released probe's engine has given no
@@ -1041,7 +1058,7 @@ mod native {
                 .host_probe
                 .as_ref()
                 .and_then(|probe| probe.released.as_ref())
-                .is_some_and(|hold| !self.engines_invoked.contains(&hold.engine));
+                .is_some_and(|hold| !self.hosts_invoked.reached(hold.engine, hold.host.as_ref()));
             if probing { limit.min(1) } else { limit }
         }
 
@@ -1995,7 +2012,7 @@ mod native {
                     return None;
                 }
             };
-            metrics.finished_at = Some(child.finished_at);
+            metrics.host_end = Self::host_end(metrics, child.finished_at);
             if !child.success {
                 if child.termination == execution::ChildTermination::TimedOut
                     && self.configuration_is_current()
@@ -2010,7 +2027,7 @@ mod native {
                     return Some(ObservationReply::InvocationFailed(
                         crate::commands::work::state::InvocationFailure::TimedOut {
                             engine: invocation.engine,
-                            failed_at: Some(child.finished_at),
+                            host: metrics.host_end.clone(),
                         },
                     ));
                 }
@@ -2028,7 +2045,7 @@ mod native {
                         crate::commands::work::state::InvocationFailure::Exited {
                             engine: invocation.engine,
                             code,
-                            failed_at: Some(child.finished_at),
+                            host: metrics.host_end.clone(),
                         },
                     ));
                 }
@@ -2093,10 +2110,10 @@ mod native {
             let answerless = execution::observation::is_answerless(engine, &bytes);
             metrics.unanswered |= answerless;
             metrics.answered = !answerless;
-            let finished_at = metrics.finished_at;
+            let host = metrics.host_end.clone();
             let invalid = || {
                 crate::commands::work::InspectionResponse::InvocationFailed(
-                    execution::observation::response_failure(engine, &bytes, finished_at),
+                    execution::observation::response_failure(engine, &bytes, host.clone()),
                 )
             };
             let output = match execution::observation::decode_response(engine, &bytes, limit) {
@@ -2782,8 +2799,10 @@ mod native {
             let mut returned = Vec::new();
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 turn.metrics.agent_duration_ms = Some(attempt.duration_ms);
-                turn.metrics.finished_at =
-                    attempt.result.as_ref().ok().map(|child| child.finished_at);
+                turn.metrics.host_end = match &attempt.result {
+                    Ok(child) => Self::host_end(&turn.metrics, child.finished_at),
+                    Err(_) => None,
+                };
                 self.result.semantic_duration_ms += attempt.duration_ms;
                 if cancelled || !current {
                     turn.metrics.outcome = if cancelled {
@@ -2812,7 +2831,7 @@ mod native {
                             response: crate::commands::work::InspectionResponse::InvocationFailed(
                                 crate::commands::work::state::InvocationFailure::TimedOut {
                                     engine,
-                                    failed_at: Some(child.finished_at),
+                                    host: turn.metrics.host_end.clone(),
                                 },
                             ),
                         });
@@ -2836,7 +2855,7 @@ mod native {
                                 crate::commands::work::state::InvocationFailure::Exited {
                                     engine,
                                     code: child.failed_exit().expect("numeric failed exit"),
-                                    failed_at: Some(child.finished_at),
+                                    host: turn.metrics.host_end.clone(),
                                 },
                             ),
                         });
@@ -3158,7 +3177,7 @@ mod native {
                     return None;
                 }
             };
-            metrics.finished_at = Some(child.finished_at);
+            metrics.host_end = Self::host_end(metrics, child.finished_at);
             if child.cancelled {
                 metrics.outcome = WorkOutcome::Cancelled;
                 self.record("native result host", StageState::Cancelled, child.detail);
@@ -3181,7 +3200,7 @@ mod native {
                         crate::commands::work::state::InvocationFailure::Exited {
                             engine,
                             code,
-                            failed_at: Some(child.finished_at),
+                            host: metrics.host_end.clone(),
                         },
                     ));
                 }
@@ -3190,7 +3209,7 @@ mod native {
                     return Some(ResultReply::InvocationFailed(
                         crate::commands::work::state::InvocationFailure::TimedOut {
                             engine,
-                            failed_at: Some(child.finished_at),
+                            host: metrics.host_end.clone(),
                         },
                     ));
                 }
@@ -3206,7 +3225,7 @@ mod native {
                     .as_u64()
                     .and_then(|limit| usize::try_from(limit).ok())
                     .expect("native response allowance"),
-                child.finished_at,
+                metrics.host_end.clone(),
             ) {
                 Ok(value) => {
                     metrics.answered = true;
@@ -3741,7 +3760,7 @@ mod native {
                             let failure = execution::observation::response_failure(
                                 engine,
                                 &bytes,
-                                metrics.finished_at,
+                                metrics.host_end.clone(),
                             );
                             metrics.unanswered = failure.is_unanswered();
                             metrics.answered = !metrics.unanswered;
@@ -4709,9 +4728,12 @@ mod native {
                     metrics: mut step,
                 } = turn;
                 step.agent_duration_ms = Some(attempt.duration_ms);
-                step.finished_at = attempt.result.as_ref().ok().map(|child| child.finished_at);
+                step.host_end = match &attempt.result {
+                    Ok(child) => Self::host_end(&step, child.finished_at),
+                    Err(_) => None,
+                };
                 self.result.semantic_duration_ms += attempt.duration_ms;
-                let finished_at = step.finished_at;
+                let host_end = step.host_end.clone();
                 let failed_reply =
                     |failure| crate::commands::work::ScreeningResponse::InvocationFailed {
                         request: request.clone(),
@@ -4721,7 +4743,7 @@ mod native {
                     failed_reply(execution::observation::response_failure(
                         engine,
                         bytes,
-                        finished_at,
+                        host_end.clone(),
                     ))
                 };
                 let decoded = if cancelled || !current {
@@ -4796,12 +4818,12 @@ mod native {
                                     crate::commands::work::state::InvocationFailure::Exited {
                                         engine,
                                         code,
-                                        failed_at: finished_at,
+                                        host: host_end.clone(),
                                     }
                                 }
                                 None => crate::commands::work::state::InvocationFailure::TimedOut {
                                     engine,
-                                    failed_at: finished_at,
+                                    host: host_end.clone(),
                                 },
                             };
                             Some(failed_reply(failure))
@@ -7307,7 +7329,7 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
-            engines_invoked: std::collections::BTreeSet::new(),
+            hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
             host_probe: None,
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
