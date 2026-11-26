@@ -236,7 +236,7 @@ for marker in "$TEST_EXECUTION_ROOT"/inflight/*; do
 done
 echo "$alive" >> "$TEST_EXECUTION_ROOT/concurrency"
 "#;
-    for engine in ["codex", "claude-code"] {
+    for (engine, inherited) in [("codex", false), ("claude-code", false), ("codex", true)] {
         let behavior = format!("{tracked}{RECORD_BOUNDED_AUDIT}");
         let fixture = bounded_audit_fixture(engine, 64, &behavior);
         let subject = fixture.root().join("vault/wiki/concepts/large.md");
@@ -257,15 +257,19 @@ echo "$alive" >> "$TEST_EXECUTION_ROOT/concurrency"
             .unwrap()
             .replace("max_calls_per_day: 1,", "max_calls_per_day: 20,");
         std::fs::write(&fixture.config, config).unwrap();
+        if inherited {
+            release_held_node_as_probe(&fixture);
+        }
 
         let probed = run(&fixture, "knowledge", false);
-        assert!(
+        assert_eq!(
             probed["runs"][0]["stages"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|stage| stage["name"] == "host probe"),
-            "{probed}"
+            !inherited,
+            "a probe an earlier run released needs no new one: {probed}"
         );
         let concurrency = std::fs::read_to_string(fixture.root().join("concurrency"))
             .unwrap()
@@ -275,13 +279,40 @@ echo "$alive" >> "$TEST_EXECUTION_ROOT/concurrency"
         assert!(concurrency.len() >= 3, "{concurrency:?}: {probed}");
         assert_eq!(
             concurrency[0], 1,
-            "the probe is sent alone until its host gives an outcome: {probed}"
+            "the probe is sent alone until its host gives an outcome (inherited: {inherited}): {probed}"
         );
         assert!(
             concurrency[1..].iter().any(|count| *count > 1),
             "the host's answer restores parallel waves: {concurrency:?}"
         );
     }
+}
+
+/// Leaves the held inspection node released as the vault's probe, as a run stopped between
+/// releasing it and sending it does.
+fn release_held_node_as_probe(fixture: &Fixture) {
+    let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name() == "inspection-timeouts.json")
+        .unwrap()
+        .into_path();
+    let held: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let (node, entry) = held["entries"].as_object().unwrap().iter().next().unwrap();
+    let failure = &entry["failure"];
+    let ledger = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/host-answers.json");
+    let mut answers: serde_json::Value = std::fs::read(&ledger)
+        .map(|raw| serde_json::from_slice(&raw).unwrap())
+        .unwrap_or_else(|_| serde_json::json!({"schema":"host-answers-v1","answers":{}}));
+    answers["probe"] = serde_json::json!({
+        "identity": {"store": "inspection", "work_id": held["work_id"], "node_id": node},
+        "engine": failure["engine"],
+        "host": failure["host"],
+    });
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    std::fs::write(ledger, serde_json::to_vec(&answers).unwrap()).unwrap();
 }
 
 #[test]

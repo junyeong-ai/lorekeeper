@@ -420,6 +420,12 @@ mod native {
     struct HostProbes {
         queue: Option<HostProbe>,
         audit: Option<HostProbe>,
+        /// The host of a probe an earlier run released but may not have sent; until that host
+        /// gives an outcome, this run treats it as its own probe.
+        inherited: Option<(
+            lk_core::execution::AgentEngine,
+            Option<crate::commands::work::state::HostEnd>,
+        )>,
     }
 
     impl HostProbes {
@@ -433,11 +439,25 @@ mod native {
             }
         }
 
-        fn released(&self) -> impl Iterator<Item = &crate::commands::work::host::PendingHold> {
+        /// The hosts of the probes released, by engine and the host that failed.
+        fn released(
+            &self,
+        ) -> impl Iterator<
+            Item = (
+                lk_core::execution::AgentEngine,
+                Option<&crate::commands::work::state::HostEnd>,
+            ),
+        > {
             [&self.queue, &self.audit]
                 .into_iter()
                 .flatten()
                 .filter_map(|probe| probe.released.as_ref())
+                .map(|hold| (hold.engine, hold.host.as_ref()))
+                .chain(
+                    self.inherited
+                        .as_ref()
+                        .map(|(engine, host)| (*engine, host.as_ref())),
+                )
         }
     }
 
@@ -1066,7 +1086,9 @@ mod native {
                         .map_or(hold.engine.as_str(), |host| host.profile.as_str()),
                 )),
             );
-            // The vault keeps one probe, so this release replaces the other drain's.
+            // The vault keeps one probe, so this release replaces the other drain's and any
+            // earlier run's.
+            self.host_probes.inherited = None;
             for drain in [host::ProbeScope::Queue, host::ProbeScope::Audit] {
                 if let Some(probe) = self.host_probes.scope(drain) {
                     probe.released = None;
@@ -1095,14 +1117,15 @@ mod native {
                 })
         }
 
-        /// The calls a wave may send at once. While a released probe's engine has given no
-        /// outcome in this run, one call learns whether the host serves requests.
+        /// The calls a wave may send at once. While the host of a released probe, this run's or
+        /// one an earlier run released, has given no outcome in this run, one call learns
+        /// whether the host serves requests.
         fn wave_limit(&self, budget: lk_core::execution::SemanticWorkConfig) -> usize {
             let limit = budget.max_parallel.min(self.remaining_calls(budget));
             let probing = self
                 .host_probes
                 .released()
-                .any(|hold| !self.hosts_invoked.reached(hold.engine, hold.host.as_ref()));
+                .any(|(engine, host)| !self.hosts_invoked.reached(engine, host));
             if probing { limit.min(1) } else { limit }
         }
 
@@ -1655,6 +1678,10 @@ mod native {
                     self.config.vault.root = self.root.clone();
                     self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
+                    match crate::commands::work::host::HostAnswers::load(&self.root) {
+                        Ok(answers) => self.host_probes.inherited = answers.pending_probe(),
+                        Err(error) => return self.failure("host probe", error),
+                    }
                     if let Some(control) = &mut self.automation {
                         match control.enter(&self.root) {
                             Ok(true) => {}

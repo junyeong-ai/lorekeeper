@@ -40,7 +40,9 @@ pub(in crate::commands) enum HoldIdentity {
 #[serde(deny_unknown_fields)]
 struct Probe {
     identity: HoldIdentity,
-    failed_at: Option<Timestamp>,
+    engine: AgentEngine,
+    /// The host and time of the failure released, so a renewed failure is no longer the probe.
+    host: Option<HostEnd>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -269,10 +271,9 @@ impl HostAnswers {
             };
         }
         let failed_at = failure.host().map(|host| host.at);
-        let probed = self
-            .probe
-            .as_ref()
-            .is_some_and(|probe| probe.identity == *identity && probe.failed_at == failed_at);
+        let probed = self.probe.as_ref().is_some_and(|probe| {
+            probe.identity == *identity && probe.host.as_ref().map(|host| host.at) == failed_at
+        });
         if probed || self.answered_since(failure.engine(), failure.host()) {
             Standing::Released
         } else {
@@ -295,6 +296,16 @@ impl HostAnswers {
                     && !exhausted
                     && self.answered_since(prior.engine(), prior.host())
             })
+    }
+
+    /// The host of a probe an earlier run released and whose host has not answered since:
+    /// the run may have ended before sending it, so this run treats it as its own probe.
+    #[cfg(unix)]
+    pub(in crate::commands) fn pending_probe(&self) -> Option<(AgentEngine, Option<HostEnd>)> {
+        self.probe
+            .as_ref()
+            .filter(|probe| !self.answered_since(probe.engine, probe.host.as_ref()))
+            .map(|probe| (probe.engine, probe.host.clone()))
     }
 
     /// The pending holds a probe may release for `scope`, oldest failure first: their
@@ -448,7 +459,8 @@ pub(in crate::commands) fn record_probe(
     let mut answers = HostAnswers::load(root)?;
     let probe = hold.map(|hold| Probe {
         identity: hold.identity.clone(),
-        failed_at: hold.host.as_ref().map(|host| host.at),
+        engine: hold.engine,
+        host: hold.host.clone(),
     });
     if answers.probe == probe {
         return Ok(());
@@ -543,8 +555,14 @@ mod tests {
         assert!(!answers.exhausts(&repeat, Some((&prior, false))));
         answers.probe = Some(Probe {
             identity: identity(),
-            failed_at: at(10),
+            engine: AgentEngine::Codex,
+            host: host("synthesis", 10),
         });
+        assert_eq!(
+            answers.pending_probe(),
+            Some((AgentEngine::Codex, host("synthesis", 10))),
+            "an unanswered released probe carries into the next run"
+        );
         assert_eq!(
             answers.standing(&identity(), &prior, false),
             Standing::Released
@@ -563,6 +581,11 @@ mod tests {
             "another host's answer released nothing"
         );
         answers.profiles.insert("synthesis".into(), at(20).unwrap());
+        assert_eq!(
+            answers.pending_probe(),
+            None,
+            "an answer of the probe's host settles it"
+        );
         assert!(answers.exhausts(&repeat, Some((&prior, false))));
         assert!(!answers.exhausts(&repeat, Some((&exited(host("synthesis", 30)), false))));
     }

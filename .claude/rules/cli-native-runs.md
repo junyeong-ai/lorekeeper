@@ -187,7 +187,9 @@ paths:
   request is still current, whose host has not answered since and which this run has not
   invoked yet; if replanning still admits no call, that probe is withdrawn and the next
   oldest is tried, within the same run, until one admits a call or none remains. While the
-  probe's host has given no outcome in the run, waves send one call at a time. A probe that
+  probe's host has given no outcome in the run, waves send one call at a time; a probe an
+  earlier run released and whose host has not answered since counts as this run's probe,
+  since that run may have stopped before sending it. A probe that
   fails without an answer renews its failure time and stays pending, so an outage costs at
   most one unanswered call per host per run and exhausts nothing. Hold reasons
   name the state: pending holds are retried automatically once the host answers; exhausted
