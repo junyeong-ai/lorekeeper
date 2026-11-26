@@ -222,7 +222,10 @@ pub(super) fn assemble(
                     "native synthesis requires explicit related body or null"
                 ));
             }
-            let value: Synthesis = serde_json::from_value(semantic).into_diagnostic()?;
+            let mut value: Synthesis = serde_json::from_value(semantic).into_diagnostic()?;
+            if let Some(refs) = &mut value.review_refs {
+                refs.sort();
+            }
             let body_error = super::open_review::check_reply(
                 &binding.open_reviews,
                 value.review_refs.as_deref(),
@@ -376,16 +379,12 @@ pub(super) fn minimum_reply(
             "review_refs":(!reviews.is_empty()).then(|| {
                 reviews
                     .iter()
-                    .filter(|review| !review.citations_changed)
                     .map(|review| review.path.as_str())
                     .collect::<Vec<_>>()
             }),
             "gap_claims":reviews
                 .iter()
-                .any(|review| {
-                    !review.citations_changed
-                        && review.kind == Some(lk_vault::ReviewKind::EvidenceGap)
-                })
+                .any(|review| review.kind == Some(lk_vault::ReviewKind::EvidenceGap))
                 .then(|| json!(["x"])),
         }),
         _ => return Err(miette::miette!("task uses section response bounds")),
@@ -397,7 +396,7 @@ pub(super) fn minimum_reply(
 const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion.";
 
 /// The synthesis-only reply that proposes the durable review its contract requires.
-const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. When an open review in open_reviews already records the question, complete the synthesis and list that review in review_refs instead; an open review about a different question does not record this one. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
+const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. Propose one only when no review in open_reviews has that kind: while an open review of the kind names this concept, complete the synthesis, list that review in review_refs and state any further question of that kind in the synthesis prose, since a proposal of an open review's kind is refused. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
 
 const REVIEW_REFS_REPLY: &str = "When context.purpose.parameters.open_reviews names open reviews of this concept, a complete synthesis lists in review_refs, by exact path, each one whose question it leaves open, and states that question's status in its prose; an empty list answers that the citations now settle every one. A review recorded with citations_changed: false was judged against these exact citations, so it stays listed. For each listed evidence-gap review, return the defining claims it names that the citations still do not support, one line each, in gap_claims; otherwise gap_claims is null. Rust appends the callouts referencing every listed review and records them, so never write those callouts in synthesis. Without open_reviews, review_refs and gap_claims are null.";
 

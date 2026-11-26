@@ -389,7 +389,6 @@ fn closed_gap_callouts(
     for page in &views.scanned {
         if page.format.as_deref() != Some("concept")
             || !lk_core::vault_path::is_concept_page(&page.path, &rc.vault_dirs)
-            || page.outgoing.is_empty()
         {
             continue;
         }

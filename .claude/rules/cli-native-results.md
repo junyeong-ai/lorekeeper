@@ -119,7 +119,7 @@ paths:
   published review records its `kind` and `judged_citation_digest`, the concept citations
   it was judged against.
 - A synthesis capture lists every open review whose subject owner is the concept in
-  `open_reviews` (`work/open_review.rs`), each marked `citations_changed` when the request's
+  `open_reviews` (`work/open_review.rs`), once under its owner's address, each marked `citations_changed` when the request's
   citations differ from those it was judged against (always, without that record). A
   complete synthesis answers to them in `review_refs`: each review whose question it leaves
   open, once; an empty list answers that the citations now settle every one, so it is refused
@@ -128,16 +128,18 @@ paths:
   `gap_claims` is null. After the context revision check, publication refuses references
   and claims that do not match that scope, renders the callouts beneath the synthesis from
   the same capture (the evidence-gap callout with its claims, then one `[!question]` callout
-  for the other reviews) and records each referenced review and its kind in
+  for the other reviews) beneath a nonblank synthesis, never in place of one, and records each referenced review and its kind in
   `llm_inputs.synthesis_reviews`, so reply and result bytes carry only references and claims.
-  A published callout follows that record: when a review it names is removed, resolved, of
-  another kind or about other subjects, the run's backlink reconciliation requests that
+  A published callout follows that record: when a review it names is removed or no longer a
+  review (no review metadata, or an address outside the vault), resolved, of another kind or
+  about other subjects, the run's backlink reconciliation requests that
   concept's resynthesis through `graph resynthesize`, reusing a pending request. The record
   is checked before any citation graph is built. A synthesis published before the record
   existed is read from the evidence-gap callout of its synthesis section, only the
   reference lines of a root block quote opening with the marker (never a quote in code or a
   link inside a claim). An unreadable review is left to review health, and a removed one is
-  not read by any capture, so its resynthesis can be prepared; alias addresses are skipped
+  not read by any capture, which guards its absence instead, so its resynthesis can be
+  prepared; alias addresses are skipped
   for their owner; a concept that cannot take a request (`Unresynthesizable`: no current
   citations or synthesis heading) is reported and keeps its callout. Observers record a
   disagreement as a finding or source question, never as an `unresolved` processing

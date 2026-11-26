@@ -60,6 +60,8 @@ pub(super) struct Prepared {
     /// Addresses read under an authority other than context: a subject, citation or review
     /// evidence stays a current read even where the same page is also context.
     strict_reads: BTreeSet<String>,
+    /// Scoped reviews that no longer exist; publication requires them still absent.
+    absent: BTreeSet<PathBuf>,
     /// A synthesis request's context snapshot, which its context-only pages are read from.
     snapshot: Option<super::snapshot::ContextSnapshot>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
@@ -340,6 +342,9 @@ impl Prepared {
         for (path, content) in &self.pages {
             plan.require_unchanged(path, content.clone());
         }
+        for path in &self.absent {
+            plan.require_absent(path);
+        }
         self.guard_snapshot(plan);
     }
 
@@ -358,6 +363,7 @@ struct Capture<'a> {
     pages: BTreeMap<PathBuf, String>,
     resources: BTreeMap<String, SemanticResource>,
     strict_reads: BTreeSet<String>,
+    absent: BTreeSet<PathBuf>,
 }
 
 impl<'a> Capture<'a> {
@@ -370,6 +376,7 @@ impl<'a> Capture<'a> {
             pages: BTreeMap::new(),
             resources: BTreeMap::new(),
             strict_reads: BTreeSet::new(),
+            absent: BTreeSet::new(),
         }
     }
 
@@ -388,6 +395,7 @@ impl<'a> Capture<'a> {
                 .map(|resource| (resource.address.clone(), resource))
                 .collect(),
             strict_reads: prepared.strict_reads.clone(),
+            absent: prepared.absent.clone(),
         }
     }
 
@@ -488,9 +496,12 @@ impl<'a> Capture<'a> {
     }
 
     /// Reads a scoped review. A review that no longer exists is not read: its dependency
-    /// inventory still names it, but nothing a synthesis or audit could cite remains.
+    /// inventory still names it, but nothing a synthesis or audit could cite remains, and its
+    /// absence is guarded so a review restored before publication refuses the stale scope.
     fn review(&mut self, review: &lk_graph::audit::AuditReviewDependency) -> miette::Result<()> {
         if review.state == lk_graph::audit::AuditReviewState::Missing {
+            lk_vault::page_path(self.root, Path::new(&review.path)).into_diagnostic()?;
+            self.absent.insert(PathBuf::from(&review.path));
             return Ok(());
         }
         let expected = review
@@ -536,6 +547,7 @@ impl<'a> Capture<'a> {
             resources: self.resources.into_values().collect(),
             pages: self.pages,
             strict_reads: self.strict_reads,
+            absent: self.absent,
             snapshot: None,
             audit_reviews: None,
             selected_owners: None,
@@ -1142,6 +1154,7 @@ fn capture_task_with_audit_controlled(
         graph_citations = Some(lk_core::concept::citation_digest(&candidate.evidence));
         let scoped = knowledge_candidate_controlled(root, config, candidate, read)?;
         captured.strict_reads.extend(scoped.strict_reads);
+        captured.absent.extend(scoped.absent);
         for resource in scoped.resources {
             captured
                 .resources
@@ -1863,6 +1876,7 @@ mod tests {
             resources: Vec::new(),
             pages: BTreeMap::new(),
             strict_reads: BTreeSet::new(),
+            absent: BTreeSet::new(),
             snapshot: None,
             roster: None,
             graph_citations: None,
@@ -2170,6 +2184,11 @@ mod tests {
             .review(&dependency(lk_graph::audit::AuditReviewState::Missing))
             .unwrap();
         assert!(captured.pages.is_empty());
+        assert_eq!(
+            captured.absent,
+            BTreeSet::from([PathBuf::from("wiki/explorations/gone.md")]),
+            "its absence is guarded"
+        );
         assert!(
             captured
                 .review(&dependency(lk_graph::audit::AuditReviewState::Invalid))

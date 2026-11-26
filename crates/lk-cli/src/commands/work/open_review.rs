@@ -35,9 +35,9 @@ impl OpenReview {
 }
 
 /// The open reviews of `concept` among a synthesis capture's scoped `reviews`, for a request
-/// answering the citations `citation_digest` names. Each review is read from the bytes that
-/// capture stored under its verified owner, and names the concept when one of its subjects has
-/// the concept's owner. A resolved, unreadable or other-subject review is not one.
+/// answering the citations `citation_digest` names, each once under its verified owner's
+/// address and read from the bytes that capture stored there. A review names the concept when
+/// one of its subjects has the concept's owner. A resolved, unreadable or other-subject review is not one.
 pub(super) fn open_reviews(
     root: &Path,
     concept: &str,
@@ -50,9 +50,14 @@ pub(super) fn open_reviews(
         return Ok(Vec::new());
     };
     let mut open = Vec::new();
+    let mut owners = std::collections::BTreeSet::new();
     for path in reviews {
-        let Some(page) = owner(path)
-            .and_then(|stored| pages.get(&stored))
+        let Some(stored) = owner(path).filter(|stored| owners.insert(stored.clone())) else {
+            continue;
+        };
+        let address = stored.to_string_lossy().into_owned();
+        let Some(page) = pages
+            .get(&stored)
             .and_then(|raw| lk_core::frontmatter::parse_page(raw).ok())
         else {
             continue;
@@ -77,9 +82,9 @@ pub(super) fn open_reviews(
                 .and_then(serde_json::Value::as_str)
                 .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "))
                 .filter(|title| !title.is_empty())
-                .unwrap_or_else(|| path.clone());
+                .unwrap_or_else(|| address.clone());
             open.push(OpenReview {
-                path: path.clone(),
+                path: address,
                 title,
                 kind: review.kind,
                 citations_changed: review.judged_citation_digest.as_deref()
@@ -294,9 +299,10 @@ fn published(concept: &str, raw: &str) -> Vec<(PathBuf, Option<ReviewKind>)> {
 }
 
 /// Whether the synthesis published on `concept` (page `raw`) references a review that no longer
-/// matches its callout: removed, resolved, of another kind than it was referenced as, or about
-/// other subjects. That synthesis is owed again. A review that cannot be read or parsed is left
-/// to review health.
+/// matches its callout: removed or no longer a review, resolved, of another kind than it was
+/// referenced as, or about other subjects. That synthesis is owed again. A page that cannot be
+/// read or parsed, or whose review metadata is invalid, is left to review health; a recorded
+/// address outside the vault is no review.
 pub(in crate::commands) fn references_closed_review(
     root: &Path,
     concept: &str,
@@ -305,16 +311,30 @@ pub(in crate::commands) fn references_closed_review(
     let owner = |address: &Path| lk_vault::resolve_page_owner(root, address).ok();
     let concept_owner = owner(Path::new(concept));
     for (reference, kind) in published(concept, raw) {
-        let raw = match std::fs::read_to_string(root.join(&reference)) {
+        let Ok(path) = lk_vault::page_path(root, &reference) else {
+            return Ok(true);
+        };
+        let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound
+                        | std::io::ErrorKind::IsADirectory
+                        | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(true);
+            }
             Err(error) => return Err(miette::miette!("read {}: {error}", reference.display())),
         };
-        let Some(review) = lk_core::frontmatter::parse_page(&raw)
-            .ok()
-            .and_then(|page| page.frontmatter.get("review").cloned())
-            .and_then(|value| serde_json::from_value::<lk_vault::KnowledgeReview>(value).ok())
-        else {
+        let Ok(page) = lk_core::frontmatter::parse_page(&raw) else {
+            continue;
+        };
+        let Some(metadata) = page.frontmatter.get("review").cloned() else {
+            return Ok(true);
+        };
+        let Ok(review) = serde_json::from_value::<lk_vault::KnowledgeReview>(metadata) else {
             continue;
         };
         let names_concept = review
@@ -383,6 +403,20 @@ mod tests {
         write("conflict", "conflict", "open");
         std::fs::remove_file(root.join("wiki/explorations/gap.md")).unwrap();
         assert!(references_closed_review(root, concept, &page).unwrap());
+        std::fs::write(
+            root.join("wiki/explorations/gap.md"),
+            "---\ntype: exploration\ntitle: Gap\n---\nNo longer a review.\n",
+        )
+        .unwrap();
+        assert!(
+            references_closed_review(root, concept, &page).unwrap(),
+            "an exploration without review metadata is no longer a review"
+        );
+        assert!(
+            references_closed_review(root, concept, &recorded(r#"{"../outside.md":"conflict"}"#))
+                .unwrap(),
+            "an address outside the vault is no review"
+        );
 
         write("gap", "evidence-gap", "resolved");
         let callout = "> [!gap] These defining claims await supporting evidence.\n> - See [the old question](../explorations/conflict.md).\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
@@ -428,6 +462,7 @@ mod tests {
         };
         let reviews = [
             ("gap", review("evidence-gap", "open", alias)),
+            ("conflict-alias", String::new()),
             ("conflict", review("conflict", "open", concept)),
             ("resolved", review("evidence-gap", "resolved", concept)),
             (
@@ -439,6 +474,14 @@ mod tests {
         let mut scoped = Vec::new();
         for (name, raw) in reviews {
             let path = format!("wiki/explorations/{name}.md");
+            if name == "conflict-alias" {
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink("conflict.md", root.path().join(&path)).unwrap();
+                    scoped.push(path);
+                }
+                continue;
+            }
             std::fs::write(root.path().join(&path), &raw).unwrap();
             pages.insert(PathBuf::from(&path), raw);
             scoped.push(path);
@@ -451,7 +494,8 @@ mod tests {
                 .map(|review| review.path.as_str())
                 .collect::<Vec<_>>(),
             ["wiki/explorations/gap.md", "wiki/explorations/conflict.md"],
-            "a subject alias names the concept's owner"
+            "a subject alias names the concept's owner, and a review reached through two \
+             addresses is listed once"
         );
         assert_eq!(
             open[0].title, "Definition gap",

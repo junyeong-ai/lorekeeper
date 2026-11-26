@@ -269,13 +269,13 @@ pub(super) fn apply(
                 value,
                 &mut plan,
             )?;
-            let published = reviews.callout.map(|callout| SynthesisResult {
-                synthesis: match result.synthesis.trim_end() {
-                    "" => callout,
-                    synthesis => format!("{synthesis}\n\n{callout}"),
-                },
-                ..result.clone()
-            });
+            let published = reviews
+                .callout
+                .filter(|_| !result.synthesis.trim().is_empty())
+                .map(|callout| SynthesisResult {
+                    synthesis: format!("{}\n\n{callout}", result.synthesis.trim_end()),
+                    ..result.clone()
+                });
             let content = prepare_content(
                 root,
                 &target,

@@ -2153,11 +2153,39 @@ fn duplicate_sections_fold_once_and_conflicting_typed_proposals_remain_for_revie
 fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_record() {
     let review_path = "wiki/explorations/retention-gap.md";
     let claim = "Retention is a legal obligation.";
-    for (kind, judged, refs, claims, published_callout) in [
-        ("evidence-gap", false, None, None, None),
-        ("evidence-gap", false, Some(false), None, Some("")),
-        ("evidence-gap", true, Some(false), None, None),
-        ("evidence-gap", false, Some(true), None, None),
+    for (kind, judged, refs, claims, published_callout, synthesis) in [
+        (
+            "evidence-gap",
+            false,
+            None,
+            None,
+            None,
+            "The source declares retention of 30 days.",
+        ),
+        (
+            "evidence-gap",
+            false,
+            Some(false),
+            None,
+            Some(""),
+            "The source declares retention of 30 days.",
+        ),
+        (
+            "evidence-gap",
+            true,
+            Some(false),
+            None,
+            None,
+            "The source declares retention of 30 days.",
+        ),
+        (
+            "evidence-gap",
+            false,
+            Some(true),
+            None,
+            None,
+            "The source declares retention of 30 days.",
+        ),
         (
             "evidence-gap",
             true,
@@ -2166,6 +2194,7 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
             Some(
                 "> [!gap] These defining claims await supporting evidence.\n> - Retention is a legal obligation.\n>\n> Evidence gap review: [Retention gap](../explorations/retention-gap.md)",
             ),
+            "The source declares retention of 30 days.",
         ),
         (
             "conflict",
@@ -2175,8 +2204,17 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
             Some(
                 "> [!question] These reviews keep a question about this concept open.\n>\n> Open review: [Retention gap](../explorations/retention-gap.md)",
             ),
+            "The source declares retention of 30 days.",
         ),
-        ("conflict", false, Some(true), Some(claim), None),
+        (
+            "conflict",
+            false,
+            Some(true),
+            Some(claim),
+            None,
+            "The source declares retention of 30 days.",
+        ),
+        ("conflict", false, Some(true), None, None, ""),
     ] {
         let ws = Workspace::new();
         let source_path = "wiki/documents/policy.md";
@@ -2212,7 +2250,7 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
         );
         let mut result = serde_json::json!({"task_id":"gap","cache_hash":hash,
             "target_revision":context["subject"]["target_revision"],"context_revision":context["context_revision"],
-            "synthesis":"The source declares retention of 30 days.","related":null});
+            "synthesis":synthesis,"related":null});
         if let Some(listed) = refs {
             result["review_refs"] =
                 serde_json::json!(if listed { vec![review_path] } else { vec![] });
@@ -2226,7 +2264,9 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
         );
         let output = ws.run(&["queue", "apply"]);
         let published = ws.read(target);
-        let case = format!("{kind} judged={judged} refs={refs:?} claims={claims:?}");
+        let case = format!(
+            "{kind} judged={judged} refs={refs:?} claims={claims:?} synthesis={synthesis:?}"
+        );
         let Some(callout) = published_callout else {
             assert!(!output.status.success(), "{case} is refused");
             assert_eq!(published, body, "{case}: the concept is unchanged");
