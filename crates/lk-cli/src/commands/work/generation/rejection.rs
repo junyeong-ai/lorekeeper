@@ -347,7 +347,15 @@ pub(in crate::commands::work) fn plan_record(
     } = binding;
     let destination = path(task);
     let prior = read(root, &destination)?;
-    let request_revision = super::digest(request)?;
+    // A held task is judged by its own request, so regrouping its batch partners neither
+    // resets its exhaustion nor its failed probes; a change to that task's request does.
+    let request_revision = match input {
+        Input::Selected => super::digest(&super::super::native::selected_task_request(
+            request,
+            &task.task_id,
+        )?)?,
+        Input::Work { .. } => super::digest(request)?,
+    };
     let mut cause = cause;
     if let Cause::Invocation {
         failure, exhausted, ..

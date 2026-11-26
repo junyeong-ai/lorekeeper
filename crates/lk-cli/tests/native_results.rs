@@ -1174,15 +1174,34 @@ fn native_owner_rejections_hold_only_their_input_and_require_guarded_retry() {
         );
         let calls = fixture.calls();
         let source = std::fs::read_to_string(fixture.root().join("calls.jsonl")).unwrap();
-        assert!(
-            source
-                .lines()
-                .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                .any(|request| {
-                    lk_core::concept::file_revision(&serde_json::to_string(&request).unwrap())
-                        == receipt["request_revision"]
-                })
-        );
+        let sent = source
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let digest = |request: &Value| {
+            lk_core::concept::file_revision(&serde_json::to_string(request).unwrap())
+        };
+        if plan.is_some() {
+            assert!(
+                sent.iter()
+                    .any(|request| digest(request) == receipt["request_revision"]),
+                "a Work finalizer's request is its task's own"
+            );
+        } else {
+            let revision = receipt["request_revision"].as_str().unwrap();
+            assert!(
+                lk_core::rss_original::is_valid_digest(revision),
+                "{receipt}"
+            );
+            assert!(
+                sent.iter()
+                    .filter(|request| request["tasks"]
+                        .as_array()
+                        .is_some_and(|tasks| tasks.len() > 1))
+                    .all(|request| digest(request) != revision),
+                "a selected task is held by its own request, not its batch's: {receipt}"
+            );
+        }
         let paid = plan.as_ref().map(|plan| {
             let directory = fixture
                 .root()

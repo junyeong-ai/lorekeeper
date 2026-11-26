@@ -376,6 +376,62 @@ pub(in crate::commands) fn selected_request(
     config: &Config,
     tasks: &[Value],
 ) -> miette::Result<Value> {
+    build_selected_request(super::limits(config)?, tasks)
+}
+
+/// The request one task of the selected `request` batch would have alone: its own inputs
+/// under the generation contract, whatever partners the batch grouped it with. A task's
+/// held failure is judged against this, so regrouping its partners is no new request.
+pub(in crate::commands) fn selected_task_request(
+    request: &Value,
+    task_id: &str,
+) -> miette::Result<Value> {
+    let contracts = request["contracts"]
+        .as_array()
+        .ok_or_else(|| miette::miette!("selected request contracts are missing"))?;
+    let mut matching = request["tasks"]
+        .as_array()
+        .ok_or_else(|| miette::miette!("selected request tasks are missing"))?
+        .iter()
+        .filter(|task| task["task"]["task_id"].as_str() == Some(task_id));
+    let (Some(task), None) = (matching.next(), matching.next()) else {
+        return Err(miette::miette!(
+            "a selected request names task {task_id} exactly once"
+        ));
+    };
+    let mut task = task.clone();
+    let indices = task
+        .as_object_mut()
+        .and_then(|task| task.remove("contract_indices"))
+        .and_then(|indices| indices.as_array().cloned())
+        .ok_or_else(|| miette::miette!("selected task contract indices are missing"))?;
+    let own = indices
+        .iter()
+        .map(|index| {
+            index
+                .as_u64()
+                .and_then(|index| contracts.get(usize::try_from(index).ok()?))
+                .cloned()
+                .ok_or_else(|| miette::miette!("selected task names an unknown contract"))
+        })
+        .collect::<miette::Result<Vec<_>>>()?;
+    task["contracts"] = json!(own);
+    let limit = |field: &str| {
+        request[field]
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| miette::miette!("selected request {field} is missing"))
+    };
+    build_selected_request(
+        super::WorkLimits {
+            max_input_bytes: limit("max_input_bytes")?,
+            max_result_bytes: limit("max_result_bytes")?,
+        },
+        std::slice::from_ref(&task),
+    )
+}
+
+fn build_selected_request(limits: super::WorkLimits, tasks: &[Value]) -> miette::Result<Value> {
     if tasks.is_empty() {
         return Err(miette::miette!(
             "selected request requires at least one task"
@@ -407,7 +463,6 @@ pub(in crate::commands) fn selected_request(
         task["contract_indices"] = json!(indices);
         selected.push(task);
     }
-    let limits = super::limits(config)?;
     let max_response_bytes = tasks
         .iter()
         .map(|task| {
@@ -915,7 +970,7 @@ mod tests {
         )
         .unwrap();
         let count = selected["contracts"].as_array().unwrap().len();
-        let request = selected_request(&config, &[selected.clone(), selected]).unwrap();
+        let request = selected_request(&config, &[selected.clone(), selected.clone()]).unwrap();
         assert_eq!(request["contracts"].as_array().unwrap().len(), count);
         assert!(
             request["instructions"]
@@ -929,6 +984,27 @@ mod tests {
         );
         assert!(request["tasks"][0].get("contracts").is_none());
         assert!(selected_request(&config, &[]).is_err());
+        let alone = selected_request(&config, std::slice::from_ref(&selected)).unwrap();
+        let task_id = selected["task"]["task_id"].as_str().unwrap();
+        assert_eq!(
+            selected_task_request(&alone, task_id).unwrap(),
+            alone,
+            "a task's own request is the request it has alone"
+        );
+        let mut partner = selected.clone();
+        partner["task"]["task_id"] = json!("partner");
+        partner["contracts"] = json!([{"source": "partner-only", "body": "Partner rule."}]);
+        let grouped = selected_request(&config, &[partner, selected.clone()]).unwrap();
+        assert_ne!(grouped, alone);
+        assert_eq!(
+            selected_task_request(&grouped, task_id).unwrap(),
+            alone,
+            "regrouping a task's partners leaves its own request unchanged"
+        );
+        assert!(
+            selected_task_request(&request, task_id).is_err(),
+            "an ambiguous task id"
+        );
     }
 
     #[test]
