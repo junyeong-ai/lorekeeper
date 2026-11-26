@@ -51,7 +51,9 @@ paths:
 - `rejections.json` keeps the latest semantic hold (rejected reference coverage or
   reasons), matched by request revision, and the latest operational hold (failed
   invocation), matched by the request's contract-independent input revision so it
-  outlives contract changes. Either hold records no decisions, defers only that task at
+  outlives contract changes; it also records the exact request revision, so only a repeat
+  of that request after the host answered exhausts it (cli-native-runs.md). Either hold
+  records no decisions, defers only that task at
   that packet and spends no call on the unchanged request; undecided candidates remain
   incomplete and independent targets continue. A hold no longer applies once the
   undecided rows change. `work select-retry --task-id ID` clears only the current

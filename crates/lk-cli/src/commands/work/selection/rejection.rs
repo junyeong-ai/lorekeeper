@@ -99,12 +99,15 @@ struct SemanticHold {
     rejection: ScreeningRejection,
 }
 
-/// A host that failed on this packet input. The hold outlives contract changes until the
-/// failure is diagnosed and explicitly cleared.
+/// A host that failed on this packet input. The hold outlives contract changes; only a
+/// repeat of the exact request it records exhausts it.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OperationalHold {
     input_revision: String,
+    /// The exact request that failed; holds written before it was kept have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_revision: Option<String>,
     failure: super::super::state::InvocationFailure,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     exhausted: bool,
@@ -136,10 +139,13 @@ impl Rejections {
             || rejections.semantic.as_ref().is_some_and(|hold| {
                 !is_revision(&hold.request_revision) || !hold.rejection.is_valid()
             })
-            || rejections
-                .operational
-                .as_ref()
-                .is_some_and(|hold| !is_revision(&hold.input_revision))
+            || rejections.operational.as_ref().is_some_and(|hold| {
+                !is_revision(&hold.input_revision)
+                    || hold
+                        .request_revision
+                        .as_deref()
+                        .is_some_and(|revision| !is_revision(revision))
+            })
         {
             return Err(fail("invalid screening rejection receipt"));
         }
@@ -303,10 +309,17 @@ pub(in crate::commands::work) fn plan_failed_attempt(
         {
             return Err(fail("screening packet already has an operational hold"));
         }
-        let exhausted =
-            answers.exhausts(&failure, prior.map(|hold| (&hold.failure, hold.exhausted)));
+        let exhausted = answers.exhausts(
+            &failure,
+            prior
+                .filter(|hold| {
+                    hold.request_revision.as_deref() == Some(request.request_revision.as_str())
+                })
+                .map(|hold| (&hold.failure, hold.exhausted)),
+        );
         rejections.operational = Some(OperationalHold {
             input_revision,
+            request_revision: Some(request.request_revision.clone()),
             failure,
             exhausted,
         });

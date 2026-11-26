@@ -525,13 +525,13 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
         )
         .unwrap(),
     );
-    let failure = crate::commands::work::state::InvocationFailure::Exited {
+    let failure = || crate::commands::work::state::InvocationFailure::Exited {
         engine: lk_core::execution::AgentEngine::Codex,
         code: 97,
         failed_at: Some(jiff::Timestamp::now()),
     };
-    fixture.apply(plan_failed_attempt(&fixture.root, &request, failure.clone()).unwrap());
-    assert!(plan_failed_attempt(&fixture.root, &request, failure.clone()).is_err());
+    fixture.apply(plan_failed_attempt(&fixture.root, &request, failure()).unwrap());
+    assert!(plan_failed_attempt(&fixture.root, &request, failure()).is_err());
     let held = fixture.selection();
     assert!(
         held.hold_reason(&request)
@@ -559,7 +559,25 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
     .unwrap();
     let answered = fixture.build(&"d".repeat(64), source(), LIMITS).unwrap();
     assert!(answered.hold_reason(&reissued).unwrap().is_none());
-    fixture.apply(plan_failed_attempt(&fixture.root, &reissued, failure).unwrap());
+    fixture.apply(plan_failed_attempt(&fixture.root, &reissued, failure()).unwrap());
+    assert!(
+        fixture
+            .build(&"d".repeat(64), source(), LIMITS)
+            .unwrap()
+            .hold_reason(&reissued)
+            .unwrap()
+            .unwrap()
+            .contains("retried automatically"),
+        "a changed request is a fresh judgment even on the same packet input"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    crate::commands::work::host::record_answer(
+        &fixture.root,
+        lk_core::execution::AgentEngine::Codex,
+        jiff::Timestamp::now(),
+    )
+    .unwrap();
+    fixture.apply(plan_failed_attempt(&fixture.root, &reissued, failure()).unwrap());
     let exhausted = fixture.build(&"d".repeat(64), source(), LIMITS).unwrap();
     assert!(
         exhausted
