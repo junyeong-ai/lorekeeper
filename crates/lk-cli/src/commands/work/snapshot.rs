@@ -249,7 +249,14 @@ fn compose(stored: &str, current: &str) -> String {
                     kept.insert_str(0, newline);
                 }
                 if range.end < current.len() {
-                    let needed: usize = if kept.trim().is_empty() { 1 } else { 2 };
+                    // An ATX heading starts at any line; another heading form after text needs a
+                    // blank line or the text would join it.
+                    let needed: usize =
+                        if kept.trim().is_empty() || current[range.end..].starts_with('#') {
+                            1
+                        } else {
+                            2
+                        };
                     let present = kept[kept.trim_end().len()..].matches('\n').count();
                     kept.push_str(&newline.repeat(needed.saturating_sub(present)));
                 }
@@ -357,6 +364,12 @@ mod tests {
             compose(&stored, &filled),
             stored,
             "a section a neighbor filled composes to its recorded empty body"
+        );
+        let tight = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.\n## Notes\nOwner: data.\n";
+        assert_eq!(
+            compose(tight, &tight.replace("Limit is 5.", "Limit is 7.")),
+            tight,
+            "a body that already ends its line before an ATX heading stays as recorded"
         );
         let indented = page("    let limit = 5;", "Owner: platform.");
         assert_eq!(
