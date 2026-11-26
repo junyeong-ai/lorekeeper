@@ -124,6 +124,7 @@ pub(in crate::commands) fn admit(
         citations.push(citation);
         guards.insert(guard.path.clone(), guard);
     }
+    let citations = without_cited_origins(citations);
     if let Some(recorded) = recorded(
         root,
         prepared,
@@ -239,6 +240,32 @@ fn recorded(
 /// keeping the leading indentation that can make it a code block.
 fn judgment(body: &str) -> &str {
     body.trim_start_matches(['\n', '\r']).trim_end()
+}
+
+/// `citations` without a page citation of an origin whose RSS events are also cited. A review
+/// cites an origin either as a page or by its events (`lk_vault` review evidence); the events
+/// are the narrower evidence the judgment selected, and they guard the same origin bytes.
+fn without_cited_origins(citations: Vec<Value>) -> Vec<Value> {
+    let origins = citations
+        .iter()
+        .filter(|citation| {
+            citation
+                .get("rss_event")
+                .is_some_and(|event| !event.is_null())
+        })
+        .filter_map(|citation| citation["path"].as_str().map(str::to_owned))
+        .collect::<std::collections::BTreeSet<_>>();
+    citations
+        .into_iter()
+        .filter(|citation| {
+            citation
+                .get("rss_event")
+                .is_some_and(|event| !event.is_null())
+                || !citation["path"]
+                    .as_str()
+                    .is_some_and(|path| origins.contains(path))
+        })
+        .collect()
 }
 
 /// A read source page as page evidence: its source revision, guarded by its exact bytes.
@@ -470,6 +497,22 @@ mod tests {
             "{name}"
         );
         assert!(name.ends_with(".md") && !name.contains("-.md"));
+    }
+
+    #[test]
+    fn an_origin_cited_by_its_events_drops_its_page_citation() {
+        let event = |id: &str| json!({"path":"daily/news/2026-11-03.md","revision":id,"rss_event":{"event_id":id}});
+        let page = json!({"path":"daily/news/2026-11-03.md","revision":"page"});
+        let other = json!({"path":"wiki/documents/spec.md","revision":"spec"});
+        assert_eq!(
+            without_cited_origins(vec![page.clone(), event("a"), other.clone(), event("b")]),
+            [event("a"), other.clone(), event("b")]
+        );
+        assert_eq!(
+            without_cited_origins(vec![page.clone(), other.clone()]),
+            [page, other],
+            "a page cited alone stays"
+        );
     }
 
     #[test]
