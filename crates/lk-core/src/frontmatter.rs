@@ -55,6 +55,10 @@ pub mod field {
     /// see that enum: a concept's synthesis is owed against its citation set, and the crate
     /// that derives that set is the one that records it.
     pub const SYNTHESIS: &str = "synthesis";
+    /// The `llm_inputs` child key recording which open reviews a concept's published synthesis
+    /// referenced, as JSON text. Written by synthesis publication; carried by concept rerender
+    /// with the synthesis it describes.
+    pub const SYNTHESIS_REVIEWS: &str = "synthesis_reviews";
 
     /// The build that rendered a generated page, carried on the page itself.
     ///

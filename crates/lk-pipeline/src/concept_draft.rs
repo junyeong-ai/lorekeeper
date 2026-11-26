@@ -890,6 +890,17 @@ impl ConceptDraft {
                 })?;
         }
 
+        // Stamped here rather than by the template so an override template cannot drop the
+        // record while the synthesis it describes is spliced back.
+        if let Some(record) = llm_inputs.get(field::SYNTHESIS_REVIEWS) {
+            content = lk_vault::set_llm_input(
+                &content,
+                field::SYNTHESIS_REVIEWS,
+                &lk_core::concept::yaml_scalar(record),
+            )
+            .ok_or_else(|| PipelineError::Render("concept template requires llm_inputs".into()))?;
+        }
+
         for (key, value) in &self.preserved_metadata {
             let value = serde_json::to_string(value)
                 .map_err(|error| PipelineError::Render(error.to_string()))?;
@@ -1799,7 +1810,8 @@ mod tests {
     /// re-render that keeps the synthesis keeps them, or the callout would outlive its record.
     #[test]
     fn a_rerender_keeps_the_review_record_of_the_synthesis_it_preserves() {
-        let record = r#"{"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"r"}}"#;
+        let record =
+            "{\"wiki/explorations/gap\u{7f}.md\":{\"kind\":\"evidence-gap\",\"revision\":\"r\"}}";
         let draft = ConceptDraft {
             original: None,
             slug: "rag".into(),
@@ -1811,7 +1823,7 @@ mod tests {
             preserved_llm_inputs: BTreeMap::from([
                 ("synthesis".into(), "digest".into()),
                 ("synthesis_done".into(), "digest".into()),
-                ("synthesis_reviews".into(), record.into()),
+                (field::SYNTHESIS_REVIEWS.into(), record.into()),
             ]),
             preserved_metadata: BTreeMap::new(),
             preserved_synthesis: Some("An answered synthesis.".into()),

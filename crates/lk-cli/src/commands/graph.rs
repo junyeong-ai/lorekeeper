@@ -398,7 +398,9 @@ fn review_callouts(
         let (raw, _) = read
             .page_text(&rc.root.join(&page.path))
             .map_err(|e| format!("{}: {e}", page.path.display()))?;
-        if !raw.contains(super::work::PUBLISHED_REVIEWS_KEY) && !raw.contains("> [!gap] ") {
+        if !raw.contains(lk_core::frontmatter::field::SYNTHESIS_REVIEWS)
+            && !raw.contains("> [!gap] ")
+        {
             continue;
         }
         let owner = lk_vault::resolve_page_owner(&rc.root, &page.path)

@@ -3,8 +3,8 @@
 //! leaves open, and for an evidence-gap review the defining claims still unsupported in
 //! `gap_claims`. Publication renders the callouts beneath the synthesis from those references
 //! and the capture, and records them with each review's authored revision on the concept
-//! (`llm_inputs.synthesis_reviews`, a JSON string like every `llm_inputs` value, so a concept
-//! re-render carries it with the synthesis it describes; `{}` when it references none), so the marker and every
+//! (`llm_inputs.synthesis_reviews`, JSON text like every `llm_inputs` value, which a concept
+//! rerender carries with the synthesis it describes; `{}` when it references none), so the marker and every
 //! reference are Rust's, and a callout follows its reviews from that record, never from prose
 //! whose author Rust cannot establish.
 
@@ -14,9 +14,6 @@ use std::path::{Path, PathBuf};
 use lk_core::i18n::Locale;
 use lk_vault::ReviewKind;
 use serde::{Deserialize, Serialize};
-
-/// The `llm_inputs` key recording the reviews a published synthesis references.
-pub(in crate::commands) const PUBLISHED_KEY: &str = "synthesis_reviews";
 
 /// An open review naming the synthesized concept: its address, title, kind and authored
 /// revision (`lk_core::concept::source_revision`), and whether the concept's citations changed
@@ -242,7 +239,7 @@ pub(super) fn record(reviews: &[OpenReview], refs: &[String]) -> String {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    serde_json::to_string(&recorded).expect("review record serializes")
+    lk_core::concept::yaml_scalar(&recorded)
 }
 
 /// The open reviews a synthesis capture listed.
@@ -285,7 +282,7 @@ pub(in crate::commands) fn published_state(
     let Some(recorded) = lk_core::frontmatter::parse_page(raw).ok().and_then(|page| {
         page.frontmatter
             .get(lk_core::frontmatter::field::LLM_INPUTS)
-            .and_then(|inputs| inputs.get(PUBLISHED_KEY))
+            .and_then(|inputs| inputs.get(lk_core::frontmatter::field::SYNTHESIS_REVIEWS))
             .cloned()
     }) else {
         return Ok(PublishedState::Unrecorded);

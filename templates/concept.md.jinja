@@ -15,9 +15,6 @@ llm_inputs:
 {%- if llm_inputs.synthesis_done %}
   synthesis_done: {{ llm_inputs.synthesis_done | tojson }}
 {%- endif %}
-{%- if llm_inputs.synthesis_reviews %}
-  synthesis_reviews: {{ llm_inputs.synthesis_reviews | tojson }}
-{%- endif %}
 ---
 
 # {{ name | markdown_text }}

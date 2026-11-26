@@ -205,7 +205,7 @@ fn write_flow(value: &serde_json::Value, out: &mut String) {
 /// A JSON scalar that YAML reads back as the same value. JSON leaves DEL, C1 controls, line
 /// and paragraph separators, the BOM and the U+FFFE/U+FFFF noncharacters unescaped, and YAML
 /// excludes them from printable text or treats them as breaks, so they become `\uXXXX`.
-fn yaml_scalar(value: &impl serde::Serialize) -> String {
+pub fn yaml_scalar(value: &impl serde::Serialize) -> String {
     let json = serde_json::to_string(value).expect("a frontmatter value serializes");
     let escaped = |c: char| {
         c.is_control()
