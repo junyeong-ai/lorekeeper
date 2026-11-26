@@ -304,7 +304,7 @@ pub(in crate::commands) fn published_state(raw: &str, open: &[OpenReview]) -> Pu
     // Every entry names a review page by its vault address and the source revision read; any
     // other value is a damaged record, which never decides that a synthesis is owed.
     if !recorded.iter().all(|(path, recorded)| {
-        lk_core::rss_evidence::is_page_address(path)
+        lk_core::vault_path::is_page_address(path)
             && lk_core::concept::is_source_revision(&recorded.revision)
     }) {
         return PublishedState::Invalid;
@@ -453,6 +453,10 @@ mod tests {
             ),
             format!(
                 r#"{{"wiki/explorations/conflict.txt":{{"kind":"conflict","revision":"{}"}}}}"#,
+                conflict.revision
+            ),
+            format!(
+                r#"{{"wiki//explorations/conflict.md":{{"kind":"conflict","revision":"{}"}}}}"#,
                 conflict.revision
             ),
         ] {

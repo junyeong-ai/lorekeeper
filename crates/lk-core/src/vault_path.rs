@@ -62,6 +62,22 @@ pub fn address(path: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
+/// Whether `value` is a vault-relative Markdown page address exactly as [`address`] renders
+/// one: it equals its own lexical normalization, so no empty, `.` or `..` component, doubled
+/// or trailing separator, or absolute prefix. On Unix a backslash is a literal filename byte
+/// the address keeps; elsewhere it is a separator the rendering never writes.
+pub fn is_page_address(value: &str) -> bool {
+    let path = Path::new(value);
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(part) => normalized.push(part),
+            _ => return false,
+        }
+    }
+    path.extension().is_some_and(|extension| extension == "md") && address(&normalized) == value
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultPath(PathBuf);
 
@@ -256,6 +272,31 @@ fn join_segments(segments: impl Iterator<Item = String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_address_is_its_own_lexical_normalization() {
+        for valid in ["wiki/explorations/gap.md", "gap.md", "wiki/한국어 리뷰.md"] {
+            assert!(is_page_address(valid), "{valid}");
+        }
+        for invalid in [
+            "",
+            "wiki//explorations/gap.md",
+            "wiki/./explorations/gap.md",
+            "./wiki/gap.md",
+            "wiki/../gap.md",
+            "/wiki/gap.md",
+            "wiki/gap.md/",
+            "wiki/gap.txt",
+            "wiki/explorations",
+        ] {
+            assert!(!is_page_address(invalid), "{invalid}");
+        }
+        assert_eq!(
+            is_page_address("wiki/explorations/a\\b.md"),
+            cfg!(unix),
+            "a literal backslash is a filename byte only where the capture can write one"
+        );
+    }
 
     /// A configured directory asks for the prefix its own pages carry. `daily_/` and `daily/`
     /// are two directories, so a page under one is not under the other — the id rule that keeps
