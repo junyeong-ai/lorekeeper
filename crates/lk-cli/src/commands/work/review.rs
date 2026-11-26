@@ -227,12 +227,18 @@ fn recorded(
                 .and_then(Value::as_array)
                 .is_some_and(|recorded| evidence_set(recorded) == evidence)
             && names_concept
-            && page.body.trim() == body.replace("\r\n", "\n").trim()
+            && judgment(&page.body) == judgment(&body.replace("\r\n", "\n"))
         {
             return Ok(Some(address.clone()));
         }
     }
     Ok(None)
+}
+
+/// A review judgment as compared for an exact repeat: without the blank lines framing it,
+/// keeping the leading indentation that can make it a code block.
+fn judgment(body: &str) -> &str {
+    body.trim_start_matches(['\n', '\r']).trim_end()
 }
 
 /// A read source page as page evidence: its source revision, guarded by its exact bytes.
