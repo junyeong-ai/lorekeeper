@@ -25,6 +25,9 @@ def encode(output):
     return encoded
 if mode=='host-exit' and (request.get('kind')=='finalize-section' or request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']):
     raise SystemExit(7)
+if mode=='host-empty' and request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']:
+    Path(sys.argv[sys.argv.index('--output-last-message')+1]).write_text('')
+    raise SystemExit()
 if mode=='host-exit-retired' and request.get('schema') in ['native-selected-results-v4','native-finalize-results-v5','native-finalize-frontier-v5']:
     for queued in (root/'vault/.lorekeeper/queue').glob('*.jsonl'): queued.unlink()
     raise SystemExit(7)
@@ -230,6 +233,12 @@ fn a_task_retired_while_its_finalizer_failed_is_prepared_afresh_not_fatal() {
 
 #[test]
 fn consecutive_host_failures_end_the_run_without_spending_further_calls() {
+    for mode in ["host-exit", "host-empty"] {
+        consecutive_unanswered_finalizers_end_the_run(mode);
+    }
+}
+
+fn consecutive_unanswered_finalizers_end_the_run(mode: &str) {
     let fixture = Fixture::new("codex");
     let config = std::fs::read_to_string(&fixture.config).unwrap();
     std::fs::write(
@@ -242,7 +251,7 @@ fn consecutive_host_failures_end_the_run_without_spending_further_calls() {
             .add(name, lk_queue::TaskKind::SynthesizeConcept, true)
             .0
     });
-    std::fs::write(fixture.root().join("mode"), "host-exit").unwrap();
+    std::fs::write(fixture.root().join("mode"), mode).unwrap();
     let report = fixture.run();
     let names = report["stages"]
         .as_array()
@@ -256,9 +265,9 @@ fn consecutive_host_failures_end_the_run_without_spending_further_calls() {
     assert_eq!(
         count("native result invocation held"),
         2,
-        "the second consecutive finalizer failure ends the run: {report}"
+        "the second consecutive unanswered finalizer ends the run ({mode}): {report}"
     );
-    assert_eq!(count("host failures"), 1, "{report}");
+    assert_eq!(count("host failures"), 1, "{mode}: {report}");
 }
 
 #[test]

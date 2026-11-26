@@ -3114,14 +3114,12 @@ mod native {
                                 &child.stdout,
                             ));
                     }
-                    if matches!(access, execution::AgentAccess::ReadOnly)
-                        && let execution::result::ResponseError::Remote { failure, .. } = error
+                    if let execution::result::ResponseError::Remote { failure, .. } = &error
+                        && (matches!(access, execution::AgentAccess::ReadOnly)
+                            || failure.is_unanswered())
                     {
-                        metrics.unanswered = matches!(
-                            failure,
-                            crate::commands::work::state::InvocationFailure::MissingResponse { .. }
-                        );
-                        return Some(ResultReply::InvocationFailed(failure));
+                        metrics.unanswered = failure.is_unanswered();
+                        return Some(ResultReply::InvocationFailed(failure.clone()));
                     }
                     self.failure("native result response", error);
                     None
@@ -3622,6 +3620,7 @@ mod native {
                             metrics.host_failure = Some(
                                 execution::diagnostic::HostFailure::from_response(engine, &bytes),
                             );
+                            metrics.unanswered = bytes.is_empty();
                             Err(
                                 crate::commands::work::state::InvocationFailure::InvalidResponse {
                                     engine,

@@ -145,12 +145,13 @@ paths:
   observations and semantic actions through the mutation journal; they are not retained
   semantic progress. Confirmed numeric nonzero exits and unusable remote responses from
   tool-free Inspect/Reduce hold the exact input across instruction-contract changes.
-  A confirmed timeout or numeric nonzero exit of a tool-enabled finalizer, after completed
-  process-group cleanup, holds only its exact request: each queue task's input in its
+  A confirmed timeout, numeric nonzero exit or answerless exit (no terminal result or an
+  empty one) of a tool-enabled finalizer, after completed process-group cleanup, holds only
+  its exact request: each queue task's input in its
   native generation receipt, each audit subject's context as an audit-assessment
   preparation attempt. Inputs the host changed before failing are not held; they are
   prepared afresh. Preserve valid wave peers. Every invocation that ends without an
-  answer (a timeout, a failed exit, empty output or a read-only host's missing terminal
+  answer (a timeout, a failed exit, empty output or a missing terminal
   result, as distinct from a malformed or oversized answer), on any route and in serial or
   parallel waves, counts against its
   host configuration (role,

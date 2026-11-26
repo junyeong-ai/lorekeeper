@@ -41,6 +41,12 @@ impl InvocationFailure {
             _ => Ok(()),
         }
     }
+
+    /// Whether the host ended without any answer, as distinct from answering with an unusable
+    /// one: an empty response is no answer.
+    pub(crate) fn is_unanswered(&self) -> bool {
+        !matches!(self, Self::InvalidResponse { bytes, .. } if *bytes > 0)
+    }
 }
 
 impl std::fmt::Display for InvocationFailure {
