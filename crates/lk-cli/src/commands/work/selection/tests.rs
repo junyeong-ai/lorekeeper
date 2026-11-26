@@ -559,6 +559,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
         lk_core::execution::AgentEngine::Codex,
         "codex",
         jiff::Timestamp::now(),
+        &["codex"],
     )
     .unwrap();
     let answered = fixture.build(&"d".repeat(64), source(), LIMITS).unwrap();
@@ -580,6 +581,7 @@ fn holds_name_exact_requests_and_clear_only_by_explicit_retry() {
         lk_core::execution::AgentEngine::Codex,
         "codex",
         jiff::Timestamp::now(),
+        &["codex"],
     )
     .unwrap();
     fixture.apply(plan_failed_attempt(&fixture.root, &reissued, failure()).unwrap());

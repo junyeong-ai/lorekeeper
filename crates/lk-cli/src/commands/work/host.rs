@@ -21,7 +21,10 @@ use super::state::{HostEnd, InvocationFailure};
 
 const PATH: &str = ".lorekeeper/queue/host-answers.json";
 const SCHEMA: &str = "host-answers-v1";
-const MAX_BYTES: usize = 4096;
+/// The ledger keeps an answer per engine and per profile of the current configuration, and
+/// one probe, so this bound admits several hundred profiles; a ledger beyond it is refused
+/// before it is written, never written for every later read to reject.
+const MAX_BYTES: usize = 65_536;
 
 /// The retained hold an unanswered failure created, named by the store that keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +349,12 @@ impl HostAnswers {
             probe: self.probe.clone(),
         })
         .into_diagnostic()?;
+        if raw.len() > MAX_BYTES {
+            return Err(miette::miette!(
+                "host answers for {} configured profiles exceed their storage bound",
+                self.profiles.len()
+            ));
+        }
         lk_core::fs::write_atomic(&path, &raw, None).into_diagnostic()
     }
 }
@@ -397,14 +406,16 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
 }
 
 /// Records that the host configuration `profile` of `engine` answered a request when it
-/// ended at `answered_at`. Only a later answer advances either record. Runs hold the workflow
-/// lease while they invoke hosts, so these writes do not race.
+/// ended at `answered_at`. Only a later answer advances either record, and the ledger keeps
+/// only the `configured` profiles, so renamed or removed profiles do not accumulate. Runs hold
+/// the workflow lease while they invoke hosts, so these writes do not race.
 #[cfg(unix)]
 pub(in crate::commands) fn record_answer(
     root: &Path,
     engine: AgentEngine,
     profile: &str,
     answered_at: Timestamp,
+    configured: &[&str],
 ) -> miette::Result<()> {
     fn advance<K: Ord>(answers: &mut BTreeMap<K, Timestamp>, key: K, at: Timestamp) -> bool {
         if answers.get(&key).is_some_and(|answered| *answered >= at) {
@@ -414,9 +425,14 @@ pub(in crate::commands) fn record_answer(
         true
     }
     let mut answers = HostAnswers::load(root)?;
+    let before = answers.profiles.len();
+    answers
+        .profiles
+        .retain(|kept, _| configured.contains(&kept.as_str()));
+    let pruned = answers.profiles.len() != before;
     let engine_advanced = advance(&mut answers.answers, engine, answered_at);
     let profile_advanced = advance(&mut answers.profiles, profile.to_owned(), answered_at);
-    if engine_advanced || profile_advanced {
+    if pruned || engine_advanced || profile_advanced {
         answers.store(root)?;
     }
     Ok(())
@@ -633,6 +649,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_ledger_keeps_configured_profiles_and_never_writes_what_it_cannot_read() {
+        let root = tempfile::tempdir().unwrap();
+        record_answer(
+            root.path(),
+            AgentEngine::Codex,
+            "retired",
+            at(10).unwrap(),
+            &["retired"],
+        )
+        .unwrap();
+        record_answer(
+            root.path(),
+            AgentEngine::Codex,
+            "current",
+            at(20).unwrap(),
+            &["current"],
+        )
+        .unwrap();
+        let loaded = HostAnswers::load(root.path()).unwrap();
+        assert_eq!(
+            loaded.profiles.keys().collect::<Vec<_>>(),
+            ["current"],
+            "a profile the configuration no longer names is dropped"
+        );
+        let names = (0..2_000)
+            .map(|index| format!("profile-{index:04}"))
+            .collect::<Vec<_>>();
+        let configured = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let before = std::fs::read(root.path().join(PATH)).unwrap();
+        let mut refused = None;
+        for (index, name) in names.iter().enumerate() {
+            if let Err(error) = record_answer(
+                root.path(),
+                AgentEngine::Codex,
+                name,
+                at(30 + index as i64).unwrap(),
+                &configured,
+            ) {
+                refused = Some(error);
+                break;
+            }
+        }
+        assert!(
+            refused.is_some_and(|error| error.to_string().contains("storage bound")),
+            "a ledger beyond the read bound is refused"
+        );
+        assert_ne!(std::fs::read(root.path().join(PATH)).unwrap(), before);
+        HostAnswers::load(root.path()).expect("every written ledger stays readable");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn answers_persist_monotonically_and_refuse_unknown_state() {
         let root = tempfile::tempdir().unwrap();
         assert!(HostAnswers::load(root.path()).unwrap().answers.is_empty());
@@ -641,6 +709,7 @@ mod tests {
             AgentEngine::Codex,
             "synthesis",
             at(20).unwrap(),
+            &["synthesis"],
         )
         .unwrap();
         record_answer(
@@ -648,6 +717,7 @@ mod tests {
             AgentEngine::Codex,
             "synthesis",
             at(10).unwrap(),
+            &["synthesis"],
         )
         .unwrap();
         let loaded = HostAnswers::load(root.path()).unwrap();

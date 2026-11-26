@@ -671,6 +671,7 @@ mod tests {
                 lk_core::execution::AgentEngine::Codex,
                 "codex",
                 jiff::Timestamp::now(),
+                &["codex"],
             )
             .unwrap();
         };
@@ -685,6 +686,7 @@ mod tests {
             lk_core::execution::AgentEngine::ClaudeCode,
             "claude",
             jiff::Timestamp::now(),
+            &["claude"],
         )
         .unwrap();
         assert!(hold().is_some(), "another host's answer proves nothing");
@@ -750,6 +752,7 @@ mod tests {
             lk_core::execution::AgentEngine::Codex,
             "codex",
             jiff::Timestamp::now(),
+            &["codex"],
         )
         .unwrap();
         assert_eq!(hold(), None);

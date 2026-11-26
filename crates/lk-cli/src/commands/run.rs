@@ -994,6 +994,13 @@ mod native {
                     execution.engine,
                     &host.profile,
                     host.at,
+                    &self
+                        .config
+                        .execution
+                        .profiles
+                        .keys()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
                 )
             {
                 self.failure("host answer", error);
