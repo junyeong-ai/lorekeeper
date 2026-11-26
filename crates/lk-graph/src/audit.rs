@@ -1492,6 +1492,44 @@ pub fn review_dependencies_with_inventory(
     scoped_review_dependencies(root, pages, &mut index, &receipts)
 }
 
+/// Concepts' review dependencies as their synthesis captures read them.
+#[derive(Default)]
+pub struct SynthesisReviewScope {
+    pub dependencies: BTreeMap<String, Vec<AuditReviewDependency>>,
+    /// Concepts whose own audit records cannot be read, with the reason; their synthesis is
+    /// held until the records are repaired.
+    pub held: BTreeMap<String, String>,
+}
+
+/// The review dependencies of concept `pages` as their synthesis captures read them: each
+/// concept's own audit records only (`load_synthesis_receipts`), so another record's defect
+/// never fails them.
+pub fn synthesis_review_dependencies_controlled(
+    root: &Path,
+    dirs: &VaultDirs,
+    scanned: &[ScannedPage],
+    pages: &BTreeMap<String, lk_vault::VaultPage>,
+    read: &lk_vault::ReadControl,
+) -> Result<SynthesisReviewScope, GraphError> {
+    if pages.is_empty() {
+        return Ok(Default::default());
+    }
+    let concepts = pages.keys().cloned().collect::<Vec<_>>();
+    let (receipts, held) = load_synthesis_receipts(root, scanned, &concepts, read)?;
+    let available = pages
+        .iter()
+        .filter(|(path, _)| !held.contains_key(*path))
+        .map(|(path, page)| (path.clone(), page.clone()))
+        .collect();
+    let mut inventory =
+        lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
+    let mut index = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
+    Ok(SynthesisReviewScope {
+        dependencies: scoped_review_dependencies(root, &available, &mut index, &receipts)?,
+        held,
+    })
+}
+
 /// Reuse freshly read reports within one capture, retaining current review/evidence guards.
 pub fn review_dependencies_with_reports(
     root: &Path,

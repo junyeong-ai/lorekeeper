@@ -279,8 +279,8 @@ pub(in crate::commands) enum PublishedState {
     Invalid,
     /// The open reviews naming the concept are those the synthesis read, unchanged.
     Current,
-    /// A review opened, reopened, retyped or revised since, or a referenced review was removed,
-    /// resolved or no longer names the concept: the synthesis is owed again.
+    /// A review opened or retyped since, or a referenced review revised, removed, resolved or no
+    /// longer naming the concept: the synthesis is owed again.
     Owed,
 }
 
@@ -295,15 +295,18 @@ pub(in crate::commands) fn published_state(raw: &str, open: &[OpenReview]) -> Pu
     }) else {
         return PublishedState::Unrecorded;
     };
-    let Some(Ok(recorded)) = recorded
-        .as_str()
-        .map(serde_json::from_str::<BTreeMap<String, Recorded>>)
-    else {
+    let Some(Ok(recorded)) = recorded.as_str().map(|text| {
+        lk_core::json::decode_object(text.as_bytes())
+            .and_then(serde_json::from_value::<BTreeMap<String, Recorded>>)
+    }) else {
         return PublishedState::Invalid;
     };
+    // An unreferenced review is compared by presence and kind: its later edits, such as a
+    // reassessment against the synthesis it pins, change nothing the synthesis says.
     let read = open.iter().all(|review| {
         recorded.get(&review.path).is_some_and(|recorded| {
-            recorded.kind == review.kind && recorded.revision == review.revision
+            recorded.kind == review.kind
+                && (!recorded.referenced || recorded.revision == review.revision)
         })
     });
     let referenced_open = recorded
@@ -366,11 +369,20 @@ mod tests {
             PublishedState::Owed,
             "a referenced review closed, was removed or no longer names the concept"
         );
-        let revised = OpenReview {
+        let revised = |review: &OpenReview| OpenReview {
             revision: "changed".into(),
-            ..gap.clone()
+            ..review.clone()
         };
-        assert_eq!(state(&[conflict.clone(), revised]), PublishedState::Owed);
+        assert_eq!(
+            state(&[revised(&conflict), gap.clone()]),
+            PublishedState::Owed,
+            "a referenced review revised since publication"
+        );
+        assert_eq!(
+            state(&[conflict.clone(), revised(&gap)]),
+            PublishedState::Current,
+            "an unreferenced review's edits, such as a reassessment, owe nothing"
+        );
         let retyped = OpenReview {
             kind: Some(ReviewKind::Conflict),
             ..gap.clone()
@@ -398,6 +410,24 @@ mod tests {
             published_state(&page("{\"wiki/explorations/gap.md\":"), &[]),
             PublishedState::Invalid,
             "an unreadable record is reported, never a reason to rewrite"
+        );
+        let entry = |revision: &str| {
+            format!(
+                r#""{}":{{"kind":"conflict","revision":"{revision}"}}"#,
+                conflict.path
+            )
+        };
+        assert_eq!(
+            published_state(
+                &page(&format!(
+                    "{{{},{}}}",
+                    entry("stale"),
+                    entry(&conflict.revision)
+                )),
+                std::slice::from_ref(&conflict)
+            ),
+            PublishedState::Invalid,
+            "a record naming one review twice is unreadable"
         );
         let quoted = "---\ntype: concept\n---\n## Synthesis\nBody.\n\n> [!gap] These defining claims await supporting evidence.\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
         assert_eq!(

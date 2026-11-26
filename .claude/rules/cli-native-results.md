@@ -138,11 +138,14 @@ paths:
   and claims. A concept rerender stamps the record in Rust with the synthesis it preserves,
   whatever the template. The synthesis follows that record: the run's backlink
   reconciliation reads each recorded concept's open reviews as a capture would (its review
-  dependencies through one review inventory, then `open_reviews`) and requests its
-  resynthesis through `graph resynthesize`, reusing a pending request, when a review opened
-  or reopened, was retyped or revised, or a referenced review was removed, resolved or no
-  longer names it; an unreferenced review closing changes nothing the synthesis says. One
-  citation graph serves every concept owing a request. A record Rust cannot read is
+  dependencies through one review inventory and only that concept's own audit records, then
+  `open_reviews`) and requests its resynthesis through `graph resynthesize`, reusing a
+  pending request, when a review opened or was retyped, or a referenced review was revised,
+  removed, resolved or no longer names it. An unreferenced review is compared by presence
+  and kind: its later edits or closing change nothing the synthesis says, so a review
+  reassessed against the synthesis it pins cannot cycle with it. One citation graph serves
+  every concept owing a request; a concept whose own audit records cannot be read is not
+  judged, and a review read that fails other than by absence fails the sweep. A record Rust cannot read is
   reported for repair, keeps the synthesis and keeps completion nonzero. A page without a
   record (published before records existed) is never rewritten on the strength of a
   callout-shaped quote, which nothing establishes as Lore's, nor swept for reviews:

@@ -423,26 +423,42 @@ fn review_callouts(
         pages.insert(address.clone(), parsed);
         recorded.push((page.path.clone(), address, raw));
     }
-    let dependencies =
-        lk_graph::audit::review_dependencies_controlled(&rc.root, &rc.vault_dirs, &pages, read)
-            .map_err(|e| e.to_string())?;
+    let dependencies = lk_graph::audit::synthesis_review_dependencies_controlled(
+        &rc.root,
+        &rc.vault_dirs,
+        &views.scanned,
+        &pages,
+        read,
+    )
+    .map_err(|e| e.to_string())?
+    .dependencies;
     let mut reviews = std::collections::BTreeMap::new();
     let mut owed = Vec::new();
     for (path, address, raw) in recorded {
-        let scoped = dependencies
-            .get(&address)
-            .into_iter()
-            .flatten()
+        // A concept whose own audit records cannot be read has its synthesis held; its
+        // reviews are not judged until they are repaired.
+        let Some(scoped) = dependencies.get(&address) else {
+            continue;
+        };
+        let scoped = scoped
+            .iter()
             .map(|review| review.path.clone())
             .collect::<Vec<_>>();
         for review in &scoped {
+            read.check().map_err(|e| e.to_string())?;
             let Ok(owner) = lk_vault::resolve_page_owner(&rc.root, Path::new(review)) else {
                 continue;
             };
-            if !reviews.contains_key(&owner)
-                && let Ok((text, _)) = read.page_text(&rc.root.join(&owner))
-            {
-                reviews.insert(owner, text.to_string());
+            if reviews.contains_key(&owner) {
+                continue;
+            }
+            match read.page_text(&rc.root.join(&owner)) {
+                Ok((text, _)) => {
+                    reviews.insert(owner, text.to_string());
+                }
+                Err(lk_vault::VaultError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(format!("{review}: {error}")),
             }
         }
         let open = super::work::open_reviews(&rc.root, &address, "", &scoped, &reviews)
@@ -458,6 +474,7 @@ fn review_callouts(
         lk_graph::backlinks::concept_resyntheses(&views.scanned, &rc.root, &rc.vault_dirs, &owed)
             .map_err(|e| e.to_string())?;
     for (path, evidence) in owed.into_iter().zip(evidence) {
+        read.check().map_err(|e| e.to_string())?;
         let evidence = match evidence {
             Ok(evidence) => evidence,
             Err(lk_graph::GraphError::Unresynthesizable(_)) => {
