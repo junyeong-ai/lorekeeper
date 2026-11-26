@@ -62,7 +62,14 @@ pub(in crate::commands) fn admit(
     if proposal.body.trim().is_empty() {
         return Ok(Err("a review needs a judgment body".into()));
     }
-    let Some(path) = review_path(root, &config.vault.dirs, title, proposal.kind)? else {
+    let Some(path) = review_path(
+        root,
+        &config.vault.dirs,
+        title,
+        proposal.kind,
+        &prepared.absent,
+    )?
+    else {
         return Ok(Err(format!(
             "every review address for this title is taken in {}",
             lk_core::vault_path::explorations_dir(&config.vault.dirs).display()
@@ -160,7 +167,9 @@ pub(in crate::commands) fn admit(
 }
 
 /// The scoped review of `concept` this Work read that records the same question: the same
-/// kind, title, judgment and evidence set, whatever its status and evidence order.
+/// kind, title, judgment and evidence set, whatever its status and evidence order, and
+/// whatever authority the capture first read its page under (a discovery match can read a
+/// review as context).
 fn recorded(
     root: &Path,
     prepared: &Prepared,
@@ -179,12 +188,23 @@ fn recorded(
     let evidence = evidence_set(evidence);
     let owner = |address: &str| lk_vault::resolve_page_owner(root, Path::new(address)).ok();
     let concept_owner = owner(concept);
-    for resource in &prepared.resources {
-        if resource.authority != SemanticAuthority::Review {
-            continue;
-        }
+    let scoped =
+        prepared.context["purpose"]["parameters"]["knowledge_scope"]["review_dependencies"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned);
+    let addresses = prepared
+        .resources
+        .iter()
+        .filter(|resource| resource.authority == SemanticAuthority::Review)
+        .map(|resource| resource.address.clone())
+        .chain(scoped)
+        .collect::<std::collections::BTreeSet<_>>();
+    for address in &addresses {
         let Some(page) = prepared
-            .captured_page(&resource.address)
+            .captured_page(address)
             .and_then(|raw| lk_vault::parse_page(raw).ok())
         else {
             continue;
@@ -209,7 +229,7 @@ fn recorded(
             && names_concept
             && page.body.trim() == body.trim()
         {
-            return Ok(Some(resource.address.clone()));
+            return Ok(Some(address.clone()));
         }
     }
     Ok(None)
@@ -323,11 +343,14 @@ pub(in crate::commands::work) fn record(
 
 /// An absent explorations address for the review: its title's slug, suffixed when taken, within a
 /// filename byte bound. `None` when every candidate is taken.
+/// The first vacant review address for `title`. An address the preparation guards as a
+/// removed scoped review is not vacant: creating there would contradict that guard.
 fn review_path(
     root: &Path,
     dirs: &lk_core::config::VaultDirs,
     title: &str,
     kind: lk_vault::ReviewKind,
+    guarded_absent: &std::collections::BTreeSet<PathBuf>,
 ) -> miette::Result<Option<String>> {
     let directory = lk_core::vault_path::explorations_dir(dirs);
     let mut stem = lk_core::concept::slugify(title).unwrap_or_else(|| match kind {
@@ -350,6 +373,9 @@ fn review_path(
             format!("{stem}-{attempt}.md")
         };
         let path = directory.join(name);
+        if guarded_absent.contains(&path) {
+            continue;
+        }
         match std::fs::symlink_metadata(root.join(&path)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Some(path.to_string_lossy().into_owned()));
@@ -424,6 +450,7 @@ mod tests {
             &lk_core::config::VaultDirs::default(),
             &"검토".repeat(100),
             lk_vault::ReviewKind::Conflict,
+            &Default::default(),
         )
         .unwrap()
         .unwrap();

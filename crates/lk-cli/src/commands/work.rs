@@ -435,7 +435,7 @@ fn guard_prepared(
         Err(error)
             if error.kind() == std::io::ErrorKind::NotFound && expected.plan.parts.len() == 1 =>
         {
-            prepared.guard_snapshot(mutation);
+            prepared.guard_beyond_pages(mutation);
             return Ok(false);
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -709,6 +709,7 @@ fn prepare_queue_publication_controlled(
                     "section review/read scope changed; reread and regenerate the result",
                 ));
             }
+            prepared.absent.extend(scope.absent.iter().cloned());
             for (path, content) in scope.pages {
                 if prepared
                     .pages

@@ -61,7 +61,7 @@ pub(super) struct Prepared {
     /// evidence stays a current read even where the same page is also context.
     strict_reads: BTreeSet<String>,
     /// Scoped reviews that no longer exist; publication requires them still absent.
-    absent: BTreeSet<PathBuf>,
+    pub(super) absent: BTreeSet<PathBuf>,
     /// A synthesis request's context snapshot, which its context-only pages are read from.
     snapshot: Option<super::snapshot::ContextSnapshot>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
@@ -342,13 +342,15 @@ impl Prepared {
         for (path, content) in &self.pages {
             plan.require_unchanged(path, content.clone());
         }
+        self.guard_beyond_pages(plan);
+    }
+
+    /// Guards what this preparation read beyond its page bytes: the absence of each removed
+    /// scoped review and the context snapshot.
+    pub(super) fn guard_beyond_pages(&self, plan: &mut lk_vault::MutationPlan) {
         for path in &self.absent {
             plan.require_absent(path);
         }
-        self.guard_snapshot(plan);
-    }
-
-    pub(super) fn guard_snapshot(&self, plan: &mut lk_vault::MutationPlan) {
         if let Some(snapshot) = &self.snapshot {
             snapshot.guard(plan);
         }
