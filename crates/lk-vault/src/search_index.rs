@@ -13,16 +13,20 @@ const VERSION: i32 = 31;
 
 /// Opens the prepared index at `path` for reading. Write-ahead logging reads through a
 /// shared-memory file SQLite creates beside the database; a clean close removes it, and a
-/// read-only directory cannot create it again. With no log beside it the database file holds
-/// every commit, so the index is then read as immutable. A log that exists may hold commits
-/// the file lacks, and its error stands.
+/// directory or mount that refuses new files cannot create it again (`READONLY_DIRECTORY` on
+/// a denied directory, `CANTOPEN` on a read-only mount or on Windows). With neither a log nor
+/// a rollback journal beside it the database file holds every commit, so the index is then
+/// read as immutable. A log may hold commits the file lacks and a journal may require
+/// recovery, so with either present, as with any other failure, the error stands.
 pub(super) fn open_read_only(path: &Path) -> Result<Connection, VaultError> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     match connection.query_row("PRAGMA schema_version", [], |_| Ok(())) {
         Ok(()) => Ok(connection),
         Err(rusqlite::Error::SqliteFailure(failure, _))
-            if failure.code == rusqlite::ErrorCode::ReadOnly
-                && !write_ahead_log(path).try_exists()? =>
+            if (failure.extended_code == rusqlite::ffi::SQLITE_READONLY_DIRECTORY
+                || failure.code == rusqlite::ErrorCode::CannotOpen)
+                && !sidecar(path, "-wal").try_exists()?
+                && !sidecar(path, "-journal").try_exists()? =>
         {
             drop(connection);
             Ok(Connection::open_with_flags(
@@ -34,10 +38,10 @@ pub(super) fn open_read_only(path: &Path) -> Result<Connection, VaultError> {
     }
 }
 
-fn write_ahead_log(path: &Path) -> PathBuf {
-    let mut log = path.as_os_str().to_owned();
-    log.push("-wal");
-    PathBuf::from(log)
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
 }
 
 /// `path` as the path of a SQLite `file:` URI: every byte outside the unreserved set and the
@@ -2681,7 +2685,7 @@ mod tests {
         };
         let index = root.path().join(INDEX_PATH);
         let directory = index.parent().unwrap();
-        assert!(!write_ahead_log(&index).exists());
+        assert!(!sidecar(&index, "-wal").exists());
         let pinned_reads = || -> Result<(), VaultError> {
             let found = crate::search(
                 root.path(),
@@ -2713,11 +2717,20 @@ mod tests {
         let clean = pinned_reads();
         set_mode(0o755);
         clean.unwrap();
-        std::fs::write(write_ahead_log(&index), b"").unwrap();
+        for suffix in ["-wal", "-journal"] {
+            // A leftover log may hold commits, and a hot journal requires recovery the
+            // immutable reading would skip.
+            std::fs::write(sidecar(&index, suffix), b"uncommitted pages").unwrap();
+            set_mode(0o555);
+            let leftover = pinned_reads();
+            set_mode(0o755);
+            assert!(leftover.is_err(), "{suffix}");
+            std::fs::remove_file(sidecar(&index, suffix)).unwrap();
+        }
         set_mode(0o555);
-        let leftover = pinned_reads();
+        let restored = pinned_reads();
         set_mode(0o755);
-        assert!(leftover.is_err());
+        restored.unwrap();
     }
 
     #[test]
