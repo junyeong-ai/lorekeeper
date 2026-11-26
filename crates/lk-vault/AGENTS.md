@@ -233,7 +233,9 @@ Cards and guard bytes exist only for roster members; `discover_queries` stays co
   preserve old snapshot. Explicit `--snapshot` pins captured corpus/config/paths/full
   revisions; default search is live. External edits aren't frozen during capture.
   Scope facets and bounded SQLite planner statistics are prepared in that transaction;
-  read-only queries never optimize or refresh the capture.
+  read-only queries never optimize or refresh the capture. The database uses write-ahead
+  logging: readers hold one transaction across verification and traversal, and a
+  scheduled refresh must commit beside them rather than fail on their lock.
   Final graph verification may supply exact file revisions and verified page owners
   for overlapping search inputs. Enumerate the complete search inventory independently,
   check owners and read uncovered paths; never reuse initial or prior-phase proofs.

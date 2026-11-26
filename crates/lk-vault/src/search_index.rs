@@ -207,6 +207,9 @@ fn prepare_search_inner(
     let snapshot = lk_core::concept::file_revision(&identity);
     let path = crate::writable_page_path(root, Path::new(INDEX_PATH))?;
     let mut connection = Connection::open(path)?;
+    // Readers hold one transaction across snapshot verification and traversal; write-ahead
+    // logging lets a refresh commit beside them instead of waiting for them to finish.
+    connection.pragma_update(None, "journal_mode", "WAL")?;
     let mut compatible = false;
     if connection.table_exists(Some("main"), "snapshot")? {
         let current: (String, String, i32) =
@@ -2518,6 +2521,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_refresh_commits_while_a_reader_holds_its_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/topic.md";
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Topic\n---\nOriginal.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let first = prepare_search(&session, &dirs).unwrap();
+        let mut reader = Connection::open_with_flags(
+            root.path().join(INDEX_PATH),
+            OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        reader.busy_timeout(std::time::Duration::ZERO).unwrap();
+        let held = reader.transaction().unwrap();
+        let read = |transaction: &rusqlite::Transaction<'_>| -> String {
+            transaction
+                .query_row("SELECT id FROM snapshot", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert_eq!(read(&held), first.snapshot);
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\ntitle: Topic\n---\nChanged.\n",
+        );
+        let second = prepare_search(&session, &dirs).unwrap();
+        assert_ne!(second.snapshot, first.snapshot);
+        assert_eq!(read(&held), first.snapshot);
+        drop(held);
+        assert_eq!(
+            inspect_search_snapshot(root.path(), &dirs)
+                .unwrap()
+                .snapshot,
+            second.snapshot
+        );
     }
 
     #[test]
