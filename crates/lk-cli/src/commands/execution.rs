@@ -24,6 +24,10 @@ pub(super) struct ChildResult {
     pub detail: Option<String>,
     pub stdout: Vec<u8>,
     pub stdout_capture: StdoutCapture,
+    /// The last bytes the child wrote to stderr, sanitized to one line (`StderrTail`): the
+    /// host's own account of a failure, such as a missing configuration directory. Reported
+    /// with the run, never persisted in hold records or vault pages.
+    pub stderr_tail: Option<String>,
     pub termination: ChildTermination,
     /// When the child ended, as distinct from when its outcome is recorded: a parallel wave
     /// settles every child before recording any of them.
@@ -79,6 +83,38 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
     ChildAttempt {
         duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         result,
+    }
+}
+
+/// The bounded end of a child's stderr.
+#[cfg(unix)]
+#[derive(Default)]
+struct StderrTail(std::collections::VecDeque<u8>);
+
+#[cfg(unix)]
+impl StderrTail {
+    const MAX_BYTES: usize = 2048;
+
+    fn push(&mut self, bytes: &[u8]) {
+        self.0.extend(bytes);
+        let excess = self.0.len().saturating_sub(Self::MAX_BYTES);
+        self.0.drain(..excess);
+    }
+
+    /// The tail as one line: line breaks and tabs become spaces, other control characters
+    /// are dropped, so a report or hold reason cannot be reshaped by host output.
+    fn render(&self) -> Option<String> {
+        let bytes = self.0.iter().copied().collect::<Vec<_>>();
+        let text = String::from_utf8_lossy(&bytes)
+            .chars()
+            .filter_map(|character| match character {
+                '\n' | '\r' | '\t' => Some(' '),
+                character if character.is_control() => None,
+                character => Some(character),
+            })
+            .collect::<String>();
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        (!text.is_empty()).then_some(text)
     }
 }
 
@@ -301,10 +337,7 @@ impl RunningChild {
             .kill_on_drop(true)
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
-            .stderr(match output {
-                ChildOutput::Forward => Stdio::inherit(),
-                ChildOutput::Discard => Stdio::null(),
-            });
+            .stderr(Stdio::piped());
         let child = command
             .spawn()
             .map_err(|e| miette::miette!("start child: {e}"))?;
@@ -390,6 +423,26 @@ async fn run_child(
         .stdout
         .take()
         .ok_or_else(|| miette::miette!("child stdout missing"))?;
+    let mut errors = child
+        .stderr
+        .take()
+        .ok_or_else(|| miette::miette!("child stderr missing"))?;
+    let tail = std::sync::Mutex::new(StderrTail::default());
+    let stderr_output = async {
+        let mut buffer = [0; 4096];
+        let mut forwarded = tokio::io::stderr();
+        loop {
+            let count = errors.read(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            tail.lock().expect("stderr tail").push(&buffer[..count]);
+            if forward {
+                forwarded.write_all(&buffer[..count]).await?;
+            }
+        }
+        Ok::<_, std::io::Error>(())
+    };
     let stdin = child.stdin.take();
     let mut input_closed = false;
     let observed_closed = &mut input_closed;
@@ -440,9 +493,9 @@ async fn run_child(
         }
     };
     let (cancelled, mut termination, mut detail) = tokio::select! {
-        result = async { tokio::try_join!(child.wait(), output, send) } => {
+        result = async { tokio::try_join!(child.wait(), output, send, stderr_output) } => {
             match result {
-                Ok((status, stdout, delivery)) => {
+                Ok((status, stdout, delivery, ())) => {
                     signal_group(running.group, Signal::KILL)?;
                     running.cleaned = true;
                     let closed = matches!(delivery, InputDelivery::Closed);
@@ -462,6 +515,7 @@ async fn run_child(
                         success: status.success() && !closed, exit_code: status.code(), cancelled: false,
                         detail, stdout,
                         stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
+                        stderr_tail: tail.lock().expect("stderr tail").render(),
                         termination: if incomplete_success {ChildTermination::IoFailed} else {ChildTermination::Exited},
                         finished_at: jiff::Timestamp::now(),
                     });
@@ -488,6 +542,7 @@ async fn run_child(
         detail: Some(detail),
         stdout: Vec::new(),
         stdout_capture: StdoutCapture::Unavailable,
+        stderr_tail: tail.lock().expect("stderr tail").render(),
         termination,
         finished_at: jiff::Timestamp::now(),
     })
@@ -571,7 +626,7 @@ async fn run_children(
                             let mut detail = format!("supervised child task: {error}");
                             running.lock().await.stop(&mut detail).await;
                             let result = if cancelled.is_some_and(ChildCancellation::is_user_cancelled) {
-                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable,termination:ChildTermination::Cancelled,finished_at:jiff::Timestamp::now()})
+                                Ok(ChildResult {success:false,exit_code:None,cancelled:true,detail:Some(detail),stdout:Vec::new(),stdout_capture:StdoutCapture::Unavailable,stderr_tail:None,termination:ChildTermination::Cancelled,finished_at:jiff::Timestamp::now()})
                             } else {
                                 Err(miette::miette!("{detail}"))
                             };
@@ -601,6 +656,7 @@ async fn run_children(
                     detail: Some(detail),
                     stdout: Vec::new(),
                     stdout_capture: StdoutCapture::Unavailable,
+                    stderr_tail: None,
                     termination: ChildTermination::Cancelled,
                     finished_at: jiff::Timestamp::now(),
                 })
@@ -950,6 +1006,7 @@ mod tests {
                     detail: None,
                     stdout: Vec::new(),
                     stdout_capture: StdoutCapture::Complete,
+                    stderr_tail: None,
                     termination,
                     finished_at: jiff::Timestamp::now(),
                 };
@@ -1200,6 +1257,38 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             assert_eq!(result.stdout, b"{\"ok\":false}");
             assert_eq!(result.stdout_capture, StdoutCapture::Complete);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_discarded_hosts_stderr_tail_is_kept_bounded_and_on_one_line() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 5000 /dev/zero | tr '\\0' x >&2; printf '\\nError finding codex home\\033[0m\\n' >&2; exit 1",
+        ]);
+        let mut child = RunningChild::spawn(command, false, ChildOutput::Discard).unwrap();
+        let result = run_child(
+            &mut child,
+            Some(Duration::from_secs(5)),
+            Some(1024),
+            None,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.exit_code, Some(1));
+        let tail = result.stderr_tail.unwrap();
+        assert!(tail.ends_with("Error finding codex home[0m"), "{tail}");
+        assert!(tail.len() <= StderrTail::MAX_BYTES, "{}", tail.len());
+        assert!(!tail.chars().any(char::is_control), "{tail:?}");
+        let mut quiet = tokio::process::Command::new("sh");
+        quiet.args(["-c", "exit 1"]);
+        let mut child = RunningChild::spawn(quiet, false, ChildOutput::Discard).unwrap();
+        let result = run_child(&mut child, None, Some(1024), None, std::future::pending())
+            .await
+            .unwrap();
+        assert_eq!(result.stderr_tail, None);
     }
 
     #[cfg(unix)]

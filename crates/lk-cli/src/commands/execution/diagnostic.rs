@@ -88,9 +88,15 @@ pub(in crate::commands) struct HostFailure {
     errors: Option<JsonField>,
     result: Option<JsonField>,
     structured_output: Option<JsonField>,
+    /// The end of the host's stderr, one sanitized line (`ChildResult::stderr_tail`).
+    stderr_tail: Option<String>,
 }
 
 impl HostFailure {
+    pub fn stderr_tail(&self) -> Option<&str> {
+        self.stderr_tail.as_deref()
+    }
+
     pub fn from_child(engine: AgentEngine, phase: Phase, child: &ChildResult) -> Self {
         let mut failure = Self::from_output(
             engine,
@@ -100,6 +106,7 @@ impl HostFailure {
             &child.stdout,
         );
         failure.termination = Some(child.termination);
+        failure.stderr_tail = child.stderr_tail.clone();
         failure
     }
 
@@ -164,6 +171,7 @@ impl HostFailure {
             errors: field("errors", &[]),
             result: field("result", &[]),
             structured_output: field("structured_output", &[]),
+            stderr_tail: None,
         }
     }
 }
@@ -230,6 +238,7 @@ mod tests {
                 detail: None,
                 stdout: b"SECRET".to_vec(),
                 stdout_capture: capture,
+                stderr_tail: None,
                 termination: ChildTermination::Exited,
                 finished_at: jiff::Timestamp::now(),
             };

@@ -1001,6 +1001,23 @@ mod native {
                 step.outcome = WorkOutcome::Cancelled;
             }
             if step.unanswered {
+                if let Some(tail) = step
+                    .host_failure
+                    .as_ref()
+                    .and_then(execution::diagnostic::HostFailure::stderr_tail)
+                {
+                    // The host's own account of an answerless failure, such as a missing
+                    // configuration directory, is the cause an operator diagnoses.
+                    let profile = step
+                        .execution
+                        .as_ref()
+                        .map_or("unknown", |execution| execution.profile.as_str());
+                    self.record(
+                        "host failure output",
+                        StageState::Completed,
+                        Some(format!("profile {profile} stderr: {tail}")),
+                    );
+                }
                 self.count_host_failure(step.host());
             } else if step.agent_duration_ms.is_some()
                 && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
