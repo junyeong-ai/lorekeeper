@@ -5806,6 +5806,8 @@ if leader and mode=='config-drift':
         stream.write('\n# Changed inside the private observation fixture.\n')
 if leader and mode=='failed':
     raise SystemExit('intentional failed observation peer')
+if mode=='all-failed':
+    raise SystemExit(7)
 if leader and mode=='malformed':
     print('not a structured observation')
     raise SystemExit(0)
@@ -6032,6 +6034,23 @@ fn parallel_native_observer_failure_retains_an_independent_good_receipt() {
             assert_eq!(parallel_receipts(&fixture), 1);
         }
     }
+}
+
+#[test]
+fn parallel_observers_failing_in_one_wave_trip_the_breaker() {
+    let fixture = parallel_observation_fixture("codex", 4, 2, 1, "all-failed");
+    let (_, report) = fixture.run("knowledge");
+    assert_eq!(parallel_starts(&fixture).len(), 2, "{report}");
+    assert_eq!(
+        report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stage| stage["name"] == "host failures")
+            .count(),
+        1,
+        "{report}"
+    );
 }
 
 #[test]

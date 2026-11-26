@@ -150,8 +150,9 @@ paths:
   native generation receipt, each audit subject's context as an audit-assessment
   preparation attempt. Inputs the host changed before failing are not held; they are
   prepared afresh. Preserve valid wave peers. Every invocation that ends without an
-  answer (a timeout, a failed exit, or a read-only host's missing terminal result, as
-  distinct from an unusable answer), on any route and in mixed waves, counts against its
+  answer (a timeout, a failed exit, empty output or a read-only host's missing terminal
+  result, as distinct from a malformed or oversized answer), on any route and in serial or
+  parallel waves, counts against its
   host configuration (role,
   observation or tool-result host, and execution profile) when the run records its step;
   a timeout retried under its request's own allowance does not, and an answered call on

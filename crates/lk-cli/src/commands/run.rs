@@ -145,8 +145,8 @@ mod native {
         host_failure: Option<execution::diagnostic::HostFailure>,
         #[serde(skip)]
         channel: HostChannel,
-        /// The host ended without an answer (a timeout, a failed exit, or no terminal result),
-        /// as distinct from answering with an unusable one.
+        /// The host ended without an answer (a timeout, a failed exit, empty output or a missing
+        /// terminal result), as distinct from answering with an unusable one.
         #[serde(skip)]
         unanswered: bool,
         /// The unanswered invocation is retried under its request's own allowance, so it is not
@@ -1964,6 +1964,7 @@ mod native {
                     ));
                 }
             };
+            metrics.unanswered |= bytes.is_empty();
             let invalid = || {
                 crate::commands::work::InspectionResponse::InvocationFailed(
                     crate::commands::work::state::InvocationFailure::InvalidResponse {
@@ -2692,6 +2693,7 @@ mod native {
                 let child = match attempt.result {
                     Ok(child) if child.success => child,
                     Ok(child) if child.termination == execution::ChildTermination::TimedOut => {
+                        turn.metrics.unanswered = true;
                         turn.metrics.host_failure =
                             Some(execution::diagnostic::HostFailure::from_child(
                                 engine,
@@ -2709,6 +2711,7 @@ mod native {
                         continue;
                     }
                     Ok(child) if child.failed_exit().is_some() => {
+                        turn.metrics.unanswered = true;
                         turn.metrics.host_failure =
                             Some(execution::diagnostic::HostFailure::from_child(
                                 engine,
@@ -3108,7 +3111,10 @@ mod native {
                     if matches!(access, execution::AgentAccess::ReadOnly)
                         && let execution::result::ResponseError::Remote { failure, .. } = error
                     {
-                        metrics.unanswered = true;
+                        metrics.unanswered = matches!(
+                            failure,
+                            crate::commands::work::state::InvocationFailure::MissingResponse { .. }
+                        );
                         return Some(ResultReply::InvocationFailed(failure));
                     }
                     self.failure("native result response", error);
@@ -4610,6 +4616,7 @@ mod native {
                 } else {
                     match attempt.result {
                         Ok(child) if child.success => {
+                            step.unanswered = child.stdout.is_empty();
                             match execution::observation::decode_response(
                                 engine,
                                 &child.stdout,
