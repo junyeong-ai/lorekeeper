@@ -6,7 +6,7 @@ description: Runs Lorekeeper collection and operations for configured sources or
   operator explicitly invokes it to collect or backfill sources, register or change
   schedules, or update, repair, back up or move an installation.
 metadata:
-  version: 0.160.0
+  version: 0.161.0
 ---
 
 # Lorekeeper collection and operations
