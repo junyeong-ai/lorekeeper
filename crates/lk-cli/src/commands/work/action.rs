@@ -32,6 +32,12 @@ pub(super) const GENERATION: Store = Store {
     schema: "native-result-action-v1",
     directory: ".lorekeeper/queue/result-actions",
 };
+/// The first refusal of a synthesis task's review proposal for one context: its `reason` is
+/// Rust's refusal, which the next request for that context carries once (`review_refusal`).
+pub(super) const REVIEW_REFUSAL: Store = Store {
+    schema: "review-refusal-v1",
+    directory: ".lorekeeper/queue/review-refusals",
+};
 impl Store {
     pub fn path(&self, task_id: &str, cache_hash: &str) -> PathBuf {
         let identity = serde_json::to_vec(&(task_id, cache_hash)).expect("identity serializes");
@@ -85,6 +91,30 @@ impl Store {
             ));
         }
         Ok(action)
+    }
+
+    /// Record `action` unless this store already holds one for the same task, input and context:
+    /// the first record stands, so what it gave the next request cannot change again.
+    pub fn plan_record_first(
+        &self,
+        root: &Path,
+        action: &Action,
+        plan: &mut lk_vault::MutationPlan,
+    ) -> miette::Result<()> {
+        let before = self.read(root, &action.task_id, &action.cache_hash)?;
+        if let Some((raw, stored)) = &before
+            && stored.context_revision == action.context_revision
+        {
+            plan.require_unchanged(self.path(&action.task_id, &action.cache_hash), raw.clone());
+            return Ok(());
+        }
+        plan.publish_expected(
+            root,
+            self.path(&action.task_id, &action.cache_hash),
+            before.map(|(raw, _)| raw),
+            serde_json::to_string(action).into_diagnostic()?,
+        )
+        .into_diagnostic()
     }
 
     pub fn plan_prune(

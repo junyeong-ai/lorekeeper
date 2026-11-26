@@ -71,6 +71,9 @@ pub(super) struct Prepared {
     pub(super) roster: Option<super::selection::RosterBinding>,
     /// Digest of a synthesis target's graph citations when this context was captured.
     pub(super) graph_citations: Option<String>,
+    /// The stored first refusal of this synthesis task's review proposal, with the context
+    /// revision it refused under (`action::REVIEW_REFUSAL`).
+    review_refusal: Option<(String, String)>,
 }
 
 /// What Rust writes into a result beside the model's reply: an extraction's discovery recipes
@@ -220,6 +223,15 @@ impl Prepared {
     }
 
     /// The exact bytes captured for a page, whatever reading its resource presents.
+    /// The refusal a request answering `context_revision` carries once, if this task's review
+    /// proposal was refused under that context.
+    pub(super) fn review_refusal(&self, context_revision: &str) -> Option<&str> {
+        self.review_refusal
+            .as_ref()
+            .filter(|(context, _)| context == context_revision)
+            .map(|(_, refusal)| refusal.as_str())
+    }
+
     pub(super) fn captured_page(&self, address: &str) -> Option<&str> {
         self.pages
             .iter()
@@ -555,6 +567,7 @@ impl<'a> Capture<'a> {
             selected_owners: None,
             roster: None,
             graph_citations: None,
+            review_refusal: None,
         }
     }
 }
@@ -653,7 +666,15 @@ pub(super) fn task_with_audit_controlled(
     } else {
         Vec::new()
     };
-    let prepared = capture_task_with_audit_controlled(root, config, task, audit, read)?;
+    let review_refusal = if task.kind == lk_queue::TaskKind::SynthesizeConcept {
+        super::action::REVIEW_REFUSAL
+            .read(root, &task.task_id, &task.cache_hash)?
+            .map(|(_, refusal)| (refusal.context_revision, refusal.reason))
+    } else {
+        None
+    };
+    let mut prepared = capture_task_with_audit_controlled(root, config, task, audit, read)?;
+    prepared.review_refusal = review_refusal;
     prepared.require_requested_citations()?;
     if extraction {
         with_discovery_controlled(root, config, prepared, &queries, read)
@@ -1882,6 +1903,7 @@ mod tests {
             snapshot: None,
             roster: None,
             graph_citations: None,
+            review_refusal: None,
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
                 path: review.into(),
                 file_revision: None,

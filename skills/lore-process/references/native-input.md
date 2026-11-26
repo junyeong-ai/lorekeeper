@@ -134,6 +134,9 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   and replans. When an open review in `open_reviews` already records the same issue, complete
   the synthesis and list it in `review_refs` instead; a distinct issue, even of an open
   review's kind, gets its own review. A concept publishes at most one review per run.
+  When the task or Work supplies `review_refusal`, Rust refused this task's previous review
+  proposal for the same inputs for that reason and this request is its one reconsideration:
+  never resubmit that proposal unchanged; correct it, or complete the synthesis.
 - Synthesis value: `{synthesis, related, review_refs, gap_claims}`. `review_refs` lists, by
   path, each open review in `context.purpose.parameters.open_reviews` whose question the
   synthesis leaves open, `[]` when the citations now settle every one, and `null` without

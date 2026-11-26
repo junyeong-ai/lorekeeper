@@ -2180,6 +2180,7 @@ fn current_result_finalization(
                     prepared.roster.as_ref(),
                     &work.plan.subject_revision,
                     completed,
+                    prepared.review_refusal(&work.plan.subject_revision),
                 )?,
                 state::CompletionKind::Frontier => native::frontier_request(
                     config,
@@ -2188,6 +2189,7 @@ fn current_result_finalization(
                     &generation::Owners::build(config, prepared)?,
                     prepared.roster.as_ref(),
                     completed,
+                    prepared.review_refusal(&work.plan.subject_revision),
                 )?,
             }
         }
@@ -3358,6 +3360,7 @@ fn frontier_result(
         &generation::Owners::build(config, prepared)?,
         prepared.roster.as_ref(),
         &completed,
+        prepared.review_refusal(&work.plan.subject_revision),
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -3676,6 +3679,7 @@ fn prepare_finalization_from_capture(
             prepared.roster.as_ref(),
             &work.plan.subject_revision,
             &completed,
+            prepared.review_refusal(&work.plan.subject_revision),
         ) {
             Ok(request) => request,
             Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
@@ -3915,7 +3919,13 @@ pub(super) fn finish_result(
             let path = review::record(session, &task, &prepared, review, plan)?;
             Ok(ResultFinish::ReviewRecorded(path))
         }
-        generation::Outcome::NeedsAction(reason) => {
+        outcome @ (generation::Outcome::NeedsAction(_)
+        | generation::Outcome::ReviewRefused { .. }) => {
+            let (reason, refusal) = match outcome {
+                generation::Outcome::ReviewRefused { reason, refusal } => (reason, Some(refusal)),
+                generation::Outcome::NeedsAction(reason) => (reason, None),
+                _ => unreachable!("matched above"),
+            };
             let mut plan = work.plan_finalization_action_for(
                 root,
                 &prepared.resources,
@@ -3925,6 +3935,28 @@ pub(super) fn finish_result(
                 result.kind,
             )?;
             prepared.guard_pages(&mut plan);
+            if let (
+                Some(refusal),
+                Subject::Queue {
+                    task_id,
+                    cache_hash,
+                    ..
+                },
+            ) = (refusal, &prepared.subject)
+            {
+                action::REVIEW_REFUSAL.plan_record_first(
+                    root,
+                    &action::Action {
+                        schema: action::REVIEW_REFUSAL.schema.into(),
+                        task_id: task_id.clone(),
+                        cache_hash: cache_hash.clone(),
+                        context_revision: work.plan.subject_revision.clone(),
+                        request_revision: action::digest(&result.request)?,
+                        reason: refusal,
+                    },
+                    &mut plan,
+                )?;
+            }
             session.apply(plan).into_diagnostic()?;
             Ok(ResultFinish::NeedsAction(reason))
         }
@@ -7128,6 +7160,7 @@ mod tests {
             None,
             &work.plan.subject_revision,
             &completed,
+            None,
         )
         .unwrap();
         validate_native_finalization(&root, &config, &work, &prepared, &request).unwrap();

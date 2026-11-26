@@ -106,15 +106,20 @@ paths:
   `lk_vault::plan_curation`, journaled with the Work's read guards. Admission plans that
   curation, judges concept links through the filesystem and bounds the file stem in bytes;
   a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
-  fault. The run then replans; the review enters the concept's scope through `subjects`,
+  fault. The first refusal under a context is stored with it (`action::REVIEW_REFUSAL`,
+  `.lorekeeper/queue/review-refusals/`, pruned with the task), and the next request for that
+  task and context carries it as `review_refusal`: that request differs from the held one,
+  so it is reconsidered once, and a further refusal keeps the first record, so the request
+  repeats exactly and defers without a call. A proposal citing an origin both as a page and
+  by its RSS events keeps the events. The run then replans; the review enters the concept's scope through `subjects`,
   so the next finalization completes against it. `needs-review` is only for an issue no
   open review in scope records. Whether an issue is already recorded is the finalizer's
   judgment over every scoped review it reads, whatever its kind: a distinct issue of an open
   review's kind gets its own review, with its own evidence and resolution, and Rust never
   approximates that judgment by kind. A proposal repeating a scoped review exactly (kind,
   title, judgment and evidence, whatever its status, compared against every review the
-  Work's scope depends on) is that review: it publishes nothing and holds the task while its
-  inputs stay current. A new review never takes an address that folds (case, NFC) onto a
+  Work's scope depends on) is that review: it publishes nothing and is refused, so its task is
+  reconsidered once with that refusal and then held while its inputs stay current. A new review never takes an address that folds (case, NFC) onto a
   removed review whose absence the request guards. A target publishes at most one review per run, spent
   when it publishes: a further proposal in that run publishes and records nothing and
   defers only that target, and a repeating finalizer cannot loop through paid calls. The

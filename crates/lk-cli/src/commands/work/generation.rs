@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
 
-use super::action::{Action, GENERATION, digest};
+use super::action::{Action, GENERATION, REVIEW_REFUSAL, digest};
 use super::{Prepared, Subject};
 mod owners;
 pub(super) mod rejection;
@@ -24,6 +24,12 @@ pub(in crate::commands) enum Outcome {
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
     NeedsReview(super::review::ReviewProposal, String),
     ReviewAdmitted(super::review::AdmittedReview),
+    /// A review proposal Rust refused: held like `NeedsAction` with `reason`, and `refusal`
+    /// given once to the next request for the same context (`action::REVIEW_REFUSAL`).
+    ReviewRefused {
+        reason: String,
+        refusal: String,
+    },
     /// A review proposal the run's allowance for this target cannot publish now.
     ReviewDeferred(String),
     Rejected(rejection::ProposalRejection),
@@ -293,9 +299,10 @@ pub(super) fn assemble_prepared(
         Outcome::NeedsReview(proposal, reason) => {
             match super::review::admit(root, config, task, prepared, proposal)? {
                 Ok(review) => Outcome::ReviewAdmitted(review),
-                Err(refusal) => {
-                    Outcome::NeedsAction(format!("{reason} (review refused: {refusal})"))
-                }
+                Err(refusal) => Outcome::ReviewRefused {
+                    reason: format!("{reason} (review refused: {refusal})"),
+                    refusal,
+                },
             }
         }
         outcome => outcome,
@@ -396,7 +403,7 @@ pub(super) fn minimum_reply(
 const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion.";
 
 /// The synthesis-only reply that proposes the durable review its contract requires.
-const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. Whether a question is already recorded is your judgment over every review in open_reviews, whatever its kind: when one records the same issue, complete the synthesis and list it in review_refs instead; a distinct issue, even of the same kind, gets its own review. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
+const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. Whether a question is already recorded is your judgment over every review in open_reviews, whatever its kind: when one records the same issue, complete the synthesis and list it in review_refs instead; a distinct issue, even of the same kind, gets its own review. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review. When the task or Work supplies review_refusal, Rust refused this task's previous review proposal for these exact inputs for that reason, and this request is its only reconsideration: never resubmit that proposal unchanged; correct it, or complete the synthesis, listing in review_refs an open review that already records the issue.";
 
 const REVIEW_REFS_REPLY: &str = "When context.purpose.parameters.open_reviews names open reviews of this concept, a complete synthesis lists in review_refs, by exact path, each one whose question it leaves open, and states that question's status in its prose; an empty list answers that the citations now settle every one. A review recorded with citations_changed: false was judged against these exact citations, so it stays listed. For each listed evidence-gap review, return the defining claims it names that the citations still do not support, one line each, in gap_claims; otherwise gap_claims is null. Rust appends the callouts referencing every listed review and records them, so never write those callouts in synthesis. Without open_reviews, review_refs and gap_claims are null.";
 
@@ -475,7 +482,9 @@ pub(in crate::commands) fn plan_prune(
     pending: &std::collections::BTreeSet<(String, String)>,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
-    Ok(GENERATION.plan_prune(root, pending, plan)? + rejection::plan_prune(root, pending, plan)?)
+    Ok(GENERATION.plan_prune(root, pending, plan)?
+        + REVIEW_REFUSAL.plan_prune(root, pending, plan)?
+        + rejection::plan_prune(root, pending, plan)?)
 }
 
 /// The recipes a selected extraction input was prepared under: its disclosed roster
@@ -640,23 +649,38 @@ pub(in crate::commands) fn finish_selected_controlled(
                 return Ok(SelectedFinish::ReviewRecorded(path));
             }
             Outcome::ReviewDeferred(reason) => return Ok(SelectedFinish::ReviewDeferred(reason)),
-            Outcome::NeedsAction(reason) => {
+            outcome @ (Outcome::NeedsAction(_) | Outcome::ReviewRefused { .. }) => {
+                let (reason, refusal) = match outcome {
+                    Outcome::ReviewRefused { reason, refusal } => (reason, Some(refusal)),
+                    Outcome::NeedsAction(reason) => (reason, None),
+                    _ => unreachable!("matched above"),
+                };
                 prepared.guard_pages(&mut plan);
-                plan.publish_expected(
-                    root,
-                    path,
-                    before,
-                    serde_json::to_string(&Action {
-                        schema: GENERATION.schema.into(),
+                let action = |schema: &str, reason: String| -> miette::Result<Action> {
+                    Ok(Action {
+                        schema: schema.into(),
                         task_id: task.task_id.clone(),
                         cache_hash: task.cache_hash.clone(),
                         context_revision: work.plan.subject_revision.clone(),
                         request_revision: digest(request)?,
-                        reason: reason.clone(),
+                        reason,
                     })
-                    .into_diagnostic()?,
+                };
+                plan.publish_expected(
+                    root,
+                    path,
+                    before,
+                    serde_json::to_string(&action(GENERATION.schema, reason.clone())?)
+                        .into_diagnostic()?,
                 )
                 .into_diagnostic()?;
+                if let Some(refusal) = refusal {
+                    REVIEW_REFUSAL.plan_record_first(
+                        root,
+                        &action(REVIEW_REFUSAL.schema, refusal)?,
+                        &mut plan,
+                    )?;
+                }
                 SelectedFinish::NeedsAction(reason)
             }
             Outcome::Complete(result) => {

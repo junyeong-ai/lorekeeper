@@ -102,7 +102,9 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
         if mode.startswith('needs-review') and task['kind']=='synthesize-concept':
             roster=request['inspected_resources'] if completed is not None else item['resources']
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
-            if mode=='needs-review-always' or not any(authority(entry)=='review' for entry in roster):
+            refusal=item.get('review_refusal') or request.get('review_refusal')
+            if refusal: (root/'review-refusal').write_text(refusal)
+            if (mode in ['needs-review-always','needs-review-stubborn'] or not any(authority(entry)=='review' for entry in roster)) and not (refusal and mode!='needs-review-stubborn'):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
                 (root/'review-proposals').write_text(str(proposals))
@@ -779,70 +781,89 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             "a rewritten synthesis owes nothing further: {report}"
         );
 
-        let fixture = Fixture::new("codex");
-        fixture.route_synthesis();
-        std::fs::write(fixture.root().join("mode"), "needs-review-always").unwrap();
-        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
-        let explorations = fixture.root().join("vault/wiki/explorations");
-        std::fs::create_dir_all(&explorations).unwrap();
-        let cited = &task.input["citations"][0];
-        std::fs::write(
-            explorations.join("rollback-principle.md"),
-            format!(
-                "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  kind: conflict\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
-                task.target.vault_path,
-                cited["path"].as_str().unwrap(),
-                cited["revision"].as_str().unwrap()
-            ),
-        )
-        .unwrap();
-        let report = fixture.run();
-        assert!(!fixture.done(&task), "{planned}: {report}");
-        assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["retained_progress"]["synthesis_reviews"], 1,
-            "{report}"
-        );
-        assert_eq!(
-            explorations.read_dir().unwrap().count(),
-            2,
-            "an open review of the same kind about a distinct issue never refuses a new review"
-        );
-        let report = fixture.run();
-        assert!(!fixture.done(&task), "{planned}: {report}");
-        assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["retained_progress"]["synthesis_reviews"], 0,
-            "{report}"
-        );
-        assert_eq!(
-            report["retained_progress"]["action_receipts"], 1,
-            "a proposal repeating its scoped review holds the task: {report}"
-        );
-        assert_eq!(
-            explorations.read_dir().unwrap().count(),
-            2,
-            "the repeated proposal converges on the review it repeats"
-        );
-        let calls = fixture.calls();
-        let report = fixture.run();
-        assert_eq!(
-            fixture.calls(),
-            calls,
-            "the held request spends no call: {report}"
-        );
-        assert_eq!(explorations.read_dir().unwrap().count(), 2);
+        for mode in ["needs-review-always", "needs-review-stubborn"] {
+            let fixture = Fixture::new("codex");
+            fixture.route_synthesis();
+            std::fs::write(fixture.root().join("mode"), mode).unwrap();
+            let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+            let explorations = fixture.root().join("vault/wiki/explorations");
+            std::fs::create_dir_all(&explorations).unwrap();
+            let cited = &task.input["citations"][0];
+            std::fs::write(
+                explorations.join("rollback-principle.md"),
+                format!(
+                    "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  kind: conflict\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
+                    task.target.vault_path,
+                    cited["path"].as_str().unwrap(),
+                    cited["revision"].as_str().unwrap()
+                ),
+            )
+            .unwrap();
+            let report = fixture.run();
+            assert!(!fixture.done(&task), "{planned}: {report}");
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["retained_progress"]["synthesis_reviews"], 1,
+                "{report}"
+            );
+            assert_eq!(
+                explorations.read_dir().unwrap().count(),
+                2,
+                "an open review of the same kind about a distinct issue never refuses a new review"
+            );
+            let report = fixture.run();
+            assert_eq!(report["halted"], false, "{report}");
+            assert_eq!(
+                report["retained_progress"]["synthesis_reviews"], 0,
+                "a proposal repeating its scoped review publishes nothing: {report}"
+            );
+            assert!(
+                std::fs::read_to_string(fixture.root().join("review-refusal"))
+                    .unwrap()
+                    .contains("repeats the scoped review"),
+                "the refused proposal's task is reconsidered once with the refusal: {report}"
+            );
+            assert_eq!(
+                explorations.read_dir().unwrap().count(),
+                2,
+                "the repeated proposal converges on the review it repeats"
+            );
+            if mode == "needs-review-always" {
+                assert!(
+                    fixture.done(&task),
+                    "the reconsidered finalizer completes against the review it repeated: {planned}: {report}"
+                );
+                continue;
+            }
+            assert!(!fixture.done(&task), "{report}");
+            assert_eq!(
+                report["retained_progress"]["action_receipts"], 2,
+                "a refusal after the reconsideration holds the task: {report}"
+            );
+            let calls = fixture.calls();
+            let report = fixture.run();
+            assert_eq!(
+                fixture.calls(),
+                calls,
+                "the held request spends no further call: {report}"
+            );
+        }
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();
         std::fs::write(fixture.root().join("mode"), "needs-review-concept-link").unwrap();
         let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
         let report = fixture.run();
-        assert!(!fixture.done(&task), "{planned}: {report}");
         assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["retained_progress"]["action_receipts"], 1,
-            "{report}"
+        assert!(
+            std::fs::read_to_string(fixture.root().join("review-refusal"))
+                .unwrap()
+                .contains("concept"),
+            "a refused review is reconsidered with Rust's refusal: {report}"
+        );
+        assert!(
+            fixture.done(&task),
+            "the reconsidered finalizer corrects its reply: {planned}: {report}"
         );
         assert!(!fixture.root().join("vault/wiki/explorations").exists());
     }
