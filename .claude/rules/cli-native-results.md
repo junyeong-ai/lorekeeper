@@ -114,8 +114,8 @@ paths:
   approximates that judgment by kind. A proposal repeating a scoped review exactly (kind,
   title, judgment and evidence, whatever its status, compared against every review the
   Work's scope depends on) is that review: it publishes nothing and holds the task while its
-  inputs stay current. A new review never takes the address of a removed review whose
-  absence the request guards. A target publishes at most one review per run, spent
+  inputs stay current. A new review never takes an address that folds (case, NFC) onto a
+  removed review whose absence the request guards. A target publishes at most one review per run, spent
   when it publishes: a further proposal in that run publishes and records nothing and
   defers only that target, and a repeating finalizer cannot loop through paid calls. The
   published review records its `kind` and `judged_citation_digest`, the concept citations
@@ -132,9 +132,10 @@ paths:
   scope, renders the callouts from the same capture beneath a nonblank synthesis, never in
   place of one (the evidence-gap callout with its claims, then one `[!question]` callout for
   the other reviews), and records each referenced review's kind and authored revision in
-  `llm_inputs.synthesis_reviews` as JSON text (llm inputs carry strings), `{}` when it
-  references none, so reply and result bytes carry only references and claims. A concept
-  rerender carries the record with the synthesis it preserves. A published callout follows that record: when a review
+  `llm_inputs.synthesis_reviews` as YAML-safe JSON text (llm inputs carry strings), `{}`
+  when it references none, so reply and result bytes carry only references and claims. A
+  concept rerender stamps the record in Rust with the synthesis it preserves, whatever the
+  template. A published callout follows that record: when a review
   it names is removed or no longer a review (no review metadata, or an address outside the
   vault), resolved, retyped, about other subjects or revised while open, the run's backlink
   reconciliation requests that concept's resynthesis through `graph resynthesize`, reusing

@@ -227,7 +227,7 @@ fn recorded(
                 .and_then(Value::as_array)
                 .is_some_and(|recorded| evidence_set(recorded) == evidence)
             && names_concept
-            && page.body.trim() == body.trim()
+            && page.body.trim() == body.replace("\r\n", "\n").trim()
         {
             return Ok(Some(address.clone()));
         }
@@ -373,12 +373,16 @@ fn review_path(
             format!("{stem}-{attempt}.md")
         };
         let path = directory.join(name);
-        if guarded_absent.contains(&path) {
+        let address = lk_core::vault_path::address(&path);
+        // A guarded absence is one file with any spelling a filesystem folds onto it.
+        if guarded_absent.iter().any(|absent| {
+            lk_core::fs::names_fold_together(&lk_core::vault_path::address(absent), &address)
+        }) {
             continue;
         }
         match std::fs::symlink_metadata(root.join(&path)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Some(path.to_string_lossy().into_owned()));
+                return Ok(Some(address));
             }
             Err(error) => return Err(error).into_diagnostic(),
             Ok(_) => {}
@@ -460,5 +464,26 @@ mod tests {
             "{name}"
         );
         assert!(name.ends_with(".md") && !name.contains("-.md"));
+    }
+
+    #[test]
+    fn a_review_never_takes_a_spelling_of_a_guarded_absence() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = lk_core::config::VaultDirs::default();
+        let name = |absent: &std::collections::BTreeSet<PathBuf>| {
+            review_path(
+                root.path(),
+                &dirs,
+                "Gap",
+                lk_vault::ReviewKind::Conflict,
+                absent,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let first = name(&Default::default());
+        let file = Path::new(&first).file_name().unwrap().to_str().unwrap();
+        let folded = Path::new(&first).with_file_name(file.to_uppercase().replace(".MD", ".md"));
+        assert_ne!(name(&[folded].into()), first);
     }
 }
