@@ -2285,7 +2285,7 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
                     && !published.contains("> [!"),
                 "{case}: settled reviews publish without a callout: {published}"
             );
-            assert!(recorded.is_null(), "{case}: {published}");
+            assert_eq!(recorded, &serde_json::json!({}), "{case}: {published}");
             continue;
         }
         assert!(
@@ -2294,7 +2294,7 @@ fn an_open_review_a_synthesis_references_publishes_a_rust_rendered_callout_and_r
             )),
             "{case}: {published}"
         );
-        assert_eq!(recorded[review_path], kind, "{case}: {published}");
+        assert_eq!(recorded[review_path]["kind"], kind, "{case}: {published}");
     }
 }
 

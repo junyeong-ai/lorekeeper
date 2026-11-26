@@ -296,7 +296,7 @@ pub(super) fn apply(
             let content = match reviews.record {
                 Some(record) => lk_vault::set_llm_input(&content, key, &record)
                     .ok_or_else(|| miette::miette!("cannot record referenced reviews"))?,
-                None => lk_vault::clear_llm_input(&content, key).unwrap_or(content),
+                None => content,
             };
             if !dry_run {
                 if classify_task(root, task, &mut BTreeMap::new())? != TaskStatus::Current

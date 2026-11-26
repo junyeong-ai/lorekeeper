@@ -131,10 +131,9 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
   links no concept page; `evidence` indexes the cited source pages or RSS event payloads
   it rests on. Rust publishes it as an open review of the concept recording its `kind`
-  and replans. When an open review in `open_reviews` already records the question, complete
-  the synthesis and list it in `review_refs` instead: a proposal of an open review's kind is
-  refused. An untyped open review about a different question does not record this one; a
-  concept publishes at most one review per run.
+  and replans. When an open review in `open_reviews` already records the same issue, complete
+  the synthesis and list it in `review_refs` instead; a distinct issue, even of an open
+  review's kind, gets its own review. A concept publishes at most one review per run.
 - Synthesis value: `{synthesis, related, review_refs, gap_claims}`. `review_refs` lists, by
   path, each open review in `context.purpose.parameters.open_reviews` whose question the
   synthesis leaves open, `[]` when the citations now settle every one, and `null` without

@@ -18,6 +18,21 @@ pub(super) fn request(
     {
         return Err("expected an exact vault-relative concept .md path".into());
     }
+    let evidence =
+        lk_graph::backlinks::concept_resynthesis(pages, &config.root, &config.vault_dirs, path)
+            .map_err(|e| e.to_string())?;
+    request_for(config, evidence, dry_run, session)
+}
+
+/// Requests the resynthesis `evidence` describes, computed from the caller's page scan.
+pub(super) fn request_for(
+    config: &ResolvedConfig,
+    evidence: lk_graph::backlinks::ConceptResynthesis,
+    dry_run: bool,
+    session: Option<&lk_vault::MutationSession>,
+) -> Result<serde_json::Value, String> {
+    let path = evidence.path.clone();
+    let path = path.as_path();
     if config.llm.provider != lk_core::config::LlmProvider::Queue {
         return Err("resynthesis requires llm.provider: queue".into());
     }
@@ -33,9 +48,6 @@ pub(super) fn request(
     let queue = config.root.join(".lorekeeper/queue");
     let _claim =
         crate::commands::queue::claim_writer(&queue, dry_run).map_err(|e| e.to_string())?;
-    let evidence =
-        lk_graph::backlinks::concept_resynthesis(pages, &config.root, &config.vault_dirs, path)
-            .map_err(|e| e.to_string())?;
     let target = path.to_str().ok_or("concept path must be UTF-8")?;
     let hash = lk_core::concept::citation_digest(&evidence.citations);
     let policy = if evidence.citations.iter().any(|c| c.rss_event.is_some()) {

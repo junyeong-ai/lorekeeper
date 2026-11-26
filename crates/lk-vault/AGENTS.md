@@ -115,7 +115,7 @@ canonical; SQLite navigation is derived.
 - A review may declare `kind` (`conflict`, `evidence-gap`); undeclared reviews stay valid.
   An open review naming a concept is in its synthesis scope; a synthesis that leaves its
   question open references it, and the CLI renders the callout (with the defining claims
-  for an evidence gap) and records the reference on the concept. A typed review may record
+  for an evidence gap) and records the reference and the review's revision on the concept. A typed review may record
   `judged_citation_digest`, the subject's 32-digit citation digest it was judged against;
   an untyped review or another form is invalid.
 - Before reassessment archive the review itself; read changed evidence and record a

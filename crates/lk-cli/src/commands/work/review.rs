@@ -53,17 +53,6 @@ pub(in crate::commands) fn admit(
     prepared: &Prepared,
     proposal: ReviewProposal,
 ) -> miette::Result<Result<AdmittedReview, String>> {
-    if let Some(open) = prepared
-        .result_binding()?
-        .open_reviews
-        .into_iter()
-        .find(|review| review.kind == Some(proposal.kind))
-    {
-        return Ok(Err(format!(
-            "the open review {} already records a question of this kind about the concept; complete the synthesis listing it in review_refs and state any further open question in the synthesis",
-            open.path
-        )));
-    }
     let title = proposal.title.trim();
     if title.is_empty() || title.contains('\n') || title.chars().count() > MAX_TITLE_CHARACTERS {
         return Ok(Err(format!(

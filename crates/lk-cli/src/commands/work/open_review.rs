@@ -2,9 +2,10 @@
 //! review naming the concept; the result names, in `review_refs`, those whose question it
 //! leaves open, and for an evidence-gap review the defining claims still unsupported in
 //! `gap_claims`. Publication renders the callouts beneath the synthesis from those references
-//! and the capture, and records them on the concept (`llm_inputs.synthesis_reviews`), so the
-//! marker and every reference are Rust's, and a callout follows its reviews from that record
-//! rather than from prose.
+//! and the capture, and records them with each review's authored revision on the concept
+//! (`llm_inputs.synthesis_reviews`, `{}` when it references none), so the marker and every
+//! reference are Rust's, and a callout follows its reviews from that record, never from prose
+//! whose author Rust cannot establish.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -16,16 +17,25 @@ use serde::{Deserialize, Serialize};
 /// The `llm_inputs` key recording the reviews a published synthesis references.
 pub(in crate::commands) const PUBLISHED_KEY: &str = "synthesis_reviews";
 
-/// An open review naming the synthesized concept: its address, title and kind, and whether the
-/// concept's citations changed since the review judged them. A review that records no judged
-/// citations counts as changed.
+/// An open review naming the synthesized concept: its address, title, kind and authored
+/// revision (`lk_core::concept::source_revision`), and whether the concept's citations changed
+/// since the review judged them. A review that records no judged citations counts as changed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct OpenReview {
     pub path: String,
     pub title: String,
     pub kind: Option<ReviewKind>,
+    pub revision: String,
     pub citations_changed: bool,
+}
+
+/// A referenced review as the published synthesis recorded it.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Recorded {
+    kind: Option<ReviewKind>,
+    revision: String,
 }
 
 impl OpenReview {
@@ -87,6 +97,7 @@ pub(super) fn open_reviews(
                 path: address,
                 title,
                 kind: review.kind,
+                revision: lk_core::concept::source_revision(&page),
                 citations_changed: review.judged_citation_digest.as_deref()
                     != Some(citation_digest),
             });
@@ -205,24 +216,32 @@ pub(super) fn render(
     (!callouts.is_empty()).then(|| callouts.join("\n"))
 }
 
-/// What a synthesis publication adds for its referenced reviews: the callouts beneath its body
-/// and the `llm_inputs.synthesis_reviews` record, each absent when it references none.
+/// What a synthesis publication adds for its referenced reviews: the callouts beneath its body,
+/// absent when it references none, and the `llm_inputs.synthesis_reviews` record, which every
+/// synthesis publication writes and no other result does.
 #[derive(Debug, Default)]
 pub(in crate::commands) struct PublishedReviews {
     pub callout: Option<String>,
     pub record: Option<String>,
 }
 
-/// The `llm_inputs.synthesis_reviews` value recording each referenced review and its kind, or
-/// `None` when the synthesis references none.
-pub(super) fn record(reviews: &[OpenReview], refs: &[String]) -> Option<String> {
+/// The `llm_inputs.synthesis_reviews` value recording each referenced review's kind and
+/// authored revision, `{}` when the synthesis references none.
+pub(super) fn record(reviews: &[OpenReview], refs: &[String]) -> String {
     let recorded = reviews
         .iter()
         .filter(|review| refs.contains(&review.path))
-        .map(|review| (review.path.clone(), review.kind))
+        .map(|review| {
+            (
+                review.path.clone(),
+                Recorded {
+                    kind: review.kind,
+                    revision: review.revision.clone(),
+                },
+            )
+        })
         .collect::<BTreeMap<_, _>>();
-    (!recorded.is_empty())
-        .then(|| serde_json::to_string(&recorded).expect("review record serializes"))
+    serde_json::to_string(&recorded).expect("review record serializes")
 }
 
 /// The open reviews a synthesis capture listed.
@@ -242,77 +261,42 @@ pub(super) fn locale(context: &serde_json::Value) -> miette::Result<Locale> {
         .ok_or_else(|| miette::miette!("synthesis context has no supported locale"))
 }
 
-/// The reviews the published synthesis of `concept` (page `raw`) references, with the kind
-/// each was referenced as: its `llm_inputs.synthesis_reviews` record. A synthesis published
-/// before that record existed is read from the evidence-gap callout in its synthesis section:
-/// the reference lines of a root block quote opening with the gap marker, never a quote inside
-/// code or a link inside a claim.
-fn published(concept: &str, raw: &str) -> Vec<(PathBuf, Option<ReviewKind>)> {
-    let Ok(page) = lk_core::frontmatter::parse_page(raw) else {
-        return Vec::new();
-    };
-    if let Some(recorded) = page
-        .frontmatter
-        .get(lk_core::frontmatter::field::LLM_INPUTS)
-        .and_then(|inputs| inputs.get(PUBLISHED_KEY))
-    {
-        return serde_json::from_value::<BTreeMap<String, Option<ReviewKind>>>(recorded.clone())
-            .map(|recorded| {
-                recorded
-                    .into_iter()
-                    .map(|(path, kind)| (PathBuf::from(path), kind))
-                    .collect()
-            })
-            .unwrap_or_default();
-    }
-    let Some(section) = lk_vault::resolve_section_in_body(&page.body, |s| s.concept_synthesis)
-    else {
-        return Vec::new();
-    };
-    let labels = Locale::ALL
-        .iter()
-        .map(|locale| format!("> {}: ", locale.strings().evidence_gap_review))
-        .collect::<Vec<_>>();
-    let mut references = Vec::new();
-    for quote in lk_core::markdown::root_block_quotes(section.body) {
-        let mut lines = lk_core::markdown::lines_with_endings(&section.body[quote])
-            .map(|line| line.trim_end_matches(['\r', '\n']));
-        if !lines
-            .next()
-            .is_some_and(|line| line.starts_with("> [!gap] "))
-        {
-            continue;
-        }
-        references.extend(
-            lines
-                .filter_map(|line| {
-                    labels
-                        .iter()
-                        .find_map(|label| line.strip_prefix(label.as_str()))
-                })
-                .filter_map(lk_core::link::parse_standalone_page_link)
-                .filter_map(|link| lk_core::link::resolve_dest(Path::new(concept), &link.dest))
-                .map(|path| (path, Some(ReviewKind::EvidenceGap))),
-        );
-    }
-    references
+/// What a concept's published synthesis owes its referenced reviews.
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::commands) enum PublishedState {
+    /// No `llm_inputs.synthesis_reviews` record: published before references were recorded,
+    /// or never synthesized. Nothing establishes that a callout on the page is Rust's.
+    Unrecorded,
+    /// Every recorded review is still the open review of the concept the synthesis read.
+    Current,
+    /// A recorded review was removed or is no longer a review, resolved, retyped, about other
+    /// subjects or revised since, or the record itself is invalid: the synthesis is owed again.
+    Owed,
 }
 
-/// Whether the synthesis published on `concept` (page `raw`) references a review that no longer
-/// matches its callout: removed or no longer a review, resolved, of another kind than it was
-/// referenced as, or about other subjects. That synthesis is owed again. A page that cannot be
-/// read or parsed, or whose review metadata is invalid, is left to review health; a recorded
-/// address outside the vault is no review.
-pub(in crate::commands) fn references_closed_review(
+/// The state of the synthesis published on `concept` (page `raw`) against its record. A review
+/// page that cannot be parsed, or whose review metadata is invalid, is left to review health.
+pub(in crate::commands) fn published_state(
     root: &Path,
     concept: &str,
     raw: &str,
-) -> miette::Result<bool> {
+) -> miette::Result<PublishedState> {
+    let Some(recorded) = lk_core::frontmatter::parse_page(raw).ok().and_then(|page| {
+        page.frontmatter
+            .get(lk_core::frontmatter::field::LLM_INPUTS)
+            .and_then(|inputs| inputs.get(PUBLISHED_KEY))
+            .cloned()
+    }) else {
+        return Ok(PublishedState::Unrecorded);
+    };
+    let Ok(recorded) = serde_json::from_value::<BTreeMap<String, Recorded>>(recorded) else {
+        return Ok(PublishedState::Owed);
+    };
     let owner = |address: &Path| lk_vault::resolve_page_owner(root, address).ok();
     let concept_owner = owner(Path::new(concept));
-    for (reference, kind) in published(concept, raw) {
-        let Ok(path) = lk_vault::page_path(root, &reference) else {
-            return Ok(true);
+    for (reference, recorded) in recorded {
+        let Ok(path) = lk_vault::page_path(root, Path::new(&reference)) else {
+            return Ok(PublishedState::Owed);
         };
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
@@ -324,15 +308,15 @@ pub(in crate::commands) fn references_closed_review(
                         | std::io::ErrorKind::NotADirectory
                 ) =>
             {
-                return Ok(true);
+                return Ok(PublishedState::Owed);
             }
-            Err(error) => return Err(miette::miette!("read {}: {error}", reference.display())),
+            Err(error) => return Err(miette::miette!("read {reference}: {error}")),
         };
         let Ok(page) = lk_core::frontmatter::parse_page(&raw) else {
             continue;
         };
         let Some(metadata) = page.frontmatter.get("review").cloned() else {
-            return Ok(true);
+            return Ok(PublishedState::Owed);
         };
         let Ok(review) = serde_json::from_value::<lk_vault::KnowledgeReview>(metadata) else {
             continue;
@@ -341,11 +325,15 @@ pub(in crate::commands) fn references_closed_review(
             .subjects
             .iter()
             .any(|subject| owner(Path::new(subject)) == concept_owner);
-        if review.status != lk_vault::ReviewStatus::Open || review.kind != kind || !names_concept {
-            return Ok(true);
+        if review.status != lk_vault::ReviewStatus::Open
+            || review.kind != recorded.kind
+            || !names_concept
+            || lk_core::concept::source_revision(&page) != recorded.revision
+        {
+            return Ok(PublishedState::Owed);
         }
     }
-    Ok(false)
+    Ok(PublishedState::Current)
 }
 
 #[cfg(test)]
@@ -363,86 +351,80 @@ mod tests {
             path: path.into(),
             title: "Title".into(),
             kind: Some(kind),
+            revision: format!("{path}-revision"),
             citations_changed,
         }
     }
 
     #[test]
-    fn a_published_record_follows_each_review_and_a_legacy_callout_only_its_synthesis_quote() {
+    fn a_published_record_follows_each_review_state_and_revision_and_prose_is_never_one() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path();
         std::fs::create_dir_all(root.join("wiki/concepts")).unwrap();
         std::fs::create_dir_all(root.join("wiki/explorations")).unwrap();
         let concept = "wiki/concepts/topic.md";
         std::fs::write(root.join(concept), "---\ntype: concept\n---\n").unwrap();
-        let write = |name: &str, kind: &str, status: &str| {
-            std::fs::write(
-                root.join(format!("wiki/explorations/{name}.md")),
-                review(kind, status, concept),
-            )
-            .unwrap()
+        let write = |name: &str, raw: &str| {
+            std::fs::write(root.join(format!("wiki/explorations/{name}.md")), raw).unwrap()
+        };
+        let revision = |raw: &str| {
+            lk_core::concept::source_revision(&lk_core::frontmatter::parse_page(raw).unwrap())
         };
         let recorded = |record: &str| {
             format!(
                 "---\ntype: concept\nllm_inputs:\n  synthesis_reviews: {record}\n---\n## Synthesis\nBody.\n"
             )
         };
-        let page = recorded(
-            r#"{"wiki/explorations/gap.md":"evidence-gap","wiki/explorations/conflict.md":"conflict"}"#,
+        let conflict = review("conflict", "open", concept);
+        let gap = review("evidence-gap", "open", concept);
+        write("conflict", &conflict);
+        write("gap", &gap);
+        let page = recorded(&format!(
+            r#"{{"wiki/explorations/conflict.md":{{"kind":"conflict","revision":"{}"}},"wiki/explorations/gap.md":{{"kind":"evidence-gap","revision":"{}"}}}}"#,
+            revision(&conflict),
+            revision(&gap)
+        ));
+        let state = |page: &str| published_state(root, concept, page).unwrap();
+        assert_eq!(state(&page), PublishedState::Current);
+        write(
+            "conflict",
+            &conflict.replace("The definition lacks support.", "The scope is narrower."),
         );
-        write("gap", "evidence-gap", "open");
-        write("conflict", "conflict", "open");
-        assert!(!references_closed_review(root, concept, &page).unwrap());
-        write("conflict", "conflict", "resolved");
-        assert!(references_closed_review(root, concept, &page).unwrap());
-        write("conflict", "evidence-gap", "open");
-        assert!(
-            references_closed_review(root, concept, &page).unwrap(),
-            "a review of another kind than it was referenced as"
+        assert_eq!(
+            state(&page),
+            PublishedState::Owed,
+            "an open review revised since publication owes the synthesis an update"
         );
-        write("conflict", "conflict", "open");
-        std::fs::remove_file(root.join("wiki/explorations/gap.md")).unwrap();
-        assert!(references_closed_review(root, concept, &page).unwrap());
-        std::fs::write(
-            root.join("wiki/explorations/gap.md"),
+        write(
+            "conflict",
+            &conflict.replace("status: open", "status: resolved"),
+        );
+        assert_eq!(state(&page), PublishedState::Owed);
+        write("conflict", &review("evidence-gap", "open", concept));
+        assert_eq!(state(&page), PublishedState::Owed, "retyped");
+        write(
+            "conflict",
             "---\ntype: exploration\ntitle: Gap\n---\nNo longer a review.\n",
-        )
-        .unwrap();
-        assert!(
-            references_closed_review(root, concept, &page).unwrap(),
-            "an exploration without review metadata is no longer a review"
         );
-        assert!(
-            references_closed_review(root, concept, &recorded(r#"{"../outside.md":"conflict"}"#))
-                .unwrap(),
+        assert_eq!(state(&page), PublishedState::Owed, "no longer a review");
+        std::fs::remove_file(root.join("wiki/explorations/conflict.md")).unwrap();
+        assert_eq!(state(&page), PublishedState::Owed, "removed");
+        assert_eq!(
+            state(&recorded(
+                r#"{"../outside.md":{"kind":"conflict","revision":"r"}}"#
+            )),
+            PublishedState::Owed,
             "an address outside the vault is no review"
         );
+        assert_eq!(state(&recorded("{}")), PublishedState::Current);
 
-        write("gap", "evidence-gap", "resolved");
-        let callout = "> [!gap] These defining claims await supporting evidence.\n> - See [the old question](../explorations/conflict.md).\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
-        let legacy = |synthesis: &str, related: &str| {
-            format!("---\ntype: concept\n---\n## Synthesis\n{synthesis}\n\n## Related\n{related}\n")
-        };
-        assert!(
-            references_closed_review(root, concept, &legacy(&format!("Body.\n\n{callout}"), ""))
-                .unwrap()
+        let quoted = "---\ntype: concept\n---\n## Synthesis\nBody.\n\n> [!gap] These defining claims await supporting evidence.\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
+        write("gap", &gap.replace("status: open", "status: resolved"));
+        assert_eq!(
+            state(quoted),
+            PublishedState::Unrecorded,
+            "a quote nothing establishes as Lore's never owes a rewrite"
         );
-        assert!(
-            !references_closed_review(root, concept, &legacy(&format!("```\n{callout}```"), ""))
-                .unwrap(),
-            "a quoted example inside code is no callout"
-        );
-        assert!(
-            !references_closed_review(root, concept, &legacy("Body.", callout)).unwrap(),
-            "a callout outside the synthesis section is not the synthesis's"
-        );
-        write("gap", "evidence-gap", "open");
-        assert!(
-            !references_closed_review(root, concept, &legacy(&format!("Body.\n\n{callout}"), ""))
-                .unwrap(),
-            "an open gap keeps its callout, and a link inside a claim is no reference"
-        );
-        assert!(!references_closed_review(root, concept, &recorded("{}")).unwrap());
     }
 
     #[test]
@@ -572,9 +554,9 @@ mod tests {
         );
         assert_eq!(render(Locale::En, concept, &reviews, &[], &[]), None);
         assert_eq!(
-            record(&reviews, &both).unwrap(),
-            r#"{"wiki/explorations/conflict.md":"conflict","wiki/explorations/gap.md":"evidence-gap"}"#
+            record(&reviews, &both),
+            r#"{"wiki/explorations/conflict.md":{"kind":"conflict","revision":"wiki/explorations/conflict.md-revision"},"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"wiki/explorations/gap.md-revision"}}"#
         );
-        assert_eq!(record(&reviews, &[]), None);
+        assert_eq!(record(&reviews, &[]), "{}");
     }
 }

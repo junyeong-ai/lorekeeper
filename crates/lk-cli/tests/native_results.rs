@@ -103,7 +103,7 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
                 (root/'review-proposals').write_text(str(proposals))
-                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement'+('' if proposals==1 else f', restated {proposals}'),
+                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode=='needs-review-gap' else 'conflict','title':'Deployment status disagreement',
                     'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
@@ -746,7 +746,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         assert!(
             report["stages"].as_array().unwrap().iter().any(|stage| {
                 stage["detail"].as_str().is_some_and(|detail| {
-                    detail.contains("evidence-gap callouts whose review closed")
+                    detail.contains("review callouts whose review closed or changed")
                 })
             }),
             "{report}"
@@ -764,7 +764,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         assert!(
             !report["stages"].as_array().unwrap().iter().any(|stage| {
                 stage["detail"].as_str().is_some_and(|detail| {
-                    detail.contains("evidence-gap callouts whose review closed")
+                    detail.contains("review callouts whose review closed or changed")
                 })
             }),
             "a rewritten synthesis owes nothing further: {report}"
@@ -780,7 +780,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         std::fs::write(
             explorations.join("rollback-principle.md"),
             format!(
-                "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
+                "---\ntype: exploration\ntitle: Rollback principle\nreview:\n  status: open\n  kind: conflict\n  subjects: [{}]\n  evidence:\n    - path: {}\n      revision: {}\n---\n# Rollback principle\n\nA different open question about this concept.\n",
                 task.target.vault_path,
                 cited["path"].as_str().unwrap(),
                 cited["revision"].as_str().unwrap()
@@ -797,7 +797,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         assert_eq!(
             explorations.read_dir().unwrap().count(),
             2,
-            "a distinct open question never refuses a new review"
+            "an open review of the same kind about a distinct issue never refuses a new review"
         );
         let report = fixture.run();
         assert!(!fixture.done(&task), "{planned}: {report}");
@@ -808,12 +808,12 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         );
         assert_eq!(
             report["retained_progress"]["action_receipts"], 1,
-            "a restated proposal of an open review's kind holds the task: {report}"
+            "a proposal repeating its scoped review holds the task: {report}"
         );
         assert_eq!(
             explorations.read_dir().unwrap().count(),
             2,
-            "the restated proposal converges on the open review of its kind"
+            "the repeated proposal converges on the review it repeats"
         );
         let calls = fixture.calls();
         let report = fixture.run();

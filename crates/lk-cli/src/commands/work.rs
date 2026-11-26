@@ -12,7 +12,7 @@ pub(super) mod audit;
 mod discovery;
 mod open_review;
 pub(in crate::commands) use open_review::{
-    PUBLISHED_KEY as PUBLISHED_REVIEWS_KEY, PublishedReviews, references_closed_review,
+    PUBLISHED_KEY as PUBLISHED_REVIEWS_KEY, PublishedReviews, PublishedState, published_state,
 };
 #[cfg(unix)]
 pub(super) mod generation;
@@ -595,9 +595,10 @@ fn published_reviews(prepared: &Prepared, result: &Value) -> miette::Result<Publ
     {
         return Err(publication_rejection(RejectionKind::InvalidSection, reason));
     }
-    let (Some(refs), Subject::Queue { target, .. }) = (refs, &prepared.subject) else {
+    let Subject::Queue { target, .. } = &prepared.subject else {
         return Ok(PublishedReviews::default());
     };
+    let refs = refs.unwrap_or_default();
     Ok(PublishedReviews {
         callout: open_review::render(
             open_review::locale(&prepared.context)?,
@@ -606,7 +607,7 @@ fn published_reviews(prepared: &Prepared, result: &Value) -> miette::Result<Publ
             &refs,
             claims.as_deref().unwrap_or_default(),
         ),
-        record: open_review::record(&binding.open_reviews, &refs),
+        record: Some(open_review::record(&binding.open_reviews, &refs)),
     })
 }
 

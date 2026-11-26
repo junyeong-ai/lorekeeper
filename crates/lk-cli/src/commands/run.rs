@@ -1174,7 +1174,7 @@ mod native {
                 self.supervisor.read_control(),
             )
             .and_then(|report| {
-                crate::commands::graph::request_closed_gap_resyntheses_in_session(
+                crate::commands::graph::request_review_resyntheses_in_session(
                     &self.config,
                     &session,
                     self.supervisor.read_control(),
@@ -1185,7 +1185,7 @@ mod native {
             if !self.configuration_is_current() {
                 return false;
             }
-            let (report, closed_gaps) = match synchronized {
+            let (report, review_callouts) = match synchronized {
                 Ok(synchronized) => synchronized,
                 Err(error) => return self.failure(name, error),
             };
@@ -1201,16 +1201,22 @@ mod native {
                     .filter(|owed| !owed.discarding.is_empty())
                     .count()
             );
-            if !closed_gaps.requested.is_empty() {
+            if !review_callouts.requested.is_empty() {
                 detail.push_str(&format!(
-                    "; {} synthesis request(s) for evidence-gap callouts whose review closed",
-                    closed_gaps.requested.len()
+                    "; {} synthesis request(s) for review callouts whose review closed or changed",
+                    review_callouts.requested.len()
                 ));
             }
-            if !closed_gaps.unresynthesizable.is_empty() {
+            if !review_callouts.unresynthesizable.is_empty() {
                 detail.push_str(&format!(
-                    "; {} evidence-gap callout(s) on concepts that cannot be resynthesized (no current citations or synthesis heading)",
-                    closed_gaps.unresynthesizable.len()
+                    "; {} review callout(s) on concepts that cannot be resynthesized (no current citations or synthesis heading)",
+                    review_callouts.unresynthesizable.len()
+                ));
+            }
+            if !review_callouts.unrecorded.is_empty() {
+                detail.push_str(&format!(
+                    "; {} gap callout(s) without a publication record are left as written; `lore graph resynthesize` brings one under review tracking",
+                    review_callouts.unrecorded.len()
                 ));
             }
             let skipped = &report.sync.skipped;

@@ -352,35 +352,38 @@ pub(crate) fn backlinks_sync_in_session(
 }
 
 /// The concepts whose review callout references a closed review.
+/// The concepts the review sweep found owing their callout an update, and those it cannot act on.
 #[derive(Debug, Default)]
-pub(crate) struct ClosedGapCallouts {
+pub(crate) struct ReviewCallouts {
     /// Concepts newly requested for resynthesis.
     pub requested: Vec<PathBuf>,
-    /// Concepts whose callout references a closed review but that cannot take a resynthesis
-    /// request, so the callout stays.
+    /// Concepts owing an update that cannot take a resynthesis request, so the callout stays.
     pub unresynthesizable: Vec<PathBuf>,
+    /// Concepts carrying a gap callout with no publication record. Nothing establishes that
+    /// the callout is Lore's, so it is reported, never a reason to rewrite the synthesis.
+    pub unrecorded: Vec<PathBuf>,
 }
 
-/// Requests a resynthesis of every concept whose published synthesis references a review that
-/// no longer matches its callout (`work::references_closed_review`), so the callout follows the
-/// review's state. That record is checked before the citation graph is built, so only a
-/// concept owing a request builds it. A request already pending for the same citations is
-/// reused. Alias addresses are skipped: their owner is scanned under its own address.
-pub(crate) fn request_closed_gap_resyntheses_in_session(
+/// Requests a resynthesis of every concept whose published synthesis owes its referenced
+/// reviews an update (`work::published_state`), so the callout follows each review's state and
+/// revision. The record is checked before the citation graph is built, so only a concept owing
+/// a request builds it, once. A request already pending for the same citations is reused.
+/// Alias addresses are skipped: their owner is scanned under its own address.
+pub(crate) fn request_review_resyntheses_in_session(
     config: &lk_core::config::Config,
     session: &lk_vault::MutationSession,
     read: &lk_vault::ReadControl,
-) -> Result<ClosedGapCallouts, String> {
+) -> Result<ReviewCallouts, String> {
     let rc = ResolvedConfig::from_config(session.root().to_path_buf(), Some(config));
-    closed_gap_callouts(&rc, session, read)
+    review_callouts(&rc, session, read)
 }
 
-fn closed_gap_callouts(
+fn review_callouts(
     rc: &ResolvedConfig,
     session: &lk_vault::MutationSession,
     read: &lk_vault::ReadControl,
-) -> Result<ClosedGapCallouts, String> {
-    let mut callouts = ClosedGapCallouts::default();
+) -> Result<ReviewCallouts, String> {
+    let mut callouts = ReviewCallouts::default();
     if rc.llm.provider != lk_core::config::LlmProvider::Queue {
         return Ok(callouts);
     }
@@ -403,25 +406,30 @@ fn closed_gap_callouts(
         if owner != page.path {
             continue;
         }
-        if !super::work::references_closed_review(&rc.root, &page.path.to_string_lossy(), &raw)
+        match super::work::published_state(&rc.root, &page.path.to_string_lossy(), &raw)
             .map_err(|e| e.to_string())?
         {
-            continue;
+            super::work::PublishedState::Current => continue,
+            super::work::PublishedState::Unrecorded => {
+                callouts.unrecorded.push(page.path.clone());
+                continue;
+            }
+            super::work::PublishedState::Owed => {}
         }
-        match lk_graph::backlinks::concept_resynthesis(
+        let evidence = match lk_graph::backlinks::concept_resynthesis(
             &views.scanned,
             &rc.root,
             &rc.vault_dirs,
             &page.path,
         ) {
-            Ok(_) => {}
+            Ok(evidence) => evidence,
             Err(lk_graph::GraphError::Unresynthesizable(_)) => {
                 callouts.unresynthesizable.push(page.path.clone());
                 continue;
             }
             Err(error) => return Err(format!("{}: {error}", page.path.display())),
-        }
-        let response = resynthesize::request(rc, &views.scanned, &page.path, false, Some(session))?;
+        };
+        let response = resynthesize::request_for(rc, evidence, false, Some(session))?;
         if response["data"]["already_pending"] == false {
             callouts.requested.push(page.path.clone());
         }
@@ -1045,7 +1053,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_closed_gap_callout_is_owed_only_in_the_synthesis_of_a_resynthesizable_owner() {
+    fn a_recorded_review_owes_a_resynthesis_once_per_owner_and_prose_owes_none() {
         let (root, mut config) = fixture();
         config.llm.provider = lk_core::config::LlmProvider::Queue;
         let root = root.path();
@@ -1056,27 +1064,31 @@ mod tests {
         )
         .unwrap();
         let callout = "> [!gap] These defining claims await supporting evidence.\n> - A retry is bounded.\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
-        let write = |synthesis: &str, related: &str| {
+        let write = |record: &str| {
             std::fs::write(
                 root.join(TARGET),
-                format!("---\ntype: concept\ntitle: Retry\n---\n## Synthesis\n{synthesis}\n\n## Related\n{related}\n\n## Sources\n"),
+                format!("---\ntype: concept\ntitle: Retry\n{record}---\n## Synthesis\nAnswer.\n\n{callout}\n## Related\n\n## Sources\n"),
             )
             .unwrap()
         };
         let sweep = || {
             let session = lk_vault::MutationSession::acquire(&config.root).unwrap();
-            closed_gap_callouts(&config, &session, &lk_vault::ReadControl::default()).unwrap()
+            review_callouts(&config, &session, &lk_vault::ReadControl::default()).unwrap()
         };
 
-        write("Answer.", callout);
-        let outside = sweep();
-        assert!(
-            outside.requested.is_empty() && outside.unresynthesizable.is_empty(),
-            "a resynthesis never rewrites a callout outside its synthesis: {outside:?}"
+        write("");
+        let unrecorded = sweep();
+        assert!(unrecorded.requested.is_empty(), "{unrecorded:?}");
+        assert_eq!(
+            unrecorded.unrecorded,
+            [PathBuf::from(TARGET)],
+            "a callout without a record is reported, never rewritten"
         );
 
         std::os::unix::fs::symlink("retry.md", root.join("wiki/concepts/alias.md")).unwrap();
-        write(&format!("Answer.\n\n{callout}"), "");
+        write(
+            "llm_inputs:\n  synthesis_reviews: {\"wiki/explorations/gap.md\":{\"kind\":\"evidence-gap\",\"revision\":\"r\"}}\n",
+        );
         assert_eq!(
             sweep().requested,
             [PathBuf::from(TARGET)],
