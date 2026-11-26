@@ -131,19 +131,23 @@ paths:
   context revision check, publication refuses references and claims that do not match that
   scope, renders the callouts from the same capture beneath a nonblank synthesis, never in
   place of one (the evidence-gap callout with its claims, then one `[!question]` callout for
-  the other reviews), and records each referenced review's kind and authored revision in
-  `llm_inputs.synthesis_reviews` as YAML-safe JSON text (llm inputs carry strings), `{}`
-  when it references none, so reply and result bytes carry only references and claims. A
-  concept rerender stamps the record in Rust with the synthesis it preserves, whatever the
-  template. A published callout follows that record: when a review
-  it names is removed or no longer a review (no review metadata, or an address outside the
-  vault), resolved, retyped, about other subjects or revised while open, the run's backlink
-  reconciliation requests that concept's resynthesis through `graph resynthesize`, reusing
-  a pending request. The record is checked before the citation graph is built, once, for a
-  concept owing a request. A page without a record (published before records existed) is
-  never rewritten on the strength of a callout-shaped quote, which nothing establishes as
-  Lore's: reconciliation reports it, and an explicit `graph resynthesize` brings it under
-  the record. An unreadable review is left to review health, and a removed one is not read
+  the other reviews), and records every open review it read, with its kind, authored
+  revision and whether it is referenced, in `llm_inputs.synthesis_reviews` as YAML-safe JSON
+  text (llm inputs carry strings; records from 0.160.0 list only referenced reviews and read
+  as such), `{}` when its scope held none, so reply and result bytes carry only references
+  and claims. A concept rerender stamps the record in Rust with the synthesis it preserves,
+  whatever the template. The synthesis follows that record: the run's backlink
+  reconciliation reads each recorded concept's open reviews as a capture would (its review
+  dependencies through one review inventory, then `open_reviews`) and requests its
+  resynthesis through `graph resynthesize`, reusing a pending request, when a review opened
+  or reopened, was retyped or revised, or a referenced review was removed, resolved or no
+  longer names it; an unreferenced review closing changes nothing the synthesis says. One
+  citation graph serves every concept owing a request. A record Rust cannot read is
+  reported for repair, keeps the synthesis and keeps completion nonzero. A page without a
+  record (published before records existed) is never rewritten on the strength of a
+  callout-shaped quote, which nothing establishes as Lore's, nor swept for reviews:
+  reconciliation reports a gap callout on it, and an explicit `graph resynthesize` brings it
+  under the record. An unreadable review is left to review health, and a removed one is not read
   by any capture, which guards its absence instead, so its resynthesis can be prepared;
   alias addresses are skipped for their owner; a concept that cannot take a request
   (`Unresynthesizable`: no current citations or synthesis heading) is reported and keeps

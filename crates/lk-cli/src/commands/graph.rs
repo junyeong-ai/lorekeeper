@@ -351,24 +351,27 @@ pub(crate) fn backlinks_sync_in_session(
     synchronize_backlinks(&rc, &views.scanned, false, Some(session), read)
 }
 
-/// The concepts whose review callout references a closed review.
-/// The concepts the review sweep found owing their callout an update, and those it cannot act on.
+/// The concepts the review sweep found owing their synthesis an update, and those it cannot act on.
 #[derive(Debug, Default)]
 pub(crate) struct ReviewCallouts {
     /// Concepts newly requested for resynthesis.
     pub requested: Vec<PathBuf>,
-    /// Concepts owing an update that cannot take a resynthesis request, so the callout stays.
+    /// Concepts owing an update that cannot take a resynthesis request, so the synthesis stays.
     pub unresynthesizable: Vec<PathBuf>,
     /// Concepts carrying a gap callout with no publication record. Nothing establishes that
     /// the callout is Lore's, so it is reported, never a reason to rewrite the synthesis.
     pub unrecorded: Vec<PathBuf>,
+    /// Concepts whose publication record cannot be read: reported for repair, synthesis kept.
+    pub invalid: Vec<PathBuf>,
 }
 
-/// Requests a resynthesis of every concept whose published synthesis owes its referenced
-/// reviews an update (`work::published_state`), so the callout follows each review's state and
-/// revision. The record is checked before the citation graph is built, so only a concept owing
-/// a request builds it, once. A request already pending for the same citations is reused.
-/// Alias addresses are skipped: their owner is scanned under its own address.
+/// Requests a resynthesis of every concept whose published synthesis owes the open reviews
+/// naming it an update (`work::published_state`): a review opened, revised or retyped since, or
+/// a referenced one closed. Open reviews are read as a synthesis capture reads them: the
+/// concept's review dependencies, then `work::open_reviews`, so a synthesis published from a
+/// capture is current against it. One review inventory serves every concept and one citation
+/// graph every concept owing a request. A request already pending for the same citations is
+/// reused. Alias addresses are skipped: their owner is scanned under its own address.
 pub(crate) fn request_review_resyntheses_in_session(
     config: &lk_core::config::Config,
     session: &lk_vault::MutationSession,
@@ -389,6 +392,8 @@ fn review_callouts(
     }
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
         .map_err(|e| format!("{e}"))?;
+    let mut recorded = Vec::new();
+    let mut pages = std::collections::BTreeMap::new();
     for page in &views.scanned {
         if page.format.as_deref() != Some("concept")
             || !lk_core::vault_path::is_concept_page(&page.path, &rc.vault_dirs)
@@ -398,9 +403,8 @@ fn review_callouts(
         let (raw, _) = read
             .page_text(&rc.root.join(&page.path))
             .map_err(|e| format!("{}: {e}", page.path.display()))?;
-        if !raw.contains(lk_core::frontmatter::field::SYNTHESIS_REVIEWS)
-            && !raw.contains("> [!gap] ")
-        {
+        let has_record = raw.contains(lk_core::frontmatter::field::SYNTHESIS_REVIEWS);
+        if !has_record && !raw.contains("> [!gap] ") {
             continue;
         }
         let owner = lk_vault::resolve_page_owner(&rc.root, &page.path)
@@ -408,32 +412,63 @@ fn review_callouts(
         if owner != page.path {
             continue;
         }
-        match super::work::published_state(&rc.root, &page.path.to_string_lossy(), &raw)
-            .map_err(|e| e.to_string())?
-        {
-            super::work::PublishedState::Current => continue,
-            super::work::PublishedState::Unrecorded => {
-                callouts.unrecorded.push(page.path.clone());
-                continue;
-            }
-            super::work::PublishedState::Owed => {}
+        let Ok(parsed) = lk_vault::parse_page(&raw) else {
+            continue;
+        };
+        if !has_record {
+            callouts.unrecorded.push(page.path.clone());
+            continue;
         }
-        let evidence = match lk_graph::backlinks::concept_resynthesis(
-            &views.scanned,
-            &rc.root,
-            &rc.vault_dirs,
-            &page.path,
-        ) {
+        let address = lk_core::vault_path::address(&page.path);
+        pages.insert(address.clone(), parsed);
+        recorded.push((page.path.clone(), address, raw));
+    }
+    let dependencies =
+        lk_graph::audit::review_dependencies_controlled(&rc.root, &rc.vault_dirs, &pages, read)
+            .map_err(|e| e.to_string())?;
+    let mut reviews = std::collections::BTreeMap::new();
+    let mut owed = Vec::new();
+    for (path, address, raw) in recorded {
+        let scoped = dependencies
+            .get(&address)
+            .into_iter()
+            .flatten()
+            .map(|review| review.path.clone())
+            .collect::<Vec<_>>();
+        for review in &scoped {
+            let Ok(owner) = lk_vault::resolve_page_owner(&rc.root, Path::new(review)) else {
+                continue;
+            };
+            if !reviews.contains_key(&owner)
+                && let Ok((text, _)) = read.page_text(&rc.root.join(&owner))
+            {
+                reviews.insert(owner, text.to_string());
+            }
+        }
+        let open = super::work::open_reviews(&rc.root, &address, "", &scoped, &reviews)
+            .map_err(|e| format!("{address}: {e}"))?;
+        match super::work::published_state(&raw, &open) {
+            super::work::PublishedState::Current => {}
+            super::work::PublishedState::Unrecorded => callouts.unrecorded.push(path),
+            super::work::PublishedState::Invalid => callouts.invalid.push(path),
+            super::work::PublishedState::Owed => owed.push(path),
+        }
+    }
+    let evidence =
+        lk_graph::backlinks::concept_resyntheses(&views.scanned, &rc.root, &rc.vault_dirs, &owed)
+            .map_err(|e| e.to_string())?;
+    for (path, evidence) in owed.into_iter().zip(evidence) {
+        let evidence = match evidence {
             Ok(evidence) => evidence,
             Err(lk_graph::GraphError::Unresynthesizable(_)) => {
-                callouts.unresynthesizable.push(page.path.clone());
+                callouts.unresynthesizable.push(path);
                 continue;
             }
-            Err(error) => return Err(format!("{}: {error}", page.path.display())),
+            Err(error) => return Err(format!("{}: {error}", path.display())),
         };
         let response = resynthesize::request_for(rc, evidence, false, Some(session))?;
         if response["data"]["already_pending"] == false {
-            callouts.requested.push(page.path.clone());
+            callouts.requested.push(path);
         }
     }
     Ok(callouts)
@@ -1087,18 +1122,38 @@ mod tests {
             "a callout without a record is reported, never rewritten"
         );
 
-        std::os::unix::fs::symlink("retry.md", root.join("wiki/concepts/alias.md")).unwrap();
-        write(&format!(
-            "llm_inputs:\n  synthesis_reviews: {}\n",
-            serde_json::to_string(
-                r#"{"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"r"}}"#
+        let record = |record: &str| {
+            format!(
+                "llm_inputs:\n  synthesis_reviews: {}\n",
+                serde_json::to_string(record).unwrap()
             )
-            .unwrap()
-        ));
+        };
+        write(&record(r#"{"wiki/explorations/gap.md":"#));
+        let invalid = sweep();
+        assert!(invalid.requested.is_empty(), "{invalid:?}");
+        assert_eq!(
+            invalid.invalid,
+            [PathBuf::from(TARGET)],
+            "an unreadable record is reported and its synthesis kept"
+        );
+
+        write(&record("{}"));
+        let current = sweep();
+        assert!(
+            current.requested.is_empty() && current.invalid.is_empty(),
+            "a record of no reviews is current while none is open: {current:?}"
+        );
+
+        std::os::unix::fs::symlink("retry.md", root.join("wiki/concepts/alias.md")).unwrap();
+        std::fs::write(
+            root.join("wiki/explorations/scope.md"),
+            "---\ntype: exploration\ntitle: Scope\nreview:\n  status: open\n  kind: conflict\n  subjects: [wiki/concepts/alias.md]\n  evidence: []\n  resolution: null\n---\nThe sources disagree on scope.\n",
+        )
+        .unwrap();
         assert_eq!(
             sweep().requested,
             [PathBuf::from(TARGET)],
-            "the owner is requested once, never through its alias"
+            "a review opened after publication owes the owner one request, never its alias"
         );
 
         std::fs::remove_file(root.join("wiki/documents/source.md")).unwrap();

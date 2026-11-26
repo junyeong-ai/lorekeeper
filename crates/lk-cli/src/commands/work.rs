@@ -11,7 +11,9 @@ mod action;
 pub(super) mod audit;
 mod discovery;
 mod open_review;
-pub(in crate::commands) use open_review::{PublishedReviews, PublishedState, published_state};
+pub(in crate::commands) use open_review::{
+    PublishedReviews, PublishedState, open_reviews, published_state,
+};
 #[cfg(unix)]
 pub(super) mod generation;
 #[cfg(unix)]

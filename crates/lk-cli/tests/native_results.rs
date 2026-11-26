@@ -755,7 +755,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         assert!(
             report["stages"].as_array().unwrap().iter().any(|stage| {
                 stage["detail"].as_str().is_some_and(|detail| {
-                    detail.contains("review callouts whose review closed or changed")
+                    detail.contains("concepts whose open reviews changed since their synthesis")
                 })
             }),
             "{report}"
@@ -773,7 +773,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         assert!(
             !report["stages"].as_array().unwrap().iter().any(|stage| {
                 stage["detail"].as_str().is_some_and(|detail| {
-                    detail.contains("review callouts whose review closed or changed")
+                    detail.contains("concepts whose open reviews changed since their synthesis")
                 })
             }),
             "a rewritten synthesis owes nothing further: {report}"

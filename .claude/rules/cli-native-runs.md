@@ -69,7 +69,7 @@ paths:
   progress or pausing automation; invalid reviews and failed reads remain fatal.
   Backlink reconciliation and graph lint run inside the run through the shared graph
   owners and the run's read control; reconciliation also requests the resynthesis of a
-  concept whose evidence-gap callout references a closed review (cli-native-results.md). A concept page reconciliation skips and a lint
+  concept whose recorded open reviews changed since its synthesis (cli-native-results.md). A concept page reconciliation skips and a lint
   violation name their pages: they keep completion nonzero without halting or pausing.
   Failed reads, publication conflicts and checks that could not complete stay fatal.
   Navigation refresh stays a child process so cancellation can stop its capture; its

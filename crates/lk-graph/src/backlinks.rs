@@ -699,6 +699,36 @@ pub fn concept_resynthesis(
     dirs: &VaultDirs,
     path: &Path,
 ) -> Result<ConceptResynthesis, GraphError> {
+    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
+    resynthesis_from(&evidence, pages, vault_root, dirs, path)
+}
+
+/// [`concept_resynthesis`] for several concepts from one citation graph: each concept's own
+/// refusal (`Unresynthesizable`, a missing page) stays its own, while building the graph fails
+/// all of them.
+pub fn concept_resyntheses(
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    paths: &[PathBuf],
+) -> Result<Vec<Result<ConceptResynthesis, GraphError>>, GraphError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
+    Ok(paths
+        .iter()
+        .map(|path| resynthesis_from(&evidence, pages, vault_root, dirs, path))
+        .collect())
+}
+
+fn resynthesis_from(
+    evidence: &CitationGraph<'_>,
+    pages: &[ScannedPage],
+    vault_root: &Path,
+    dirs: &VaultDirs,
+    path: &Path,
+) -> Result<ConceptResynthesis, GraphError> {
     let fail = |message: &str| GraphError::Io(message.to_owned());
     lk_vault::page_path(vault_root, path).map_err(|e| fail(&e.to_string()))?;
     let page = pages
@@ -706,7 +736,6 @@ pub fn concept_resynthesis(
         .find(|p| p.path == path)
         .filter(|p| is_concept_page(&p.path, dirs) && p.format.as_deref() == Some("concept"))
         .ok_or_else(|| fail("expected an exact existing concept Markdown path"))?;
-    let evidence = CitationGraph::build(pages, vault_root, dirs)?;
     let sources = evidence.sources_for(page);
     if sources.is_empty() {
         return Err(Unresynthesizable::NoCurrentCitations.into());

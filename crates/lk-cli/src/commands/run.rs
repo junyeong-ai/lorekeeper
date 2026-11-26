@@ -1199,7 +1199,7 @@ mod native {
             );
             if !review_callouts.requested.is_empty() {
                 detail.push_str(&format!(
-                    "; {} synthesis request(s) for review callouts whose review closed or changed",
+                    "; {} synthesis request(s) for concepts whose open reviews changed since their synthesis",
                     review_callouts.requested.len()
                 ));
             }
@@ -1215,9 +1215,27 @@ mod native {
                     review_callouts.unrecorded.len()
                 ));
             }
+            if !review_callouts.invalid.is_empty() {
+                detail.push_str(&format!(
+                    "; {} concept(s) with an unreadable review record keep their synthesis until it is repaired: {}",
+                    review_callouts.invalid.len(),
+                    review_callouts
+                        .invalid
+                        .iter()
+                        .take(3)
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
             let skipped = &report.sync.skipped;
             if skipped.is_empty() {
-                return self.record(name, StageState::Completed, Some(detail));
+                let state = if review_callouts.invalid.is_empty() {
+                    StageState::Completed
+                } else {
+                    StageState::Failed
+                };
+                return self.record(name, state, Some(detail));
             }
             let shown = skipped
                 .iter()
