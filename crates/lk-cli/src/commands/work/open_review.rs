@@ -301,6 +301,14 @@ pub(in crate::commands) fn published_state(raw: &str, open: &[OpenReview]) -> Pu
     }) else {
         return PublishedState::Invalid;
     };
+    // Every entry names a review page by its vault address and the source revision read; any
+    // other value is a damaged record, which never decides that a synthesis is owed.
+    if !recorded.iter().all(|(path, recorded)| {
+        lk_core::rss_evidence::is_page_address(path)
+            && lk_core::concept::is_source_revision(&recorded.revision)
+    }) {
+        return PublishedState::Invalid;
+    }
     // An unreferenced review is compared by presence and kind: its later edits, such as a
     // reassessment against the synthesis it pins, change nothing the synthesis says.
     let read = open.iter().all(|review| {
@@ -330,12 +338,17 @@ mod tests {
         )
     }
 
+    /// A source revision in the form `lk_core::concept::source_revision` produces.
+    fn revision_of(seed: &str) -> String {
+        blake3::hash(seed.as_bytes()).to_hex()[..32].to_string()
+    }
+
     fn open(path: &str, kind: ReviewKind, citations_changed: bool) -> OpenReview {
         OpenReview {
             path: path.into(),
             title: "Title".into(),
             kind: Some(kind),
-            revision: format!("{path}-revision"),
+            revision: revision_of(path),
             citations_changed,
         }
     }
@@ -370,7 +383,7 @@ mod tests {
             "a referenced review closed, was removed or no longer names the concept"
         );
         let revised = |review: &OpenReview| OpenReview {
-            revision: "changed".into(),
+            revision: revision_of("changed"),
             ..review.clone()
         };
         assert_eq!(
@@ -421,7 +434,7 @@ mod tests {
             published_state(
                 &page(&format!(
                     "{{{},{}}}",
-                    entry("stale"),
+                    entry(&revision_of("stale")),
                     entry(&conflict.revision)
                 )),
                 std::slice::from_ref(&conflict)
@@ -429,6 +442,26 @@ mod tests {
             PublishedState::Invalid,
             "a record naming one review twice is unreadable"
         );
+        for damaged in [
+            format!(
+                r#"{{"{}":{{"kind":"conflict","revision":"changed"}}}}"#,
+                conflict.path
+            ),
+            format!(
+                r#"{{"../conflict.md":{{"kind":"conflict","revision":"{}"}}}}"#,
+                conflict.revision
+            ),
+            format!(
+                r#"{{"wiki/explorations/conflict.txt":{{"kind":"conflict","revision":"{}"}}}}"#,
+                conflict.revision
+            ),
+        ] {
+            assert_eq!(
+                published_state(&page(&damaged), std::slice::from_ref(&conflict)),
+                PublishedState::Invalid,
+                "a readable record with an entry no capture writes is damaged, never owed: {damaged}"
+            );
+        }
         let quoted = "---\ntype: concept\n---\n## Synthesis\nBody.\n\n> [!gap] These defining claims await supporting evidence.\n>\n> Evidence gap review: [Gap](../explorations/gap.md)\n";
         assert_eq!(
             published_state(quoted, std::slice::from_ref(&gap)),
@@ -565,7 +598,11 @@ mod tests {
         assert_eq!(render(Locale::En, concept, &reviews, &[], &[]), None);
         assert_eq!(
             record(&reviews, &refs(&[&gap.path])),
-            r#"{"wiki/explorations/conflict.md":{"kind":"conflict","revision":"wiki/explorations/conflict.md-revision","referenced":false},"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"wiki/explorations/gap.md-revision","referenced":true}}"#,
+            format!(
+                r#"{{"wiki/explorations/conflict.md":{{"kind":"conflict","revision":"{}","referenced":false}},"wiki/explorations/gap.md":{{"kind":"evidence-gap","revision":"{}","referenced":true}}}}"#,
+                revision_of("wiki/explorations/conflict.md"),
+                revision_of("wiki/explorations/gap.md")
+            ),
             "every open review read is recorded, referenced or not"
         );
         assert_eq!(record(&[], &[]), "{}");

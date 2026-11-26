@@ -1156,6 +1156,17 @@ mod tests {
             "an unreadable record is reported and its synthesis kept"
         );
 
+        write(&record(
+            r#"{"wiki/explorations/gap.md":{"kind":"evidence-gap","revision":"changed"}}"#,
+        ));
+        let damaged = sweep();
+        assert!(damaged.requested.is_empty(), "{damaged:?}");
+        assert_eq!(
+            damaged.invalid,
+            [PathBuf::from(TARGET)],
+            "a readable record whose revision no capture writes is reported, never owed"
+        );
+
         write(&record("{}"));
         let current = sweep();
         assert!(

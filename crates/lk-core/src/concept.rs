@@ -135,6 +135,14 @@ pub fn source_revision(page: &crate::frontmatter::VaultPage) -> String {
     blake3::hash(&bytes).to_hex()[..32].to_string()
 }
 
+/// Whether `value` has the form `source_revision` produces: 32 lowercase hexadecimal digits.
+pub fn is_source_revision(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 /// A page as semantic work reads it when bookkeeping must not change the read: the parsed
 /// frontmatter without `BOOKKEEPING_FIELDS`, one `"key": value` line per field in key order
 /// with JSON-style flow values, then the body. Parsing first resolves anchors, quoting and
@@ -552,6 +560,15 @@ mod tests {
             original.replace("Contract", "Proposal"),
         ] {
             assert_ne!(revision(original), revision(&changed));
+        }
+        assert!(is_source_revision(&revision(original)));
+        for malformed in [
+            "changed",
+            "",
+            &revision(original).to_uppercase(),
+            &"a".repeat(64),
+        ] {
+            assert!(!is_source_revision(malformed), "{malformed}");
         }
     }
 
