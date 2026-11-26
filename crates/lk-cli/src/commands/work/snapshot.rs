@@ -183,33 +183,58 @@ pub(super) fn plan_prune(
     Ok(removed)
 }
 
-/// The sections Lore writes on a context page: a concept's synthesis, related concepts and
-/// sources list, and a document's summary and related concepts. Their bodies are derived and a
-/// later run rewrites them, so an edit there is not an authored correction.
-const OWNED_SECTIONS: [fn(&'static lk_core::i18n::Strings) -> &'static str; 5] = [
-    |s| s.concept_synthesis,
-    |s| s.related,
-    |s| s.concept_sources,
-    |s| s.summary,
-    |s| s.related_concepts,
-];
+type SectionKey = fn(&'static lk_core::i18n::Strings) -> &'static str;
 
-/// `current` with the body of each section Lore owns taken from `stored`, byte for byte, where
-/// both pages carry that section once. Frontmatter and every other section stay current, so an
-/// authored correction is read at once while a neighbor's rewrite of its derived sections is
-/// not; equal pages compose to themselves.
+/// The sections Lore writes on a context page of `format`: a concept's synthesis, related
+/// concepts and sources list, and a document's summary and related concepts. Their bodies are
+/// derived and a later run rewrites them, so an edit there is not an authored correction.
+/// Every section of any other page is the author's.
+fn owned_sections(format: &str) -> &'static [SectionKey] {
+    match format {
+        "concept" => &[
+            |s| s.concept_synthesis,
+            |s| s.related,
+            |s| s.concept_sources,
+        ],
+        "document" => &[|s| s.summary, |s| s.related_concepts],
+        _ => &[],
+    }
+}
+
+/// `current` with the content of each section Lore owns on its page format taken from
+/// `stored`, where both pages declare that format and carry that section once. The current
+/// body's trailing whitespace stays, so the next section keeps its separator, and frontmatter
+/// and every other section stay current: an authored correction is read at once
+/// while a neighbor's rewrite of its derived sections is not. Equal pages compose to
+/// themselves.
 fn compose(stored: &str, current: &str) -> String {
-    let span = |content: &str, heading: &str| {
-        lk_vault::section_body(content, heading).map(|body| {
-            let start = body.as_ptr() as usize - content.as_ptr() as usize;
-            start..start + body.len()
+    let format = |raw: &str| {
+        lk_core::frontmatter::parse_page(raw).ok().and_then(|page| {
+            page.frontmatter
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
         })
     };
+    let Some(format) = format(current).filter(|current| format(stored).as_ref() == Some(current))
+    else {
+        return current.to_owned();
+    };
+    fn body<'a>(content: &'a str, heading: &str) -> Option<(std::ops::Range<usize>, &'a str)> {
+        lk_vault::section_body(content, heading).map(|body| {
+            let start = body.as_ptr() as usize - content.as_ptr() as usize;
+            (start..start + body.len(), body)
+        })
+    }
     let mut spans = Vec::new();
-    for section in OWNED_SECTIONS {
+    for section in owned_sections(&format) {
         for heading in lk_vault::section_headings(section) {
-            if let (Some(old), Some(new)) = (span(stored, heading), span(current, heading)) {
-                spans.push((new, &stored[old]));
+            if let (Some((_, old)), Some((range, new))) =
+                (body(stored, heading), body(current, heading))
+            {
+                let trailing = &new[new.trim_end().len()..];
+                let kept = old.trim_end();
+                spans.push((range, format!("{kept}{trailing}")));
             }
         }
     }
@@ -218,7 +243,7 @@ fn compose(stored: &str, current: &str) -> String {
     let mut cursor = 0;
     for (range, body) in spans {
         composed.push_str(&current[cursor..range.start]);
-        composed.push_str(body);
+        composed.push_str(&body);
         cursor = range.end;
     }
     composed.push_str(&current[cursor..]);
@@ -274,6 +299,23 @@ mod tests {
         let renamed = stored.replace("title: Neighbor", "title: Renamed");
         assert_eq!(compose(&stored, &renamed), renamed);
         assert_eq!(compose(&stored, "not a page"), "not a page");
+
+        let exploration = |summary: &str| {
+            format!("---\ntype: exploration\ntitle: Notes\n---\n## Summary\n\n{summary}\n")
+        };
+        assert_eq!(
+            compose(&exploration("Limit is 5."), &exploration("Limit is 9.")),
+            exploration("Limit is 9."),
+            "another format's sections are its author's"
+        );
+
+        let at_end = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.";
+        let extended = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 7.\n\nNotes\n-----\nOwner: data.\n";
+        assert_eq!(
+            compose(at_end, extended),
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.\n\nNotes\n-----\nOwner: data.\n",
+            "the current separator before a following section stays"
+        );
     }
 
     #[test]

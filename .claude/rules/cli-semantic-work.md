@@ -43,9 +43,11 @@ paths:
   matches no subject, citation or review evidence also reads) through its context snapshot
   (`work/snapshot.rs`, `.lorekeeper/queue/context/`): the exact page bytes its Work first
   read, recorded in the journal that persists its Work and guarded wherever the request is
-  staged or published. A snapshotted page is read as it is now except the bodies of the
-  sections Lore derives and rewrites (a concept's synthesis, related and sources sections, a
-  document's summary and related concepts), which keep their recorded bytes. A neighbor's
+  staged or published. A snapshotted page is read as it is now except the content of the
+  sections Lore derives and rewrites on its declared format (a concept's synthesis, related
+  and sources sections, a document's summary and related concepts), which keeps its recorded
+  bytes while the current separator before the next section stays; every section of any
+  other format is its author's. A neighbor's
   resynthesis therefore does not replan the request, which would otherwise rarely finish
   while its neighbors keep changing, while an authored correction (frontmatter or any other
   section) is read at once and recorded. A request that never persisted Work has no
