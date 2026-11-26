@@ -290,11 +290,15 @@ mod native {
             limit: usize,
         },
         InvocationFailed(crate::commands::work::state::InvocationFailure),
+        /// Not sent: its host tripped `HOST_FAILURE_LIMIT` in this run.
+        HostUnavailable(String),
     }
 
     enum ResultReply {
         Complete(serde_json::Value),
         InvocationFailed(crate::commands::work::state::InvocationFailure),
+        /// Not sent: its host tripped `HOST_FAILURE_LIMIT` in this run.
+        HostUnavailable(String),
     }
 
     enum ObservationStep {
@@ -467,6 +471,20 @@ mod native {
     /// The host configuration a call ran on, by role, host and execution profile: a failure of
     /// one configuration says nothing about another.
     type HostKey = (WorkRole, HostChannel, Option<String>);
+
+    /// A call this run will not send because its host configuration tripped
+    /// `HOST_FAILURE_LIMIT`: the caller defers only that work for the rest of the run.
+    #[derive(Debug)]
+    struct HostUnavailable(String);
+
+    impl std::fmt::Display for HostUnavailable {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            self.0.fmt(formatter)
+        }
+    }
+
+    impl std::error::Error for HostUnavailable {}
+    impl miette::Diagnostic for HostUnavailable {}
 
     /// Consecutive unanswered invocation failures of one host configuration, with no answered call
     /// on it between them, that end a run. One failure is usually its own request's and is held
@@ -715,8 +733,9 @@ mod native {
         semantic_calls: usize,
         recovered_section_proposals: usize,
         budget_exhausted: bool,
-        /// A host configuration reached `HOST_FAILURE_LIMIT`; no further call is admitted, in
-        /// this job or a later batch of its campaign.
+        /// Every host configuration that answered nothing in this job reached
+        /// `HOST_FAILURE_LIMIT`, so no host remains admissible; its campaign starts no later
+        /// batch.
         #[serde(skip)]
         host_fault: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -887,6 +906,11 @@ mod native {
         drain_blocked: bool,
         inspection_deferred: std::collections::BTreeMap<String, String>,
         host_failures: std::collections::BTreeMap<HostKey, usize>,
+        /// Host configurations that reached `HOST_FAILURE_LIMIT`; this run sends them nothing
+        /// more, while other hosts keep their work.
+        tripped_hosts: std::collections::BTreeSet<HostKey>,
+        /// Host configurations that answered a call in this run.
+        answered_hosts: std::collections::BTreeSet<HostKey>,
         /// Hosts this run invoked; a host it already reached needs no probe.
         hosts_invoked: crate::commands::work::host::InvokedHosts,
         /// The probe each drain of this run is choosing, once it found no admissible work.
@@ -1023,6 +1047,10 @@ mod native {
                 && !matches!(step.outcome, WorkOutcome::Cancelled | WorkOutcome::Yielded)
             {
                 self.host_failures.remove(&step.host());
+                if step.answered {
+                    self.answered_hosts.insert(step.host());
+                    self.settle_host_fault();
+                }
             }
             if let (Some(execution), Some(host)) = (&step.execution, &step.host_end) {
                 self.hosts_invoked.insert(execution.engine, &host.profile);
@@ -1145,27 +1173,86 @@ mod native {
             if probing { limit.min(1) } else { limit }
         }
 
-        /// Counts an invocation that ended without an answer. At
-        /// `HOST_FAILURE_LIMIT` for one host configuration the run admits no further call, on
-        /// any route, and retains unfinished work as a spent budget does.
+        /// Counts an invocation that ended without an answer. At `HOST_FAILURE_LIMIT` for one
+        /// host configuration the run sends that configuration no further call and defers the
+        /// work routed to it; other configurations keep calling and returned results keep
+        /// publishing.
         fn count_host_failure(&mut self, host: HostKey) {
             let count = self.host_failures.entry(host.clone()).or_default();
             *count += 1;
-            if *count < HOST_FAILURE_LIMIT || self.result.host_fault {
+            if *count < HOST_FAILURE_LIMIT || !self.tripped_hosts.insert(host.clone()) {
                 return;
             }
             let count = *count;
-            self.result.host_fault = true;
+            self.settle_host_fault();
             let (role, channel, profile) = host;
             let name = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
             self.deferred(
                 "host failures",
                 format!(
-                    "{count} consecutive {} invocations through the {} host on profile {} failed without an answer; the run admits no further call so a shared host fault spends nothing more, and unfinished work is retained",
+                    "{count} consecutive {} invocations through the {} host on profile {} failed without an answer; the run sends that host no further call so a shared host fault spends nothing more, defers its work and continues on other hosts",
                     name(serde_json::to_value(role).expect("role serializes")),
                     name(serde_json::to_value(channel).expect("channel serializes")),
                     profile.as_deref().unwrap_or("unknown")
                 ),
+            );
+        }
+
+        /// Whether no host remains admissible: some host tripped and none that did not trip
+        /// answered in this run.
+        fn settle_host_fault(&mut self) {
+            self.result.host_fault = !self.tripped_hosts.is_empty()
+                && self
+                    .answered_hosts
+                    .iter()
+                    .all(|host| self.tripped_hosts.contains(host));
+        }
+
+        /// The deferral of a call routed to a host this run tripped, if it is one.
+        fn tripped_host(&self, metrics: &WorkStepMetrics) -> Option<HostUnavailable> {
+            let host = metrics.host();
+            self.tripped_hosts.contains(&host).then(|| {
+                HostUnavailable(format!(
+                    "profile {} failed {HOST_FAILURE_LIMIT} consecutive calls without an answer in this run; its work is deferred to a later run",
+                    host.2.as_deref().unwrap_or("unknown")
+                ))
+            })
+        }
+
+        /// Defers the current queue turn's targets for the rest of this run because their host
+        /// tripped; nothing is held, and planning continues with other targets.
+        fn defer_turn_for_host(&mut self, reason: &str) -> WorkStep {
+            let targets = self
+                .queue_turn
+                .as_ref()
+                .map(|turn| turn.targets.clone())
+                .unwrap_or_else(|| self.reserved_targets.clone());
+            for target in &targets {
+                self.finalization_replans.defer(target, reason);
+            }
+            self.replan_after_hold();
+            self.deferred(
+                "host unavailable",
+                format!("{}: {reason}", targets.join(", ")),
+            );
+            WorkStep::Deferred(reason.into())
+        }
+
+        /// Defers audit subjects for the rest of this run because their host tripped; nothing
+        /// is held.
+        fn defer_audit_for_host<'a>(
+            &mut self,
+            paths: impl IntoIterator<Item = &'a str>,
+            reason: &str,
+        ) {
+            let paths = paths.into_iter().collect::<Vec<_>>();
+            for path in &paths {
+                self.audit_screening_deferred
+                    .insert((*path).to_owned(), reason.to_owned());
+            }
+            self.deferred(
+                "host unavailable",
+                format!("{}: {reason}", paths.join(", ")),
             );
         }
 
@@ -1827,7 +1914,10 @@ mod native {
             let name = name.to_owned();
             if let Some(agent) = self.agents.get(&name) {
                 metrics.execution = Some(agent.execution.clone());
-                return Ok(());
+                return match self.tripped_host(metrics) {
+                    Some(unavailable) => Err(unavailable.into()),
+                    None => Ok(()),
+                };
             }
             let mut profile = profile.clone();
             let executable = execution::executable_path(profile.executable())?;
@@ -2003,6 +2093,9 @@ mod native {
                 return None;
             }
             if let Err(error) = self.prepare_agent(metrics).await {
+                if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                    return Some(ObservationReply::HostUnavailable(unavailable.to_string()));
+                }
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                     self.record(
@@ -2172,6 +2265,12 @@ mod native {
             let Some(reply) = self.request_observation(request.clone(), metrics).await else {
                 return ObservationStep::Failed;
             };
+            if let ObservationReply::HostUnavailable(reason) = reply {
+                self.inspection_deferred.insert(id.into(), reason.clone());
+                self.queue_admitted.clear();
+                self.deferred("host unavailable", format!("{node}: {reason}"));
+                return ObservationStep::Deferred(reason);
+            }
             self.record_observation(id, node, &request, completed, reply, metrics)
                 .await
         }
@@ -2192,6 +2291,9 @@ mod native {
                     return Some(crate::commands::work::InspectionResponse::InvocationFailed(
                         failure,
                     ));
+                }
+                ObservationReply::HostUnavailable(_) => {
+                    unreachable!("an unsent observation is deferred before it is decoded")
                 }
             };
             let answerless = execution::observation::is_answerless(engine, &bytes);
@@ -2487,9 +2589,6 @@ mod native {
         }
 
         fn call_limit_available(&mut self) -> bool {
-            if self.result.host_fault {
-                return false;
-            }
             if let Some(control) = &mut self.automation {
                 if !control.check_duration() {
                     return self.record_automation_stop();
@@ -2776,6 +2875,21 @@ mod native {
             let mut engines = Vec::new();
             for turn in &mut turns {
                 if let Err(error) = self.prepare_agent(&mut turn.metrics).await {
+                    if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                        let reason = unavailable.to_string();
+                        for mut turn in turns {
+                            self.inspection_deferred
+                                .insert(turn.work_id.clone(), reason.clone());
+                            if let Some(target) = &turn.target {
+                                self.finalization_replans.defer(target, &reason);
+                            }
+                            turn.metrics.outcome = WorkOutcome::Rejected;
+                            self.record_work_step(turn.metrics);
+                        }
+                        self.queue_admitted.clear();
+                        self.deferred("host unavailable", reason);
+                        return Some(true);
+                    }
                     for mut turn in turns {
                         turn.metrics.outcome = if self.result.cancelled {
                             WorkOutcome::Cancelled
@@ -3199,7 +3313,11 @@ mod native {
                 );
                 return None;
             }
+            metrics.channel = HostChannel::Result;
             if let Err(error) = self.prepare_agent(metrics).await {
+                if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                    return Some(ResultReply::HostUnavailable(unavailable.to_string()));
+                }
                 self.agent_preflight_failure("native result host", error);
                 return None;
             }
@@ -3241,7 +3359,6 @@ mod native {
             if !self.reserve_calls(1) {
                 return None;
             }
-            metrics.channel = HostChannel::Result;
             let started = Instant::now();
             let child = self
                 .supervisor
@@ -3363,6 +3480,9 @@ mod native {
             };
             let response = match self.request_result(&result.request, &schema, metrics).await {
                 Some(ResultReply::Complete(response)) => response,
+                Some(ResultReply::HostUnavailable(reason)) => {
+                    return self.defer_turn_for_host(&reason);
+                }
                 Some(ResultReply::InvocationFailed(failure)) => {
                     return self
                         .hold_failed_request(metrics, |runner, session| {
@@ -3614,6 +3734,9 @@ mod native {
                 .await
             {
                 Some(ResultReply::Complete(value)) => value,
+                Some(ResultReply::HostUnavailable(reason)) => {
+                    return self.defer_turn_for_host(&reason);
+                }
                 Some(ResultReply::InvocationFailed(failure)) => {
                     let step = self
                         .hold_failed_request(&mut metrics, |runner, session| {
@@ -3821,6 +3944,9 @@ mod native {
                 .request_observation(section.request.clone(), metrics)
                 .await
             {
+                Some(ObservationReply::HostUnavailable(reason)) => {
+                    return self.defer_turn_for_host(&reason);
+                }
                 Some(ObservationReply::InvocationFailed(failure)) => Err(failure),
                 Some(ObservationReply::Output { engine, bytes, .. }) => {
                     match execution::finalization::decode(
@@ -3948,6 +4074,9 @@ mod native {
                 .await
             {
                 Some(ResultReply::Complete(value)) => value,
+                Some(ResultReply::HostUnavailable(reason)) => {
+                    return self.defer_turn_for_host(&reason);
+                }
                 Some(ResultReply::InvocationFailed(failure)) => {
                     return self
                         .hold_failed_request(metrics, |runner, session| {
@@ -4629,6 +4758,23 @@ mod native {
             let mut engines = Vec::new();
             for (_, turn) in &mut turns {
                 if let Err(error) = self.prepare_agent(turn.metrics_mut()).await {
+                    if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                        let reason = unavailable.to_string();
+                        for (target, _) in &turns {
+                            self.finalization_replans.defer(target, &reason);
+                        }
+                        let targets = turns
+                            .iter()
+                            .map(|(target, _)| target.clone())
+                            .collect::<Vec<_>>();
+                        self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                        self.replan_after_hold();
+                        self.deferred(
+                            "host unavailable",
+                            format!("{}: {reason}", targets.join(", ")),
+                        );
+                        return true;
+                    }
                     self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
                     return self.agent_preflight_failure("bounded queue receipt", error);
                 }
@@ -6510,6 +6656,17 @@ mod native {
                 }
                 let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
                 let response = self.request_result(&native, &schema, &mut metrics).await;
+                if let Some(ResultReply::HostUnavailable(reason)) = &response {
+                    self.defer_audit_for_host([candidate.path.as_str()], reason);
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit selection replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
+                }
                 let output = match response {
                     Some(ResultReply::Complete(response)) => {
                         match execution::preparation::screening_output(
@@ -6529,6 +6686,9 @@ mod native {
                     Some(ResultReply::InvocationFailed(failure)) => Err(
                         crate::commands::work::preparation::Disposition::invocation_failed(failure),
                     ),
+                    Some(ResultReply::HostUnavailable(_)) => {
+                        unreachable!("an unsent screening is deferred before its outcome")
+                    }
                     None => {
                         self.record_work_step(metrics);
                         return None;
@@ -7416,6 +7576,8 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
+            tripped_hosts: std::collections::BTreeSet::new(),
+            answered_hosts: std::collections::BTreeSet::new(),
             hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
             host_probes: HostProbes::default(),
             audit_screening_deferred: std::collections::BTreeMap::new(),

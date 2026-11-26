@@ -432,6 +432,51 @@ fn consecutive_unanswered_finalizers_end_the_run(mode: &str) {
 }
 
 #[test]
+fn a_failing_profile_trips_alone_while_a_healthy_profile_keeps_its_work() {
+    let fixture = Fixture::new("codex");
+    fixture.route_synthesis();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 64"),
+    )
+    .unwrap();
+    let synthesis = ["first", "second", "third"].map(|name| {
+        fixture
+            .add(name, lk_queue::TaskKind::SynthesizeConcept, true)
+            .0
+    });
+    let extraction = ["alpha", "beta", "gamma"].map(|name| {
+        fixture
+            .add(name, lk_queue::TaskKind::ExtractConcepts, false)
+            .0
+    });
+    std::fs::write(fixture.root().join("mode"), "host-exit-synthesizer").unwrap();
+    let report = fixture.run();
+    assert_eq!(report["halted"], false, "{report}");
+    let stages = report["stages"].as_array().unwrap();
+    let named = |name: &str| stages.iter().filter(|stage| stage["name"] == name).count();
+    assert_eq!(named("host failures"), 1, "{report}");
+    assert!(named("host unavailable") >= 1, "{report}");
+    assert!(
+        extraction.iter().all(|task| fixture.done(task)),
+        "the healthy profile keeps calling after the other trips: {report}"
+    );
+    assert!(synthesis.iter().all(|task| !fixture.done(task)));
+    let held = std::fs::read_dir(
+        fixture
+            .root()
+            .join("vault/.lorekeeper/queue/generation-rejections"),
+    )
+    .unwrap()
+    .count();
+    assert_eq!(
+        held, 2,
+        "the tripped profile is sent nothing more; its remaining work is deferred, not held: {report}"
+    );
+}
+
+#[test]
 fn native_generation_failure_reports_only_observed_host_metadata() {
     for (engine, mode) in [
         ("codex", "host-failure"),

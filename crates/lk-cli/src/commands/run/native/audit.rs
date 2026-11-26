@@ -337,6 +337,15 @@ impl Runner<'_> {
                 .await
             {
                 Some(ResultReply::Complete(response)) => response,
+                Some(ResultReply::HostUnavailable(reason)) => {
+                    self.defer_audit_for_host(
+                        subjects
+                            .iter()
+                            .map(|subject| subject.candidate.path.as_str()),
+                        &reason,
+                    );
+                    return;
+                }
                 Some(ResultReply::InvocationFailed(failure)) => {
                     let originals = slots
                         .iter()

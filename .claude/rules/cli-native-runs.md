@@ -160,11 +160,12 @@ paths:
   observation or tool-result host, and execution profile) when the run records its step,
   and an answered call on that configuration, usable or not, clears its count. Below `HOST_FAILURE_LIMIT` (2) consecutive
   failures of one configuration the run replans without the held requests and continues
-  its independent work; at the limit the run admits no further call, through the same
-  gate as a spent call budget, for every later stage and drain, and its campaign stops
-  (`host-fault`) instead of starting another batch, without pausing the
-  scheduled operation or counting semantic progress, because a repeat points at a shared
-  host fault. Signal exits,
+  its independent work; at the limit the run sends that configuration no further call,
+  because a repeat points at a shared fault of that host: work routed to it is deferred
+  for the rest of the run, unheld, while other configurations keep calling and returned
+  results keep publishing. Only when no configuration that answered in the run remains
+  untripped does its campaign stop (`host-fault`) instead of starting another batch,
+  without pausing the scheduled operation or counting semantic progress. Signal exits,
   process cleanup failure, local I/O, unusable tool-enabled replies and unknown errors
   remain fatal.
   An unanswered failure cannot tell a host fault from a request the host cannot serve, so

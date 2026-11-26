@@ -282,6 +282,10 @@ impl Runner<'_> {
         metrics.stages.push(ExecutionStage::Discovery);
         let response = self.request_result(&request, &schema, &mut metrics).await;
         let outcome = match response {
+            Some(ResultReply::HostUnavailable(reason)) => {
+                self.defer_turn_for_host(&reason);
+                return true;
+            }
             Some(ResultReply::InvocationFailed(failure)) => {
                 Err(Disposition::invocation_failed(failure))
             }
@@ -473,6 +477,13 @@ impl Runner<'_> {
                 .iter()
                 .map(|_| Err(Disposition::invocation_failed(failure.clone())))
                 .collect(),
+            Some(ResultReply::HostUnavailable(reason)) => {
+                self.defer_audit_for_host(
+                    subjects.iter().map(|subject| subject.path.as_str()),
+                    &reason,
+                );
+                return true;
+            }
             None => {
                 self.record_work_step(metrics);
                 return false;
