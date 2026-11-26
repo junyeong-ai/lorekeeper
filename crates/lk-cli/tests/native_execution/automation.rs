@@ -224,19 +224,26 @@ fn inspection_timeouts_hold_until_the_host_answers_and_an_exact_explicit_retry_c
 
 #[test]
 fn a_probe_wave_sends_one_call_until_its_host_gives_an_outcome() {
-    // Each call marks itself in flight; a detached watcher clears the mark once the process
-    // (the same pid after `exec`) ends, so the count a call takes shows its overlapping calls.
+    // Each call leaves a marker named by its pid, which stays the host's pid after `exec`; a
+    // call counts the markers whose process is still alive, so a finished call never counts.
     let tracked = r#"if [ -f "$TEST_EXECUTION_ROOT/fail" ]; then exit 7; fi
 mkdir -p "$TEST_EXECUTION_ROOT/inflight"
-mark="$TEST_EXECUTION_ROOT/inflight/$$"
-touch "$mark"
-(while kill -0 $$ 2>/dev/null; do sleep 0.1; done; rm -f "$mark") </dev/null >/dev/null 2>&1 &
+touch "$TEST_EXECUTION_ROOT/inflight/$$"
 sleep 1
-ls "$TEST_EXECUTION_ROOT/inflight" | wc -l | tr -d ' ' >> "$TEST_EXECUTION_ROOT/concurrency"
+alive=0
+for marker in "$TEST_EXECUTION_ROOT"/inflight/*; do
+  if kill -0 "${marker##*/}" 2>/dev/null; then alive=$((alive + 1)); fi
+done
+echo "$alive" >> "$TEST_EXECUTION_ROOT/concurrency"
 "#;
     for engine in ["codex", "claude-code"] {
         let behavior = format!("{tracked}{RECORD_BOUNDED_AUDIT}");
         let fixture = bounded_audit_fixture(engine, 64, &behavior);
+        let subject = fixture.root().join("vault/wiki/concepts/large.md");
+        let body = std::fs::read_to_string(&subject).unwrap()
+            + &"\nFurther evidence clause that widens the partitioned Work.\n".repeat(540);
+        std::fs::write(subject, body).unwrap();
+        record_discovery(&fixture, "wiki/concepts/large.md");
         let config = std::fs::read_to_string(&fixture.config)
             .unwrap()
             .replace("max_calls: 64}", "max_calls: 64, max_parallel: 4}");
