@@ -56,7 +56,9 @@ paths:
   Compatible roles share a fair contiguous prefix; serial finalizers and discovery
   remain boundaries. Never filter past those boundaries or reserve skipped targets: a
   target none of whose wave turns is sent (its host tripped in the run) leaves the eligible
-  set before the reservation, which is checked against that same set.
+  set before the reservation, which is checked against that same set. Selecting a turn
+  never writes the cursor: a queue or audit turn, single or a wave, is reserved only after
+  its hosts are prepared and its calls would be admitted (budget, duration, cancellation).
   A later exact evidence action ends the queue read prefix without discarding earlier
   eligible requests. Charge that prefix through its current admission before replanning;
   an empty held prefix invokes no host and reserves no turn.

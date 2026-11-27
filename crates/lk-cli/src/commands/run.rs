@@ -953,6 +953,9 @@ mod native {
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
+        /// The audit subject selected for a single bounded step and the keys it was ordered
+        /// among; its cursor turn is reserved with its call (`reserve_turn`).
+        audit_turn: Option<(std::collections::BTreeSet<String>, String)>,
         /// Targets of the turn reserved for the current host invocation. Reservation consumes
         /// `queue_turn`; a finalization whose inputs changed afterwards charges these targets.
         reserved_targets: Vec<String>,
@@ -2386,7 +2389,7 @@ mod native {
                     return None;
                 }
             }
-            if !self.reserve_queue_turn().await {
+            if !self.reserve_turn().await {
                 if self.result.cancelled {
                     metrics.outcome = WorkOutcome::Cancelled;
                 }
@@ -2866,6 +2869,30 @@ mod native {
             false
         }
 
+        /// Whether `count` calls would be admitted now: the configuration, call limit,
+        /// duration, cancellation and automation allowance checks `reserve_calls` makes,
+        /// without recording a reservation. A turn's cursor is reserved only once this passes,
+        /// so a turn the budget or duration refuses keeps its place.
+        fn admits_calls(&mut self, count: usize) -> bool {
+            if !self.configuration_is_current() || !self.call_limit_available() {
+                return false;
+            }
+            if self.supervisor.is_cancelled() {
+                return self.record(
+                    "agent admission",
+                    StageState::Cancelled,
+                    Some("cancelled before invocation".into()),
+                );
+            }
+            if let Some(control) = &mut self.automation
+                && control.available() < count
+            {
+                control.stop_for_limit();
+                return self.record_automation_stop();
+            }
+            true
+        }
+
         fn reserve_calls(&mut self, count: usize) -> bool {
             if !self.configuration_is_current() || !self.call_limit_available() {
                 return false;
@@ -2919,9 +2946,25 @@ mod native {
             );
         }
 
-        async fn reserve_queue_turn(&mut self) -> bool {
-            if !self.configuration_is_current() {
+        /// Reserves the pending single turn, a queue turn or an audit subject, once its call
+        /// would be admitted; the reserved call follows.
+        async fn reserve_turn(&mut self) -> bool {
+            if !self.admits_calls(1) {
                 return false;
+            }
+            if let Some((keys, subject)) = self.audit_turn.take() {
+                let Some((session, _)) = self.mutation_session("audit scheduling").await else {
+                    return false;
+                };
+                if let Err(error) = scheduler::reserve_in_session(
+                    &session,
+                    scheduler::Stage::Audit,
+                    &keys,
+                    std::slice::from_ref(&subject),
+                ) {
+                    return self.failure("audit scheduling", error);
+                }
+                return true;
             }
             let Some(turn) = self.queue_turn.take() else {
                 return true;
@@ -3166,12 +3209,16 @@ mod native {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>();
             let keys = &eligible;
-            let reservations = reserved_targets[1..]
+            let reservations = reserved_targets
                 .iter()
                 .filter(|subject| !unsent.contains(*subject))
                 .cloned()
                 .collect::<Vec<_>>();
             let reservations = reservations.as_slice();
+            if !self.admits_calls(requests.len()) {
+                self.record_uninvoked_observations(turns);
+                return Some(false);
+            }
             {
                 let Some((session, waited)) =
                     self.mutation_session("bounded work scheduling").await
@@ -3607,7 +3654,7 @@ mod native {
             };
             self.configure_child(&mut agent.command);
             agent.command.current_dir(&self.root);
-            if !self.reserve_queue_turn().await {
+            if !self.reserve_turn().await {
                 return None;
             }
             if !self.reserve_calls(1) {
@@ -5086,6 +5133,10 @@ mod native {
             if turns.is_empty() {
                 self.replan_after_hold();
                 return true;
+            }
+            if !self.admits_calls(requests.len()) {
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                return false;
             }
             {
                 let Some((session, waited)) = self.mutation_session("queue scheduling").await
@@ -7614,22 +7665,19 @@ mod native {
                         Some(target) => std::collections::BTreeSet::from([target]),
                         None => jobs.keys().cloned().collect(),
                     };
-                    let Some((session, _)) = self.mutation_session("audit scheduling").await else {
-                        return false;
-                    };
-                    let selected = match scheduler::select_in_session(
-                        &session,
-                        scheduler::Stage::Audit,
-                        &keys,
-                    ) {
-                        Ok(Some(selected)) => selected,
-                        Ok(None) => break,
-                        Err(error) => {
-                            self.failure("audit scheduling", error);
-                            return false;
-                        }
-                    };
-                    drop(session);
+                    // The turn is chosen without writing the cursor; it is reserved only once
+                    // its calls are prepared and admitted.
+                    let selected =
+                        match scheduler::order(&self.root, scheduler::Stage::Audit, &keys) {
+                            Ok(order) => match order.into_iter().next() {
+                                Some(selected) => selected,
+                                None => break,
+                            },
+                            Err(error) => {
+                                self.failure("audit scheduling", error);
+                                return false;
+                            }
+                        };
                     let work = &jobs[&selected];
                     if let Some(completed) = self.bounded_audit_wave(&selected, &jobs, &keys).await
                     {
@@ -7638,7 +7686,10 @@ mod native {
                         }
                         continue;
                     }
-                    match self.bounded_step(work, ExecutionStage::Audit).await {
+                    self.audit_turn = Some((keys.clone(), selected.clone()));
+                    let step = self.bounded_step(work, ExecutionStage::Audit).await;
+                    self.audit_turn = None;
+                    match step {
                         WorkStep::Pending => continue,
                         WorkStep::Deferred(reason) => {
                             self.deferred("bounded audit action", reason);
@@ -7960,6 +8011,7 @@ mod native {
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
+            audit_turn: None,
             reserved_targets: Vec::new(),
             queue_replan: QueueReplan::None,
             writer_access_failed: false,

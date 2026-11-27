@@ -245,7 +245,8 @@ pub(super) fn select(
     select_in_session(&session, stage, candidates)
 }
 
-pub(super) fn select_in_session(
+#[cfg(test)]
+fn select_in_session(
     session: &lk_vault::MutationSession,
     stage: Stage,
     candidates: &BTreeSet<String>,
