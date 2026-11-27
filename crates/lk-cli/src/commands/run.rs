@@ -3000,26 +3000,27 @@ mod native {
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
-            // A turn routed to a host this run tripped is deferred alone; the wave still sends
-            // the turns of healthy hosts, and the reservation still covers every planned turn.
+            // A turn routed to a host this run tripped is deferred alone, and the wave still
+            // sends the turns of healthy hosts.
             let mut ready = Vec::new();
-            let mut pending = turns.into_iter();
-            while let Some(mut turn) = pending.next() {
+            let mut sent_subjects = Vec::new();
+            let mut pending = turns.into_iter().zip(reserved_targets.iter());
+            while let Some((mut turn, subject)) = pending.next() {
                 if let Err(error) = self.prepare_agent(&mut turn.metrics).await {
                     if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
                         let reason = unavailable.to_string();
                         self.inspection_deferred
                             .insert(turn.work_id.clone(), reason.clone());
-                        let subject = jobs
-                            .iter()
-                            .find(|(_, id)| **id == turn.work_id)
-                            .map_or(turn.work_id.as_str(), |(path, _)| path.as_str());
                         self.deferred("host unavailable", format!("{subject}: {reason}"));
                         turn.metrics.outcome = WorkOutcome::Rejected;
                         self.record_work_step(turn.metrics);
                         continue;
                     }
-                    for mut turn in ready.into_iter().chain([turn]).chain(pending) {
+                    for mut turn in ready
+                        .into_iter()
+                        .chain([turn])
+                        .chain(pending.map(|(turn, _)| turn))
+                    {
                         turn.metrics.outcome = if self.result.cancelled {
                             WorkOutcome::Cancelled
                         } else {
@@ -3046,12 +3047,30 @@ mod native {
                 requests.push(request);
                 directories.push(directory);
                 ready.push(turn);
+                sent_subjects.push(subject.clone());
             }
             let turns = ready;
             if turns.is_empty() {
                 return Some(true);
             }
-            let reservations = &reserved_targets[1..];
+            // The cursor passes only subjects this wave sends: a subject none of whose turns
+            // was sent leaves the eligible set, and the reservation is checked against the rest.
+            let unsent = reserved_targets
+                .iter()
+                .filter(|subject| !sent_subjects.contains(subject))
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let eligible = keys
+                .difference(&unsent)
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            let keys = &eligible;
+            let reservations = reserved_targets[1..]
+                .iter()
+                .filter(|subject| !unsent.contains(*subject))
+                .cloned()
+                .collect::<Vec<_>>();
+            let reservations = reservations.as_slice();
             {
                 let Some((session, waited)) =
                     self.mutation_session("bounded work scheduling").await
@@ -4989,18 +5008,29 @@ mod native {
                         .filter(|binding| seen.insert(binding.target.clone()))
                         .cloned()
                         .collect::<Vec<_>>();
-                    // The cursor passes every planned target, a deferred one included, so the
-                    // reservation matches the order the wave was planned in.
+                    // The cursor passes only targets this wave sends: a target none of whose
+                    // turns was sent leaves the eligible set, and the reservation is checked
+                    // against the rest, in the order the wave was planned.
+                    let unsent = planned
+                        .iter()
+                        .filter(|target| !turns.iter().any(|(sent, _)| sent == *target))
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let eligible = keys
+                        .difference(&unsent)
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
                     let mut reserved = std::collections::BTreeSet::new();
                     let targets = planned
                         .iter()
+                        .filter(|target| !unsent.contains(*target))
                         .filter(|target| reserved.insert((*target).clone()))
                         .cloned()
                         .collect::<Vec<_>>();
                     if let Err(error) = scheduler::reserve_in_session(
                         &session,
                         scheduler::Stage::Queue,
-                        keys,
+                        &eligible,
                         &targets,
                     ) {
                         return self.failure("queue scheduling", error);

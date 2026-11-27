@@ -54,7 +54,9 @@ paths:
 - `execution.work.max_parallel` defaults to 1 and bounds simultaneous dependency-ready
   evidence observers and distinct-target candidate screening within remaining calls.
   Compatible roles share a fair contiguous prefix; serial finalizers and discovery
-  remain boundaries. Never filter past those boundaries or reserve skipped targets.
+  remain boundaries. Never filter past those boundaries or reserve skipped targets: a
+  target none of whose wave turns is sent (its host tripped in the run) leaves the eligible
+  set before the reservation, which is checked against that same set.
   A later exact evidence action ends the queue read prefix without discarding earlier
   eligible requests. Charge that prefix through its current admission before replanning;
   an empty held prefix invokes no host and reserves no turn.
