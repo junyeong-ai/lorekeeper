@@ -37,8 +37,9 @@ actual provider model, effective effort, tokens or billed cost. The top-level
 the job profile and aggregate budget. Stage routing is described in
 [optional stage profiles](../../lore-setup/references/config.md#optional-stage-profiles).
 A skipped `synthesis review refused` stage names the concept and why Rust refused its
-synthesis's review proposal; the synthesis the reply carried published instead, and the
-reason is never written to a vault page.
+synthesis's review proposal; the synthesis the reply carried was staged instead and
+publishes with the next queue application like any staged result, so read the
+publication result for whether it published. The reason is never written to a vault page.
 
 A failed structured host includes `host_failure`. Its `phase` is `version-preflight`,
 `invocation` or `response`; preflight never consumes a semantic call. It reports the

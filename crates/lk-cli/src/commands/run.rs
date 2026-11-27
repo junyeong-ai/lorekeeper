@@ -3768,8 +3768,8 @@ mod native {
         }
 
         /// The queue targets the bounded finalization in flight answers.
-        /// A refused review proposal is reported, never written to the vault: its synthesis
-        /// published without it.
+        /// A refused review proposal is reported, never written to the vault: the synthesis its
+        /// reply carried was staged without it.
         fn record_refused_review(&mut self, refusal: Option<String>) {
             if let Some(refusal) = refusal {
                 self.record(
