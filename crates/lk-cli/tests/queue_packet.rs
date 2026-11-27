@@ -1,11 +1,14 @@
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use lk_core::concept::{Citation, citation_digest, file_revision, source_revision};
 use serde_json::{Value, json};
 
 fn run(root: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
             cmd.env_remove(key);
@@ -197,7 +200,7 @@ fn rss_original_packet_command_uses_exact_root_even_with_another_configured_vaul
         .skip(1)
         .map(|v| v.as_str().unwrap())
         .collect::<Vec<_>>();
-    let out = Command::new(env!("CARGO_BIN_EXE_lore"))
+    let out = home::lore_command()
         .arg("--config")
         .arg(other.path().join("config.yaml"))
         .args(argv)

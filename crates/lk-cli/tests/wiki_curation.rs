@@ -1,9 +1,12 @@
+#[path = "support/home.rs"]
+mod home;
+
 use lk_core::concept::{file_revision, source_revision};
 use serde_json::{Value, json};
-use std::{path::Path, process::Command};
+use std::path::Path;
 
 fn run(config: &Path, args: &[&str]) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("LORE_")) {
         command.env_remove(key);
     }

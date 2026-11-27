@@ -8,7 +8,10 @@
 //! carry no information at all — at which point a link pointing at nothing is ignored along with
 //! them.
 
-use std::process::{Command, Output};
+#[path = "support/home.rs"]
+mod home;
+
+use std::process::Output;
 
 /// A shipped caller that discards the exit code makes every violation invisible again, so the
 /// property is checked by RUNNING the native coordinator rather than by reading it.
@@ -103,7 +106,7 @@ impl Workspace {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut cmd = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 cmd.env_remove(key);
@@ -130,7 +133,7 @@ impl Workspace {
         let config = self.root.path().join("pipeline-config.yaml");
         let base = std::fs::read_to_string(self.root.path().join("config.yaml")).expect("config");
         std::fs::write(&config, format!("{base}llm:\n  provider: noop\n")).expect("write config");
-        Command::new(env!("CARGO_BIN_EXE_lore"))
+        home::lore_command()
             .arg("--config")
             .arg(config)
             .args(["run", "process", "--json"])

@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -62,6 +65,7 @@ impl Fixture {
 
     fn command_without_config(&self) -> Command {
         let mut command = Command::new(&self.binary);
+        home::isolate(&mut command);
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("LORE_") {
                 command.env_remove(key);

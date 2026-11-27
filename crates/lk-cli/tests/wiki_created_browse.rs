@@ -1,4 +1,5 @@
-use std::process::Command;
+#[path = "support/home.rs"]
+mod home;
 
 #[test]
 fn keyword_search_composes_exact_ownership_path_and_declared_created_bounds() {
@@ -33,7 +34,7 @@ fn keyword_search_composes_exact_ownership_path_and_declared_created_bounds() {
         std::fs::write(path, format!("---\ntype: document\ntitle: Evidence\ncreated: {created}\nsource_identity: {identity}\ntags: [adr]\n---\n## Summary\nRetention decision.\n")).unwrap();
     }
     let run = |args: &[&str]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 command.env_remove(key);
@@ -162,7 +163,7 @@ fn created_browse_cli_exposes_declared_dates_and_refuses_invalid_ranges() {
         .unwrap();
     }
     let run = |args: &[&str]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 command.env_remove(key);

@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -169,7 +172,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         command
             .arg("--config")
             .arg(&self.config)

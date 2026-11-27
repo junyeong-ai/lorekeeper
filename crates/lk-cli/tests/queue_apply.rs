@@ -5,9 +5,12 @@
 //! it twice before a drain enqueues the same target again, under the same input hash, and
 //! both tasks classify current. Drain both and `queue apply` gets two results for one page.
 
+#[path = "support/home.rs"]
+mod home;
+
 use lk_queue::TaskRequest;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn extraction_request(seed: &str) -> lk_queue::ExtractConceptsRequest {
     lk_queue::ExtractConceptsRequest {
@@ -265,7 +268,7 @@ impl Workspace {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut cmd = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 cmd.env_remove(key);

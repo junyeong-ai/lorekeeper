@@ -1,4 +1,5 @@
-use std::process::Command;
+#[path = "support/home.rs"]
+mod home;
 
 #[test]
 fn cli_provenance_resolves_successor_with_pinned_pagination_without_writes() {
@@ -13,7 +14,7 @@ fn cli_provenance_resolves_successor_with_pinned_pagination_without_writes() {
     std::fs::write(documents.join("old.md"), old).unwrap();
     std::fs::write(documents.join("new.md"), new).unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_lore"))
+        home::lore_command()
             .arg("--config")
             .arg(&config)
             .args(args)

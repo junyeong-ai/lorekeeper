@@ -1,8 +1,11 @@
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn check(root: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_lore"))
+    home::lore_command()
         .args(["queue", "check", "--root"])
         .arg(root)
         .output()

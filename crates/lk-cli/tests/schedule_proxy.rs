@@ -1,5 +1,7 @@
 //! Schedule generation preserves only explicitly selected network environment.
-use std::process::Command;
+
+#[path = "support/home.rs"]
+mod home;
 
 const KEYS: [&str; 8] = [
     "HTTP_PROXY",
@@ -30,7 +32,7 @@ fn generate_with_extra(
         body.push_str(extra);
         std::fs::write(config, body).unwrap();
     }
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             cmd.env_remove(key);

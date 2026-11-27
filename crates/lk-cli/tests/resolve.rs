@@ -5,13 +5,16 @@
 //! of guessing. The exit code IS the answer, and each of the three is a different decision,
 //! so each is pinned here.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
 fn lore(root: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("LORE_")) {
         command.env_remove(key);
     }

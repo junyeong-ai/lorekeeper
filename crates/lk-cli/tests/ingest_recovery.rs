@@ -1,4 +1,7 @@
-use std::process::{Command, Output};
+#[path = "support/home.rs"]
+mod home;
+
+use std::process::Output;
 
 #[path = "support/task_history.rs"]
 mod task_history;
@@ -10,7 +13,7 @@ fn invoke(config: &std::path::Path, args: &[&str]) -> Output {
 }
 
 fn invoke_command(config: &std::path::Path, args: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             command.env_remove(key);

@@ -1,10 +1,13 @@
 //! Explicit config selection must not turn a root override into a different registry.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn resolve(workspace: &Path, selected: Option<&Path>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     command
         .current_dir(workspace)
         .env_remove("LORE_CONFIG")

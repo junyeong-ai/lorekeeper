@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/home.rs"]
+mod home;
+
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -666,7 +669,7 @@ impl Fixture {
         std::fs::write(self.root().join("stage-synthesis"), "enabled").unwrap();
     }
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         command
             .args(["--config", self.config.to_str().unwrap()])
             .env("XDG_CONFIG_HOME", self.root().join("config"))

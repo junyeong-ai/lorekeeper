@@ -5,11 +5,14 @@
 //! measured that, which is how it shipped, and nothing measured the fix either — so a read
 //! quietly joining the refusal would ship the same way.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn run(config: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
             cmd.env_remove(key);
@@ -291,7 +294,7 @@ fn task_writers_keep_claimed_root_and_refuse_inherited_drift_before_recovery() {
         let pending =
             serde_json::to_vec(&serde_json::json!({"version":1,"plan":recovery})).unwrap();
         std::fs::write(&journal, &pending).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("LORE_") {
                 command.env_remove(key);

@@ -1,8 +1,12 @@
 //! SQLite navigation replaces Markdown exports; concept identity inventory remains complete.
-use std::process::{Command, Output};
+
+#[path = "support/home.rs"]
+mod home;
+
+use std::process::Output;
 
 fn run(root: &std::path::Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     // Hermetic: depend only on the test's --config, never an ambient LORE_* env var.
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
@@ -300,7 +304,7 @@ fn wiki_concepts_refuses_a_registry_it_could_not_read_completely() {
     )
     .expect("broken");
 
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_lore"))
+    let out = home::lore_command()
         .arg("--config")
         .arg(root.join("config.yaml"))
         .args(["wiki", "concepts", "--json"])

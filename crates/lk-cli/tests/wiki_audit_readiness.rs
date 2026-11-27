@@ -1,6 +1,9 @@
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use lk_core::concept::{file_revision, source_revision};
 use serde_json::{Value, json};
@@ -35,7 +38,7 @@ impl Fixture {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("LORE_")) {
             command.env_remove(key);
         }

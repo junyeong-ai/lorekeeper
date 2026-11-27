@@ -1,4 +1,7 @@
-use std::process::{Command, Output};
+#[path = "support/home.rs"]
+mod home;
+
+use std::process::Output;
 
 #[test]
 fn explicit_concept_link_repair_restores_exact_bodies_without_semantic_republication() {
@@ -8,7 +11,7 @@ fn explicit_concept_link_repair_restores_exact_bodies_without_semantic_republica
     let config = workspace.path().join("config.yaml");
     std::fs::write(&config, "vault: {root: vault, locale: en}\nidentity: {name: Tester, email: tester@example.com}\nsources:\n  notes:\n    type: manual\n    params: {inbox_dir: inbox}\n").unwrap();
     let run = |arguments: &[&str]| -> Output {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 command.env_remove(key);

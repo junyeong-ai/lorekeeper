@@ -8,8 +8,11 @@
 //! pointing at a file that no longer exists — and `lore graph broken` cannot report it,
 //! because it matches destinations at the id level and so believes the link still resolves.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 struct Workspace {
     root: tempfile::TempDir,
@@ -52,7 +55,7 @@ impl Workspace {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut cmd = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 cmd.env_remove(key);

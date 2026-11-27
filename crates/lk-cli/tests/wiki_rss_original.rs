@@ -1,5 +1,8 @@
 //! RSS evidence discovery stays bounded and independent of mutable feed configuration.
-use std::process::Command;
+
+#[path = "support/home.rs"]
+mod home;
+
 #[test]
 fn original_cli_pins_rss_event_body_without_changing_manual_shape() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -13,7 +16,7 @@ fn original_cli_pins_rss_event_body_without_changing_manual_shape() {
     drop(session);
     std::fs::write(root.join("daily.md"),format!("---\ntype: daily\nsource: feed\ncreated: 2026-10-18\nsource_record: {}\n---\nAbridged.\n",serde_json::json!({"rss_original":reference}))).unwrap();
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_lore"))
+        home::lore_command()
             .arg("--config")
             .arg(&config)
             .args(args)
@@ -121,7 +124,7 @@ fn rss_ingest_preserves_original_before_page_and_dry_run_stores_nothing() {
     let ingest = |dry_run: bool| {
         let (url, server) = local_feed(feed.clone());
         std::fs::write(&config,format!("vault:\n  root: {}\n  timezone: UTC\nidentity:\n  name: Test\n  email: test@example.com\nsources:\n  feed:\n    type: rss\n    params:\n      feeds:\n        - id: stable-feed\n          url: {url}\n",root.display())).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 command.env_remove(key);

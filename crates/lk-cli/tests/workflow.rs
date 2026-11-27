@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -33,7 +36,7 @@ fn retarget(alias: &Path, target: &Path) {
 }
 
 fn workflow(config: &Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             command.env_remove(key);
@@ -288,7 +291,7 @@ fn partial_or_malformed_root_context_is_not_accepted() {
         Some("not-json"),
         Some("{\"device\":0,\"inode\":0,\"unknown\":1}"),
     ] {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         command
             .arg("--config")
             .arg(&config)
@@ -305,7 +308,7 @@ fn partial_or_malformed_root_context_is_not_accepted() {
         let error = String::from_utf8_lossy(&output.stderr);
         assert!(error.contains("workflow vault"), "{error}");
     }
-    let output = Command::new(env!("CARGO_BIN_EXE_lore"))
+    let output = home::lore_command()
         .arg("--config")
         .arg(&config)
         .args(["config", "vault-root"])
@@ -422,7 +425,7 @@ fn child_gets_selected_canonical_config_and_template_without_cli_flags() {
     let (dir, config) = fixture();
     let template = dir.path().join("templates");
     std::fs::create_dir(&template).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_lore"))
+    let output = home::lore_command()
         .current_dir(dir.path())
         .arg("--config")
         .arg("config.yaml")
@@ -482,7 +485,7 @@ fn renamed_executable_cannot_silently_delegate_to_another_lore() {
     let (dir, config) = fixture();
     let renamed = dir.path().join("selected-custom-name");
     std::fs::copy(env!("CARGO_BIN_EXE_lore"), &renamed).unwrap();
-    let output = Command::new(&renamed)
+    let output = home::isolate(&mut Command::new(&renamed))
         .arg("--config")
         .arg(&config)
         .args(["workflow", "--", "/bin/sh", "-c", "printf must-not-start"])
@@ -499,7 +502,7 @@ fn explicit_wait_runs_after_the_foreground_holder_releases() {
     let (_dir, config) = fixture();
     let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
     let mut waiting = Held(
-        Command::new(env!("CARGO_BIN_EXE_lore"))
+        home::lore_command()
             .arg("--config")
             .arg(&config)
             .args(["workflow", "--wait", "--", "/usr/bin/true"])
@@ -527,7 +530,7 @@ fn an_admitted_waiter_gets_the_next_workflow_before_a_new_batch_can_barge() {
     let (directory, config) = fixture();
     let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
     let mut waiter = Held(
-        Command::new(env!("CARGO_BIN_EXE_lore"))
+        home::lore_command()
             .arg("--config")
             .arg(&config)
             .args([
@@ -630,7 +633,7 @@ fn a_waiting_workflow_refuses_changed_configuration_before_starting_its_child() 
     let (mut holder, _) = held(&config, "printf 'ready\\n'; read -r release");
     let marker = directory.path().join("must-not-start");
     let error = directory.path().join("wait-error");
-    let mut waiter = Command::new(env!("CARGO_BIN_EXE_lore"))
+    let mut waiter = home::lore_command()
         .arg("--config")
         .arg(&config)
         .env("LORE_INSTALL_DATA_DIR", directory.path().join("data"))
@@ -683,7 +686,7 @@ fn a_waiting_workflow_refuses_retargeted_root_before_starting_its_child() {
     let (_holder, _) = held(&config, "printf 'ready\\n'; read -r release");
     let marker = directory.path().join("must-not-start");
     let error = directory.path().join("root-wait-error");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     command
         .arg("--config")
         .arg(&config)

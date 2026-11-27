@@ -1,11 +1,15 @@
 //! Semantic dependencies are explicit selections; unrelated daily interpretation is not input.
+
+#[path = "support/home.rs"]
+mod home;
+
 use lk_core::{
     concept::{Citation, citation_digest, file_revision},
     rss_evidence::RssEventSelection,
 };
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::Output,
 };
 
 struct Fixture {
@@ -87,7 +91,7 @@ impl Fixture {
         )
         .unwrap();
         let cli = |args: &[&str]| {
-            let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+            let mut command = home::lore_command();
             for (key, _) in std::env::vars() {
                 if key.starts_with("LORE_") {
                     command.env_remove(key);
@@ -158,7 +162,7 @@ impl Fixture {
         self.tmp.path()
     }
     fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut cmd = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 cmd.env_remove(key);

@@ -3,10 +3,13 @@
 //! vault. Each decision is unit-tested beside the code that makes it; this pins the wiring from
 //! those decisions to the output a user reads.
 
-use std::process::{Command, Output};
+#[path = "support/home.rs"]
+mod home;
+
+use std::process::Output;
 
 fn run(config: &std::path::Path) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     // Hermetic: depend only on the test's --config, never an ambient LORE_* env var.
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
@@ -67,7 +70,7 @@ fn a_vault_whose_dirs_are_what_they_say_produces_no_warning() {
     let config = write_config(tmp.path(), "    wiki: wiki\n");
     // `lore schema` owns AGENTS.md; generate it so the only remaining warning is silenced and
     // "no warnings" means the disk checks agreed rather than that they were never reached.
-    let mut schema = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut schema = home::lore_command();
     schema
         .arg("schema")
         .arg("--config")

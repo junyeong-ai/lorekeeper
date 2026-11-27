@@ -1,5 +1,8 @@
 //! Explicit ingest writer waiting must not change refusal or read-only defaults.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -28,7 +31,7 @@ impl Workspace {
     }
 
     fn base_command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars_os() {
             if key.to_string_lossy().starts_with("LORE_") {
                 command.env_remove(key);

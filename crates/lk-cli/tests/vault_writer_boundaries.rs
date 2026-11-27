@@ -1,6 +1,10 @@
 //! Cooperating CLI writers share one vault lease; observations and dry runs don't recover journals.
+
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
@@ -16,7 +20,7 @@ fn fixture() -> tempfile::TempDir {
 }
 
 fn run(root: &Path, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut cmd = home::lore_command();
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
             cmd.env_remove(key);
@@ -130,7 +134,7 @@ fn scheduled_writers_wait_then_read_after_the_previous_writer_finishes() {
         let dir = fixture();
         let vault = dir.path().join("vault");
         let held = lk_vault::MutationSession::acquire(&vault).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         for (key, _) in std::env::vars() {
             if key.starts_with("LORE_") {
                 command.env_remove(key);
@@ -182,7 +186,7 @@ fn maintenance_retires_unconfigured_intent_only_under_the_configuration_it_read(
     std::fs::write(&config, base).unwrap();
 
     let plane = lk_task::PlaneLock::hold(&vault).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
             command.env_remove(key);

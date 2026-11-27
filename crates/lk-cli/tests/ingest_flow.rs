@@ -8,8 +8,11 @@
 //! params resolve against the vault root (never the CWD the test happens to
 //! run in), so vault-root anchoring is proven end-to-end here too.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 struct Workspace {
     root: tempfile::TempDir,
@@ -45,7 +48,7 @@ impl Workspace {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut cmd = home::lore_command();
         // Scrub every Lorekeeper env var so the run depends ONLY on the test's
         // `--config` and tempdir — a developer's ambient `LORE_CONFIG`,
         // `LORE_TEMPLATE_DIR`, or `LORE_JIRA_*` credentials must never leak in and

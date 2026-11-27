@@ -1,6 +1,10 @@
 //! Scheduled jobs use configured execution profiles and captured, credential-free paths.
+
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn workspace(engine: Option<&str>) -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
@@ -13,7 +17,7 @@ fn workspace(engine: Option<&str>) -> tempfile::TempDir {
 }
 
 fn render(root: &Path, format: &str, environment: &[(&str, &std::ffi::OsStr)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             command.env_remove(key);

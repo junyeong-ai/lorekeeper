@@ -19,6 +19,9 @@
 //! [`EXEMPT`] with its reason. A hand-kept list would be the same allowlist
 //! this exists to complement.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
@@ -526,8 +529,7 @@ const STAGED: &str = "<staged>";
 /// reports to stdout and stderr both, and which stream a message takes is part
 /// of what a consumer depends on.
 fn observe(staged: &Path, argv: &[&str]) -> String {
-    let out = Command::cargo_bin("lore")
-        .expect("lore binary")
+    let out = Command::from_std(home::lore_command())
         // From the staging directory, so anything a command derives from its CWD normalises
         // with everything else. `lore schedule` emits `# Working dir: <cwd>`, which run from
         // the crate would pin one developer's absolute path into the snapshot and fail for
@@ -574,8 +576,7 @@ fn observe(staged: &Path, argv: &[&str]) -> String {
             .expect("refresh reports its captured snapshot");
         assert_eq!(snapshot.len(), 64);
         assert!(snapshot.bytes().all(|byte| byte.is_ascii_hexdigit()));
-        let verified = Command::cargo_bin("lore")
-            .unwrap()
+        let verified = Command::from_std(home::lore_command())
             .arg("--config")
             .arg(staged.join("corpus/config.yaml"))
             .args(["wiki", "browse", "--snapshot", snapshot, "--json"])
@@ -840,8 +841,7 @@ fn a_root_override_is_spelled_like_a_configured_one() {
     let cwd = cwd_dir.path().canonicalize().expect("canonicalize");
 
     let schema_path = |root: &str| -> String {
-        let out = Command::cargo_bin("lore")
-            .expect("lore binary")
+        let out = Command::from_std(home::lore_command())
             .current_dir(&cwd)
             .env("HOME", &home)
             .env_remove("LORE_CONFIG")
@@ -879,8 +879,7 @@ fn a_root_override_is_spelled_like_a_configured_one() {
 #[test]
 fn scheduling_uses_native_commands_without_installed_scripts() {
     let staged = stage();
-    let out = Command::cargo_bin("lore")
-        .expect("lore binary")
+    let out = Command::from_std(home::lore_command())
         .current_dir(staged.path())
         .arg("--config")
         .arg(staged.path().join("corpus/config.yaml"))

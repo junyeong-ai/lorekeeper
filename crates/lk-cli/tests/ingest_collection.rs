@@ -1,5 +1,8 @@
 //! Acquisition budgets and the boundary between collection and page publication.
 
+#[path = "support/home.rs"]
+mod home;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
@@ -16,7 +19,7 @@ impl Drop for Foreground {
 }
 
 fn command(config: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("LORE_") {
             command.env_remove(key);

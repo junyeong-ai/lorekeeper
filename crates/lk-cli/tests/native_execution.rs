@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[path = "support/home.rs"]
+mod home;
+
 #[path = "support/task_history.rs"]
 mod task_history;
 
@@ -92,7 +95,7 @@ impl Fixture {
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+        let mut command = home::lore_command();
         command
             .arg("--config")
             .arg(&self.config)
@@ -326,7 +329,7 @@ fn record_discovery(fixture: &Fixture, path: &str) {
 }
 
 fn screen_fixture_candidates(fixture: &Fixture, path: &str) {
-    let result = Command::new("python3")
+    let result = home::isolate(&mut Command::new("python3"))
         .arg(fixture.root().join("screen-audit-fixture.py"))
         .arg(path)
         .env("TEST_EXECUTION_ROOT", fixture.root())

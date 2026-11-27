@@ -1,8 +1,11 @@
+#[path = "support/home.rs"]
+mod home;
+
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 fn run(config: &Path, dry_run: bool) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_lore"));
+    let mut command = home::lore_command();
     for (key, _) in std::env::vars() {
         if key.starts_with("LORE_") {
             command.env_remove(key);
