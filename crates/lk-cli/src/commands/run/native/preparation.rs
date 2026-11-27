@@ -283,6 +283,7 @@ impl Runner<'_> {
         let response = self.request_result(&request, &schema, &mut metrics).await;
         let outcome = match response {
             Some(ResultReply::HostUnavailable(reason)) => {
+                self.record_work_step(metrics);
                 self.defer_turn_for_host(&reason);
                 return true;
             }
@@ -478,6 +479,7 @@ impl Runner<'_> {
                 .map(|_| Err(Disposition::invocation_failed(failure.clone())))
                 .collect(),
             Some(ResultReply::HostUnavailable(reason)) => {
+                self.record_work_step(metrics);
                 self.defer_audit_for_host(
                     subjects.iter().map(|subject| subject.path.as_str()),
                     &reason,

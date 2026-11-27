@@ -628,6 +628,102 @@ fn an_assessment_whose_host_cannot_start_is_recorded_as_unsent() {
 }
 
 #[test]
+fn discovery_and_selected_requests_whose_host_cannot_start_are_recorded_as_unsent() {
+    let unsent = |report: &serde_json::Value, role: &str| {
+        report["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| run["work_steps"].as_array().unwrap())
+            .any(|step| step["role"] == role && step["outcome"] == "unsent")
+    };
+    // An audit subject without discovery.
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("undiscovered.md"),
+        include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
+    )
+    .unwrap();
+    // An oversized extraction, which records discovery before planning its Work.
+    let (extraction, _) = progressive_extraction_fixture("codex", RECORD_AUDIT, 2, 65536, 16384);
+    let config = std::fs::read_to_string(&extraction.config)
+        .unwrap()
+        .replace(
+            "max_input_bytes: 65536, max_result_bytes: 16384",
+            "max_input_bytes: 65536, max_result_bytes: 1024",
+        );
+    std::fs::write(&extraction.config, config).unwrap();
+    let source = "Transactional outbox commits an event with its state change.\n\n".repeat(2000);
+    let vault = extraction.root().join("vault");
+    let queue = vault.join(".lorekeeper/queue");
+    let task = lk_queue::QueueLlmClient::new(queue.clone()).build_task(
+        "ext",
+        lk_queue::TaskKind::ExtractConcepts,
+        lk_queue::ExtractConceptsRequest {
+            concept_policy: lk_core::config::ConceptPolicy::SupportedNew,
+            rss_original: None,
+            text: source.clone(),
+            source_id: "notes".into(),
+            source_type: lk_core::config::SourceType::Manual,
+            date: jiff::civil::date(2026, 10, 20),
+            focus: None,
+            locale: lk_core::i18n::Locale::En,
+            categories: Vec::new(),
+            target: lk_queue::TaskTarget {
+                vault_path: "wiki/documents/source.md".into(),
+                kind: lk_queue::TargetKind::DocumentConcepts,
+                anchor: "## Related Concepts".into(),
+            },
+        },
+    );
+    std::fs::write(vault.join("wiki/documents/source.md"), format!("---\ntype: document\ntitle: Source\nllm_inputs:\n  concepts: {}\n---\n## Summary\nSource observation.\n\n## Content\n{source}\n\n## Related Concepts\n", task.cache_hash)).unwrap();
+    std::fs::write(
+        queue.join("fixture.jsonl"),
+        serde_json::to_string(&task).unwrap() + "\n",
+    )
+    .unwrap();
+    // A full-context extraction sent whole.
+    let (selected, _) = progressive_extraction_fixture("codex", RECORD_AUDIT, 0, 65536, 16384);
+    let config = std::fs::read_to_string(&selected.config).unwrap().replace(
+        "work: {extraction_context: progressive}",
+        "work: {extraction_context: full-context}",
+    );
+    std::fs::write(&selected.config, config).unwrap();
+    for (fixture, operation, stage, role) in [
+        (&fixture, "knowledge", "discovery", "discovery"),
+        (&extraction, "process", "discovery", "discovery"),
+        (&selected, "process", "extraction", "finalizer"),
+    ] {
+        super::stage_profiles::route_profiles(
+            fixture,
+            "codex",
+            &[(stage, "routed")],
+            &[("routed", "codex")],
+        );
+        configure(fixture, Some(64), 120);
+        std::fs::remove_file(fixture.root().join("routed executable")).unwrap();
+        let report = run(fixture, operation, false);
+        assert!(
+            report["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|run| run["halted"] == false),
+            "{operation} {stage}: {report}"
+        );
+        assert!(
+            unsent(&report, role),
+            "{operation} {stage}: the request that was never sent is in the report: {report}"
+        );
+    }
+}
+
+#[test]
 fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() {
     // Each passes the preflight's metadata check, which only finds the executable; the last
     // also answers `--version`, then cannot start for its first semantic call.

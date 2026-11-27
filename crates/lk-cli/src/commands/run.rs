@@ -4240,6 +4240,7 @@ mod native {
             {
                 Some(ResultReply::Complete(value)) => value,
                 Some(ResultReply::HostUnavailable(reason)) => {
+                    self.record_work_step(metrics);
                     return self.defer_turn_for_host(&reason);
                 }
                 Some(ResultReply::InvocationFailed(failure)) => {
