@@ -67,9 +67,11 @@ and CLI discovery, not a second graph authority.
   evidence or direct links; excluded candidate bytes remain publication guards.
   Evidence-associated card reviews bind identity and input guards without becoming
   assessment subject reviews.
-  Absent selection metadata retains the exact legacy full-context derivation.
-  Explicit discovery adoption guards the current pending subject and complete input
-  before enabling screening. It retains queries and required evidence/context;
+  Absent selection metadata retains the exact legacy full-context derivation until the
+  subject is adopted. Discovery adoption (`selection::adopt`: explicitly through
+  `wiki audit-discover --adopt-screening`, and by a native knowledge run for each due subject
+  it admits) guards the current pending subject and complete input before enabling
+  screening; a current subject is never adopted, since its legacy derivation verifies it. It retains queries and required evidence/context;
   unknown candidates still block assessment. Preview publishes and recovers nothing;
   existing assessments and predecessor Work are never rewritten.
   Callers guard current processing actions separately from capacity-only admission.

@@ -82,7 +82,7 @@ fn whole_actions_preserve_independent_progress_and_ignore_batch_peers_on_both_ho
 }
 
 #[test]
-fn legacy_discovery_adoption_preserves_current_actions_without_another_host_call() {
+fn a_due_legacy_subject_is_adopted_once_and_its_action_holds_without_another_call() {
     for engine in ["codex", "claude-code"] {
         let fixture = fixture(engine);
         let subject = "wiki/concepts/a-held.md";
@@ -96,8 +96,10 @@ fn legacy_discovery_adoption_preserves_current_actions_without_another_host_call
             .unwrap()
             .remove("selection");
         std::fs::write(&ledger, serde_json::to_vec(&state).unwrap()).unwrap();
+        // The run adopts screening for the due subject before its assessment states an action.
         let (_, report) = fixture.run("knowledge");
         assert_eq!(report["semantic_calls"], 1, "{report}");
+        assert_eq!(report["audit_adoptions"], 1, "{report}");
         let action_before = std::fs::read(action(&fixture)).unwrap();
         let output = fixture
             .command()
@@ -107,6 +109,7 @@ fn legacy_discovery_adoption_preserves_current_actions_without_another_host_call
         assert!(output.status.success());
         let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let candidate = &plan["candidates"][0];
+        assert!(!candidate["discovery"]["selection"].is_null(), "{plan}");
         let request = fixture.root().join("adoption.json");
         std::fs::write(&request, serde_json::to_vec(&serde_json::json!({"path":subject,"file_revision":candidate["file_revision"],"input_revision":candidate["input_revision"]})).unwrap()).unwrap();
         let before = std::fs::read(&ledger).unwrap();
@@ -119,28 +122,17 @@ fn legacy_discovery_adoption_preserves_current_actions_without_another_host_call
                 command.arg("--dry-run");
             }
             let output = command.output().unwrap();
-            assert!(!output.status.success());
+            assert!(output.status.success());
+            let adoption: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(adoption["changed"], false, "{adoption}");
             assert_eq!(std::fs::read(&ledger).unwrap(), before);
             assert_eq!(std::fs::read(action(&fixture)).unwrap(), action_before);
         }
         let (_, report) = fixture.run("knowledge");
         assert_eq!(report["semantic_calls"], 0, "{report}");
         assert_eq!(report["halted"], false, "{report}");
-        std::fs::write(action(&fixture), b"{}").unwrap();
-        let output = fixture
-            .command()
-            .args([
-                "wiki",
-                "audit-discover",
-                "--adopt-screening",
-                "--dry-run",
-                "--file",
-            ])
-            .arg(&request)
-            .output()
-            .unwrap();
-        assert!(!output.status.success());
-        assert_eq!(std::fs::read(action(&fixture)).unwrap(), b"{}");
+        assert_eq!(report["audit_adoptions"], 0, "{report}");
+        assert_eq!(std::fs::read(action(&fixture)).unwrap(), action_before);
     }
 }
 

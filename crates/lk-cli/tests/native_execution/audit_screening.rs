@@ -62,7 +62,7 @@ if mode=='edit-peer' and not (root/'peer-edited').exists():
             page=root/'vault'/page
             page.write_text(page.read_text()+'\nA concurrent correction.\n')
 response={'status':'complete','reason':None,'decisions':[{'candidate_ref':card['candidate_ref'],
-    'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'not-selected'),
+    'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'inspect' if mode=='inspect' else 'not-selected'),
     'reason':'The declared scope is inapplicable, or its explicit prerequisite is unresolved.'}
     for card in request['candidates']]}
 if mode=='missing': response['decisions']=[]
@@ -304,6 +304,73 @@ fn native_audit_screening_reads_again_a_subject_whose_candidates_changed_during_
             let packet = json(&fixture, &["wiki", "audit-candidates", subject]);
             assert_eq!(packet["progress"]["unknown"], 0, "{subject}: {packet}");
         }
+    }
+}
+
+#[test]
+fn native_knowledge_adopts_screening_for_a_due_legacy_recipe_and_leaves_a_current_one() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 6, "inspect", false, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 1", "max_calls: 4");
+        std::fs::write(&fixture.config, config).unwrap();
+        let current = "wiki/documents/legacy-current.md";
+        std::fs::write(
+            fixture.root().join("vault").join(current),
+            "---\ntype: document\ntitle: Legacy current\n---\nA settled note.\n",
+        )
+        .unwrap();
+        discover(&fixture, current, &["unrelated settled"]);
+        // Both recipes were recorded before screening existed.
+        let state = fixture
+            .root()
+            .join("vault/.lorekeeper/knowledge-audit.json");
+        let mut receipts: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        for path in [SUBJECT, current] {
+            receipts["discovery"][path]["selection"] = serde_json::Value::Null;
+        }
+        std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
+        // The second was assessed under its legacy derivation and is current.
+        let candidate =
+            json(&fixture, &["wiki", "audit-plan", "--path", current])["candidates"][0].clone();
+        let assessment = fixture.root().join("legacy-assessment.json");
+        std::fs::write(&assessment, serde_json::to_vec(&serde_json::json!({"assessments":[{
+            "path":current, "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+            "disposition":"reviewed", "reason":"The settled note was read in full.", "reviews":[]
+        }]})).unwrap()).unwrap();
+        json(
+            &fixture,
+            &[
+                "wiki",
+                "audit-record",
+                "--file",
+                assessment.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            json(&fixture, &["wiki", "audit-plan"])["candidates"][0]["path"],
+            SUBJECT
+        );
+
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["audit_adoptions"], 1, "{report}");
+        assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
+        let receipts: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        assert!(
+            !receipts["discovery"][SUBJECT]["selection"].is_null(),
+            "{receipts}"
+        );
+        assert!(
+            receipts["discovery"][current]["selection"].is_null(),
+            "a current legacy subject keeps its derivation: {receipts}"
+        );
+        let scope = &receipts["scopes"][SUBJECT];
+        assert_eq!(scope["context_pages"], 4, "{receipts}");
+        assert_eq!(scope["context_cards"], 2, "{receipts}");
     }
 }
 

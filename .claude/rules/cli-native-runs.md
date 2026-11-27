@@ -21,6 +21,14 @@ paths:
   subject whose candidates changed after it was read (a writer during another subject's
   packet) is read again once from a fresh scan when its packet is prepared; a second change
   in the run defers it. Drift never halts the loop.
+  Before screening, the run adopts candidate screening for each planned subject that is due
+  and whose discovery was recorded before screening, through lk-graph's adoption owner and
+  its guards under the run's own writer claim, and plans again, so the subject screens and
+  reads the bounded roster in the same run. A current subject is not touched. A refused
+  adoption (a current processing action, inputs changed since planning) keeps that subject's
+  legacy derivation for the run, recorded as a skipped `audit discovery adoption` stage and
+  never fatal; predecessor Work stays as it is. The report counts adoptions
+  (`audit_adoptions`).
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
