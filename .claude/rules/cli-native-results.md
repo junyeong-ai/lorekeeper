@@ -59,6 +59,13 @@ paths:
   resources directly; bounded finalizers compose completed observations and their evidence
   mapping. Neither representation may claim the other is supplied. Both retain complete
   input bounds, scoped review requirements and native publication ownership.
+  A native refine-events reply returns every event heading in order and lists the events
+  outside the source's focus by index in `off_focus` (`execution/finalization.rs`
+  `refine`): Rust writes each of those from its heading, the locale's off-focus sentence
+  and its `🔗` source links, and every other event must keep its source links' destinations.
+  A broken heading sequence, an invalid index or a lost source link is an invalid body,
+  held as a rejected reply. Synthesis has no such typed disposition: telling unsupported
+  claims, evidence gaps and processing blockers apart stays with its instruction.
 - Discovery recovery journals the extraction discovery recipe and its
   `extraction-discovery-recovery-v1` sidecar together under vault→queue claims. Preserve
   exact current Source Work; a recipe that changes what a Work reads (cli-semantic-work.md)

@@ -112,6 +112,8 @@ pub struct Strings {
     pub evidence_gap_review: &'static str,
     pub open_review_lead: &'static str,
     pub open_review: &'static str,
+    /// The body Rust writes for an event a refinement declares outside its source's focus.
+    pub off_focus_event: &'static str,
     // Personal / synthesis sections
     pub key_summary: &'static str,
     pub key_themes_this_week: &'static str,
@@ -203,6 +205,7 @@ static KO: Strings = Strings {
     evidence_gap_lead: "아래 정의는 이를 뒷받침할 근거를 기다리고 있다.",
     evidence_gap_review: "근거 공백 검토",
     open_review_lead: "아래 검토가 이 개념의 질문을 아직 열어 두고 있다.",
+    off_focus_event: "이 항목은 이 출처의 관심 범위 밖이다.",
     open_review: "열린 검토",
     key_summary: "핵심 요약",
     key_themes_this_week: "이번 주 핵심 주제",
@@ -276,6 +279,7 @@ static EN: Strings = Strings {
     evidence_gap_lead: "These defining claims await supporting evidence.",
     evidence_gap_review: "Evidence gap review",
     open_review_lead: "These reviews keep a question about this concept open.",
+    off_focus_event: "This item is outside the source's focus.",
     open_review: "Open review",
     key_summary: "Summary",
     key_themes_this_week: "Key Themes This Week",

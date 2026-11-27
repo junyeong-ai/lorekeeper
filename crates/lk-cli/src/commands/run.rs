@@ -4401,11 +4401,16 @@ mod native {
                 Some(ObservationReply::InvocationFailed(failure)) => Err(failure),
                 Some(ObservationReply::Output { engine, child, .. }) => {
                     let bytes = child.stdout.as_slice();
-                    match execution::finalization::decode(engine, bytes, section.max_response_bytes)
-                        .and_then(|(response, size)| {
-                            section.validate_response(&response)?;
-                            Ok((response, size))
-                        }) {
+                    match execution::finalization::decode(
+                        engine,
+                        bytes,
+                        section.max_response_bytes,
+                        &section.request,
+                    )
+                    .and_then(|(response, size)| {
+                        section.validate_response(&response)?;
+                        Ok((response, size))
+                    }) {
                         Ok((response, size)) => {
                             metrics.answered = true;
                             metrics.result_json_bytes = Some(size);
@@ -4555,14 +4560,15 @@ mod native {
                 }
                 None => return WorkStep::Failed,
             };
-            let (response, bytes) = match execution::finalization::decode_value(value) {
-                Ok(decoded) => decoded,
-                Err(error) => {
-                    metrics.outcome = WorkOutcome::Rejected;
-                    self.failure("bounded section finalization", error);
-                    return WorkStep::Failed;
-                }
-            };
+            let (response, bytes) =
+                match execution::finalization::decode_value(value, &section.request) {
+                    Ok(decoded) => decoded,
+                    Err(error) => {
+                        metrics.outcome = WorkOutcome::Rejected;
+                        self.failure("bounded section finalization", error);
+                        return WorkStep::Failed;
+                    }
+                };
             metrics.result_json_bytes = Some(bytes);
             let started_at = Instant::now();
             let Some((session, _)) = self.mutation_session("bounded section finalization").await

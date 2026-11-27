@@ -143,6 +143,10 @@ struct Response {
     status: String,
     body: Option<String>,
     reason: Option<String>,
+    /// The events of a refinement that are outside its source's focus, by index; absent reads
+    /// as none.
+    #[serde(default)]
+    off_focus: Option<Vec<usize>>,
 }
 
 pub(in crate::commands) fn empty_response_bytes() -> usize {
@@ -150,6 +154,7 @@ pub(in crate::commands) fn empty_response_bytes() -> usize {
         status: "complete".into(),
         body: Some(String::new()),
         reason: None,
+        off_focus: None,
     })
     .expect("response serializes")
     .len()
@@ -309,6 +314,11 @@ fn section_request(
             "This is a whole-input section request. Read every supplied resource in full. The resources contain the exact retained source and required scoped dependencies, rather than completed observations. Generate directly from those resources, preserving their authority and uncertainty. The work object has no completed observation, source_questions or unresolved list. Return needs-action if these supplied inputs cannot support the required section; do not assume a missing read or review was completed.\n\n{rules}"
         );
     }
+    if events.is_some() {
+        rules = format!(
+            "{rules}\n\nThis request lists the section's events in `events`, each with its heading and inline links. Return every event heading, in order, in `body`. List the zero-based index of each event outside the source's focus in `off_focus` (null when none): Rust writes that event's heading, its 🔗 source link and a one-sentence statement that it is outside the focus in place of whatever `body` holds under it. Every other event keeps its 🔗 source link."
+        );
+    }
     Ok(json!({
         "kind":if matches!(input, SectionInput::Resources) {"whole-section"} else {"finalize-section"}, "work":work, "instructions":rules,
         "events":events, "max_response_bytes":max_response_bytes,
@@ -330,20 +340,26 @@ pub(in crate::commands) fn build_invocation(
 pub(in crate::commands) fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,
             "properties":{"status":{"type":"string","enum":["complete","needs-action"]},
-                "body":{"type":["string","null"]},"reason":{"type":["string","null"]}},
-            "required":["status","body","reason"]})
+                "body":{"type":["string","null"]},"reason":{"type":["string","null"]},
+                "off_focus":{"type":["array","null"],"items":{"type":"integer","minimum":0}}},
+            "required":["status","body","reason","off_focus"]})
 }
 
 pub(in crate::commands) fn decode(
     engine: AgentEngine,
     bytes: &[u8],
     limit: usize,
+    request: &Value,
 ) -> miette::Result<(SectionResponse, usize)> {
     let value = observation::decode_response(engine, bytes, limit)?;
-    decode_value(value)
+    decode_value(value, request)
 }
 
-pub(in crate::commands) fn decode_value(value: Value) -> miette::Result<(SectionResponse, usize)> {
+/// The response to `request`, a refinement's body completed by Rust (`refine`).
+pub(in crate::commands) fn decode_value(
+    value: Value,
+    request: &Value,
+) -> miette::Result<(SectionResponse, usize)> {
     if !value.is_object() {
         return Err(miette::miette!(
             "section finalizer must return a JSON object"
@@ -359,12 +375,15 @@ pub(in crate::commands) fn decode_value(value: Value) -> miette::Result<(Section
     }
     let response: Response = serde_json::from_value(value)
         .map_err(|_| miette::miette!("invalid section finalizer response"))?;
+    let off_focus = response.off_focus.unwrap_or_default();
     let output = match (response.status.as_str(), response.body, response.reason) {
         ("complete", Some(body), None) => match lk_core::markdown::validate_section_body(&body) {
-            Ok(()) => SectionResponse::Complete(body),
+            Ok(()) => refine(request, body, &off_focus),
             Err(error) => SectionResponse::InvalidBody(format!("invalid section body: {error}")),
         },
-        ("needs-action", None, Some(reason)) if !reason.trim().is_empty() => {
+        ("needs-action", None, Some(reason))
+            if !reason.trim().is_empty() && off_focus.is_empty() =>
+        {
             SectionResponse::NeedsAction(reason)
         }
         _ => {
@@ -374,6 +393,111 @@ pub(in crate::commands) fn decode_value(value: Value) -> miette::Result<(Section
         }
     };
     Ok((output, bytes))
+}
+
+/// A refinement's body as Rust completes it. The reply keeps every event's `###` heading in
+/// order. Each event it lists in `off_focus` is written here from its heading, the locale's
+/// off-focus sentence and its 🔗 source links (the template's `🔗 {original_link}` links), in
+/// place of what the reply wrote under it; every other event must keep each of those links'
+/// destinations. A reply breaking either is an invalid body, held as a rejected reply. A
+/// request without events takes its body as returned and declares no off-focus event.
+fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse {
+    let Some(events) = request["events"].as_array() else {
+        return if off_focus.is_empty() {
+            SectionResponse::Complete(body)
+        } else {
+            SectionResponse::InvalidBody(
+                "only an event refinement declares off-focus events".into(),
+            )
+        };
+    };
+    let headings = lk_core::markdown::root_headings(&body)
+        .into_iter()
+        .filter(|heading| heading.level as usize == 3)
+        .collect::<Vec<_>>();
+    if headings.len() != events.len()
+        || headings.iter().zip(events).any(|(heading, event)| {
+            Some(body[heading.range.clone()].trim_end()) != event["heading"].as_str()
+        })
+    {
+        return SectionResponse::InvalidBody(
+            "refinement must preserve the event heading sequence".into(),
+        );
+    }
+    let declared = off_focus
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    if declared.len() != off_focus.len() || declared.iter().any(|index| *index >= events.len()) {
+        return SectionResponse::InvalidBody(
+            "off_focus must name distinct events by their index".into(),
+        );
+    }
+    let links = |markdown: &str| {
+        let mut links = Vec::new();
+        lk_core::link::rewrite_links_outside_code(markdown, |link| {
+            links.push((link.raw_text.to_owned(), link.raw_destination.to_owned()));
+            None
+        });
+        links
+    };
+    let is_source = |text: &str| {
+        lk_core::i18n::Locale::ALL
+            .iter()
+            .any(|locale| text == format!("🔗 {}", locale.strings().original_link))
+    };
+    let locale = lk_core::i18n::Locale::from_tag(
+        request["work"]["context"]["purpose"]["parameters"]["locale"].as_str(),
+    );
+    let mut refined = body[..headings
+        .first()
+        .map_or(body.len(), |first| first.range.start)]
+        .to_owned();
+    for (index, (heading, event)) in headings.iter().zip(events).enumerate() {
+        let end = headings
+            .get(index + 1)
+            .map_or(body.len(), |next| next.range.start);
+        let sources = event["inline_links"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter(|link| links(link).iter().any(|(text, _)| is_source(text)))
+            .collect::<Vec<_>>();
+        if declared.contains(&index) {
+            refined.push_str(body[heading.range.clone()].trim_end());
+            refined.push_str("\n\n");
+            refined.push_str(locale.strings().off_focus_event);
+            if !sources.is_empty() {
+                refined.push_str("\n\n");
+                refined.push_str(&sources.join(" "));
+            }
+            refined.push('\n');
+            if index + 1 < events.len() {
+                refined.push('\n');
+            }
+            continue;
+        }
+        let block = &body[heading.range.start..end];
+        let kept = links(block)
+            .into_iter()
+            .map(|(_, destination)| destination)
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(lost) = sources.iter().find(|link| {
+            links(link)
+                .iter()
+                .any(|(_, destination)| !kept.contains(destination))
+        }) {
+            return SectionResponse::InvalidBody(format!(
+                "refined event {index} must keep its source link {lost}"
+            ));
+        }
+        refined.push_str(block);
+    }
+    match lk_core::markdown::validate_section_body(&refined) {
+        Ok(()) => SectionResponse::Complete(refined),
+        Err(error) => SectionResponse::InvalidBody(format!("invalid section body: {error}")),
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +659,70 @@ mod tests {
     }
 
     #[test]
+    fn rust_writes_off_focus_events_and_a_refinement_keeps_every_source_link() {
+        let request = json!({
+            "work":{"context":{"purpose":{"parameters":{"locale":"en"}}}},
+            "events":[
+                {"heading":"### Kept","inline_links":["[🔗 Source](https://a.invalid)","[Comments](https://c.invalid)"]},
+                {"heading":"### Elsewhere","inline_links":["[🔗 Source](https://b.invalid)"]},
+            ],
+        });
+        let reply = |body: &str, off_focus: Value| {
+            decode_value(
+                json!({"status":"complete","body":body,"reason":null,"off_focus":off_focus}),
+                &request,
+            )
+            .unwrap()
+            .0
+        };
+        let refined = "### Kept\nA refined finding.\n\n[🔗 Source](https://a.invalid)\n\n### Elsewhere\nAnything.\n";
+        assert_eq!(
+            reply(refined, json!([1])),
+            SectionResponse::Complete(
+                "### Kept\nA refined finding.\n\n[🔗 Source](https://a.invalid)\n\n### Elsewhere\n\nThis item is outside the source's focus.\n\n[🔗 Source](https://b.invalid)\n".into()
+            ),
+            "the off-focus event keeps its heading and source link, noise links may go"
+        );
+        assert!(
+            matches!(reply(refined, Value::Null), SectionResponse::InvalidBody(_)),
+            "an event not declared off-focus keeps its source link"
+        );
+        let both = format!("{refined}\n[🔗 Source](https://b.invalid)\n");
+        assert_eq!(
+            reply(&both, Value::Null),
+            SectionResponse::Complete(both.clone())
+        );
+        let lost = "### Kept\nA refined finding.\n\n### Elsewhere\nAnything.\n";
+        assert!(
+            matches!(reply(lost, json!([1])), SectionResponse::InvalidBody(reason) if reason.contains("source link")),
+            "a refined event that drops its source link is rejected"
+        );
+        for (body, off_focus) in [
+            ("### Elsewhere\nX.\n\n### Kept\nY.\n", json!([0])),
+            ("### Kept\nY. [🔗 Source](https://a.invalid)\n", json!([])),
+            (refined, json!([1, 1])),
+            (refined, json!([2])),
+        ] {
+            assert!(
+                matches!(
+                    reply(body, off_focus.clone()),
+                    SectionResponse::InvalidBody(_)
+                ),
+                "{body:?} {off_focus}"
+            );
+        }
+        assert!(matches!(
+            decode_value(
+                json!({"status":"complete","body":"Body.","reason":null,"off_focus":[0]}),
+                &json!({}),
+            )
+            .unwrap()
+            .0,
+            SectionResponse::InvalidBody(_)
+        ));
+    }
+
+    #[test]
     fn decoded_section_body_errors_require_action_on_both_hosts() {
         for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
             for (body, valid) in [
@@ -555,14 +743,14 @@ mod tests {
                     value
                 };
                 let raw = serde_json::to_vec(&value).unwrap();
-                let (response, _) = decode(engine, &raw, 4096).unwrap();
+                let (response, _) = decode(engine, &raw, 4096, &json!({})).unwrap();
                 assert_eq!(
                     matches!(response, SectionResponse::Complete(_)),
                     valid,
                     "{engine:?}/{body:?}"
                 );
                 assert!(valid || matches!(response, SectionResponse::InvalidBody(_)));
-                assert!(decode(engine, &raw, 1).is_err());
+                assert!(decode(engine, &raw, 1, &json!({})).is_err());
             }
         }
     }
@@ -582,7 +770,8 @@ mod tests {
                 decode(
                     AgentEngine::Codex,
                     &serde_json::to_vec(&value).unwrap(),
-                    1024
+                    1024,
+                    &json!({})
                 )
                 .is_err()
             );
@@ -592,7 +781,8 @@ mod tests {
             decode(
                 AgentEngine::Codex,
                 &serde_json::to_vec(&complete).unwrap(),
-                1024
+                1024,
+                &json!({})
             )
             .unwrap()
             .0,
@@ -602,7 +792,8 @@ mod tests {
             decode(
                 AgentEngine::Codex,
                 &serde_json::to_vec(&complete).unwrap(),
-                5
+                5,
+                &json!({})
             )
             .is_err()
         );
@@ -611,7 +802,8 @@ mod tests {
             decode(
                 AgentEngine::ClaudeCode,
                 &serde_json::to_vec(&wrapped).unwrap(),
-                1024
+                1024,
+                &json!({})
             )
             .unwrap()
             .0,
@@ -621,7 +813,8 @@ mod tests {
             decode(
                 AgentEngine::ClaudeCode,
                 br#"{"type":"result","subtype":"success","is_error":false,"result":"text"}"#,
-                1024
+                1024,
+                &json!({})
             )
             .is_err()
         );
@@ -630,7 +823,8 @@ mod tests {
             decode(
                 AgentEngine::Codex,
                 &serde_json::to_vec(&blocked).unwrap(),
-                1024
+                1024,
+                &json!({})
             )
             .unwrap()
             .0,
