@@ -31,7 +31,7 @@
 | `lore task candidate --source <id> --summary <text> --url <URL>` | Name work read out of a page by JUDGMENT, for the next `propose` to offer. Refused for a source `personal.tasks.propose_from` does not name, because unlike a status field a reading of prose can be wrong |
 | `lore task sync` | Record what an editor did: adopt lines typed by hand, close lines ticked, wake what is due |
 | `lore task rollover` | Close the day — carry every still-committed task, counting each carry so a task carried too long reads as the diagnosis it is |
-| `lore resolve <name>` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it |
+| `lore resolve <name>...` | Which concept page a name addresses, by the rule ingest routes an extraction by. Exit 0 owned, 1 absent, 2 more than one page answers to it (the highest for several names). Pass every form in one call: each call reads the whole concept registry |
 | `lore wiki snapshot` | Read the prepared capture and its creation/verification times without refreshing source files; `lore wiki prepare` performs full current capture |
 | `lore wiki context <path> --snapshot ID [--limit N] [--offset N]` | Browse captured links, evidence, declared source relations and scoped reviews together; each group retains its authority, total and pagination |
 | `lore status [--json]` | One row per subsystem — installation, task board, source currency, extraction, the LLM queue, page contracts, the link graph, knowledge reviews and audit coverage — each naming the command that owns it. Reports without gating; the per-source timestamps are `lore health`. JSON `data.audit` carries the coverage counts of the kinds in `graph.audit.subjects` |

@@ -36,7 +36,7 @@ freshness checks separate, inspectable operations.
   `lore wiki curate` plans: fill their owned sections, omit pipeline `llm_inputs`,
   preserve existing addresses and `created`. The manifest records per-document
   progress; rerunning must not delete existing knowledge.
-- Resolve EVERY form a source writes with `lore resolve`, check the created-this-run
+- Resolve EVERY form a source writes with one `lore resolve FORM... --json` call, check the created-this-run
   set, then use `lore wiki search` on distinguishing terms of each form before
   creating a concept. A lexical difference does not establish a new concept.
 - Distinguish source declarations, observed implementation, and verified behavior.

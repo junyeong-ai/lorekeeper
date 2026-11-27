@@ -159,6 +159,15 @@ pub(crate) fn read_frontmatter_header_controlled(
     }
 }
 
+/// The declared metadata of the page at `rel_path`; `None` when it does not exist.
+fn frontmatter_at(root: &Path, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
+    match std::fs::File::open(crate::page_path(root, rel_path)?) {
+        Ok(file) => load_frontmatter(std::io::BufReader::new(file)).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn load_frontmatter(input: impl std::io::BufRead) -> Result<Frontmatter, VaultError> {
     let (header, _) = read_frontmatter_header(input)?;
     match header {
@@ -185,6 +194,19 @@ pub trait VaultStore: Send + Sync {
     /// Read declared metadata only. Body validity and publication revisions require `read_page`.
     async fn read_frontmatter(&self, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
         Ok(self.read_page(rel_path).await?.map(|page| page.frontmatter))
+    }
+
+    /// The declared metadata of each of `rel_paths`, in order, as `read_frontmatter` reads
+    /// one. A backend may read them concurrently; the first failure in order is reported.
+    async fn read_frontmatters(
+        &self,
+        rel_paths: &[PathBuf],
+    ) -> Result<Vec<Option<Frontmatter>>, VaultError> {
+        let mut frontmatters = Vec::with_capacity(rel_paths.len());
+        for path in rel_paths {
+            frontmatters.push(self.read_frontmatter(path).await?);
+        }
+        Ok(frontmatters)
     }
 
     /// Vault-relative paths of every `.md` file directly under `rel_dir`, sorted. A
@@ -227,7 +249,10 @@ pub async fn load_concept_registry(
                 .replace(std::path::MAIN_SEPARATOR, "/"),
         );
     }
-    for path in inventory.owners {
+    // Every concept's frontmatter is read for each registry, so the reads are one batch: a
+    // filesystem reads them concurrently instead of waiting on each file in turn.
+    let frontmatters = reader.read_frontmatters(&inventory.owners).await?;
+    for (path, metadata) in inventory.owners.into_iter().zip(frontmatters) {
         let stem = path
             .file_stem()
             .and_then(|stem| stem.to_str())
@@ -244,7 +269,7 @@ pub async fn load_concept_registry(
                 std::io::Error::other(format!("concept address is not UTF-8: {}", path.display()))
             })?
             .replace(std::path::MAIN_SEPARATOR, "/");
-        let metadata = reader.read_frontmatter(&path).await?.ok_or_else(|| {
+        let metadata = metadata.ok_or_else(|| {
             std::io::Error::other(format!(
                 "concept disappeared during registry read: {}",
                 path.display()
@@ -292,14 +317,25 @@ impl VaultStore for FsVault {
     async fn read_frontmatter(&self, rel_path: &Path) -> Result<Option<Frontmatter>, VaultError> {
         let root = self.root.clone();
         let path = rel_path.to_owned();
+        tokio::task::spawn_blocking(move || frontmatter_at(&root, &path))
+            .await
+            .map_err(std::io::Error::other)?
+    }
+
+    async fn read_frontmatters(
+        &self,
+        rel_paths: &[PathBuf],
+    ) -> Result<Vec<Option<Frontmatter>>, VaultError> {
+        use rayon::prelude::*;
+        let root = self.root.clone();
+        let paths = rel_paths.to_vec();
         tokio::task::spawn_blocking(move || {
-            let full = crate::page_path(&root, &path)?;
-            let file = match std::fs::File::open(full) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.into()),
-            };
-            load_frontmatter(std::io::BufReader::new(file)).map(Some)
+            paths
+                .par_iter()
+                .map(|path| frontmatter_at(&root, path))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .collect()
         })
         .await
         .map_err(std::io::Error::other)?
@@ -463,6 +499,48 @@ mod tests {
         ] {
             assert!(load_frontmatter(invalid.as_bytes()).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn batched_metadata_reads_keep_order_absence_and_the_first_error() {
+        let root = tempfile::tempdir().unwrap();
+        let vault = FsVault::new(root.path());
+        let paths = (0..64)
+            .map(|index| PathBuf::from(format!("page-{index:02}.md")))
+            .collect::<Vec<_>>();
+        for (index, path) in paths.iter().enumerate().filter(|(index, _)| index % 7 != 0) {
+            std::fs::write(
+                root.path().join(path),
+                format!("---\ntitle: T{index}\n---\n"),
+            )
+            .unwrap();
+        }
+        let read = vault.read_frontmatters(&paths).await.unwrap();
+        for (index, frontmatter) in read.iter().enumerate() {
+            match frontmatter {
+                None => assert_eq!(index % 7, 0),
+                Some(frontmatter) => {
+                    assert_eq!(frontmatter.get("title").unwrap(), &format!("T{index}"))
+                }
+            }
+        }
+        std::fs::write(root.path().join("page-10.md"), "---\ntitle: Unclosed").unwrap();
+        std::fs::write(
+            root.path().join("page-40.md"),
+            "---\ntitle: A\ntitle: B\n---\n",
+        )
+        .unwrap();
+        let first = vault
+            .read_frontmatter(Path::new("page-10.md"))
+            .await
+            .unwrap_err();
+        let later = vault
+            .read_frontmatter(Path::new("page-40.md"))
+            .await
+            .unwrap_err();
+        assert_ne!(first.to_string(), later.to_string());
+        let batch = vault.read_frontmatters(&paths).await.unwrap_err();
+        assert_eq!(batch.to_string(), first.to_string());
     }
 
     #[tokio::test]

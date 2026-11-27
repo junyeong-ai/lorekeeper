@@ -44,7 +44,8 @@ The wiki directory is configurable. Do not parse or guess these paths yourself.
 
 For new knowledge, search for the existing document or exploration answering the
 same question before creating another. For concepts, follow AGENTS.md's Concept
-convergence: use `lore resolve` for EVERY form the source writes, a created-this-run
+convergence: use `lore resolve` for EVERY form the source writes (all forms in one call,
+which reads the registry once), a created-this-run
 set, and `lore wiki search` on distinguishing terms. A search hit is a candidate,
 not proof of equivalence. Reuse an existing broader owner only when its complete
 scope fits. Empty concept extraction is valid; a passing mention is insufficient.
