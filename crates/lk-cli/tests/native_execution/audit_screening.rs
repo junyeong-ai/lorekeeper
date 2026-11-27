@@ -54,6 +54,11 @@ with (root/'screen-calls.jsonl').open('a') as stream:
         'subject_text':subject.decode('utf-8'),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
 if mode=='failed': raise SystemExit(51)
+if mode=='edit-own' and not (root/'own-edited').exists():
+    # A writer changes one of this packet's own candidates while it runs.
+    (root/'own-edited').write_text('')
+    page=root/'vault'/request['candidates'][0]['candidate']['path']
+    page.write_text(page.read_text()+'\nA concurrent correction.\n')
 if mode=='edit-peer' and not (root/'peer-edited').exists():
     # A writer changes another planned subject's candidate while this packet runs.
     (root/'peer-edited').write_text('')
@@ -400,6 +405,24 @@ fn a_candidate_edited_during_the_assessment_replans_the_subject_instead_of_halti
             "{report}"
         );
         assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
+    }
+}
+
+#[test]
+fn a_candidate_edited_during_its_own_packet_is_drift_not_a_halt() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 3, "edit-own", false, RECORD_AUDIT);
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(fixture.root().join("own-edited").exists());
+        assert!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["role"] == "screening" && step["outcome"] == "inputs-changed"),
+            "{report}"
+        );
     }
 }
 

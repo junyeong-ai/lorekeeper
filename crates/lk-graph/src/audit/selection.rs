@@ -1180,10 +1180,10 @@ pub fn record(
                     Err(error) => Some(Err(error)),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            // A decided key that no current row has left the inventory after its packet was
+            // issued (its candidate changed or left): the reply answers earlier inputs.
             if assigned.len() != decisions.len() {
-                return Err(error(
-                    "audit decision is outside the current complete inventory",
-                ));
+                return Err(GraphError::AuditScreeningChanged);
             }
             let mut repeated = assigned.iter().all(|row| row.decision.is_some());
             for row in &assigned {
