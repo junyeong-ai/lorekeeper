@@ -1164,9 +1164,15 @@ pub fn record(
         &super::Scope::Selection(BTreeSet::from([path.as_str()])),
         read,
     )?;
-    let candidate = selected
-        .pop()
-        .ok_or_else(|| error("audit screening requires an exact subject"))?;
+    // A reply is issued only for a current audit subject; one the scan no longer holds as a
+    // subject was removed after its packet. An unreadable subject refused above.
+    let candidate = match selected.pop() {
+        Some(candidate) => candidate,
+        None if !super::subject_kinds(pages, dirs).contains_key(Path::new(path.as_str())) => {
+            return Err(GraphError::AuditSubjectRemoved(path.clone()));
+        }
+        None => return Err(error("audit screening requires an exact subject")),
+    };
     // A screening reply is issued only for a subject with screened discovery, so its absence
     // means the subject or its discovery changed after the packet: the reply answers earlier
     // inputs.

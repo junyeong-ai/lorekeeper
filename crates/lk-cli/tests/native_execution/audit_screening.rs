@@ -54,6 +54,9 @@ with (root/'screen-calls.jsonl').open('a') as stream:
         'subject_text':subject.decode('utf-8'),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
 if mode=='failed': raise SystemExit(51)
+if mode=='delete-subject' and request['subject']['path'].endswith('a-subject.md'):
+    # A writer removes the subject itself while its packet runs.
+    (root/'vault'/request['subject']['path']).unlink()
 if mode=='edit-subject' and not (root/'subject-edited').exists():
     # A writer appends prose to the subject itself while its packet runs.
     (root/'subject-edited').write_text('')
@@ -561,6 +564,38 @@ fn a_candidate_edited_during_the_assessment_replans_the_subject_instead_of_halti
             "{report}"
         );
         assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
+    }
+}
+
+#[test]
+fn a_subject_removed_during_its_screening_packet_is_deferred_and_its_peer_screens() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 3, "delete-subject", false, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 1", "max_calls: 4")
+            .replace("batch_size: 1", "batch_size: 2");
+        std::fs::write(&fixture.config, config).unwrap();
+        let peer = "wiki/documents/peer.md";
+        std::fs::write(
+            fixture.root().join("vault").join(peer),
+            "---\ntype: document\ntitle: Peer\n---\nA peer note.\n",
+        )
+        .unwrap();
+        discover(&fixture, peer, &QUERIES);
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(!fixture.root().join("vault").join(SUBJECT).exists());
+        let screened = calls(&fixture)
+            .iter()
+            .filter(|call| {
+                call["subject_text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("A peer note.")
+            })
+            .count();
+        assert!(screened > 0, "the peer still screens: {report}");
     }
 }
 

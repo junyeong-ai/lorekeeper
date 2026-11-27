@@ -7166,6 +7166,9 @@ mod native {
             paths: &[String],
             mut plan: lk_graph::audit::AuditPlan,
         ) -> Option<lk_graph::audit::AuditPlan> {
+            // The selection this loop plans: a subject removed from the vault leaves it.
+            let mut selection = paths.to_vec();
+            let paths = &mut selection;
             let limits = match self.audit_screening_limits() {
                 Ok(limits) => limits,
                 Err(error) => {
@@ -7529,6 +7532,15 @@ mod native {
                             &candidate,
                             "assigned candidate inputs changed; discard the old judgment".into(),
                         );
+                        None
+                    }
+                    Err(lk_graph::GraphError::AuditSubjectRemoved(_)) => {
+                        metrics.outcome = WorkOutcome::InputsChanged;
+                        self.defer_audit_screening(
+                            &candidate,
+                            "the subject left the vault during its packet".into(),
+                        );
+                        paths.retain(|path| *path != candidate.path);
                         None
                     }
                     Err(error) => {

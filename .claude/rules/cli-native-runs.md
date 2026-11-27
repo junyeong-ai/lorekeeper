@@ -20,7 +20,9 @@ paths:
   screened subjects since its last plan, since the others were read before its calls. A
   subject whose candidates changed after it was read (a writer during another subject's
   packet) is read again once from a fresh scan when its packet is prepared; a second change
-  in the run defers it. Drift never halts the loop.
+  in the run defers it. A subject removed from the vault during its own packet
+  (`GraphError::AuditSubjectRemoved`) is deferred and leaves the batch, whose peers are
+  planned again; an unreadable subject stays fatal. Drift never halts the loop.
   Before screening, the run adopts candidate screening for planned subjects that are due and
   whose discovery was recorded before screening, through lk-graph's adoption owner and its
   guards under the run's own writer claim, and plans again, so they screen and read the
