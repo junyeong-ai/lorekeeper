@@ -115,6 +115,7 @@ pub(in crate::commands) struct HostAnswers {
     answers: BTreeMap<AgentEngine, Timestamp>,
     profiles: BTreeMap<ProfileKey, Timestamp>,
     probe: Option<Probe>,
+    #[cfg(unix)]
     recovery_due: std::collections::BTreeSet<ProbeScope>,
 }
 
@@ -328,6 +329,7 @@ impl HostAnswers {
             answers: stored.answers,
             profiles: stored.profiles,
             probe: stored.probe,
+            #[cfg(unix)]
             recovery_due: stored.recovery_due,
         })
     }
