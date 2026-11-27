@@ -86,9 +86,10 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
     }
 }
 
-/// How long a child's stderr may stay open after the child itself exited.
+/// How long a child's pipes may stay open after the child itself exited, before and again
+/// after its group is killed.
 #[cfg(unix)]
-const STDERR_GRACE: Duration = Duration::from_millis(500);
+const CLEANUP_GRACE: Duration = Duration::from_millis(500);
 
 /// The bounded end of a child's stderr. A raw window much larger than the reported tail is
 /// kept, so credentials are masked over complete text before the report is cut to size.
@@ -525,56 +526,125 @@ async fn run_child(
             None => std::future::pending::<()>().await,
         }
     };
-    let (cancelled, mut termination, mut detail) = tokio::select! {
-        result = async {
-            // Stderr is drained beside the child, but a descendant that keeps it open after the
-            // child exits must not hold a complete result hostage: past a short grace the group
-            // is killed and the tail read so far stands.
-            let main = async { tokio::try_join!(child.wait(), output, send) };
-            tokio::pin!(main, stderr_output);
-            let mut drained = false;
-            let result = loop {
-                tokio::select! {
-                    result = &mut main => break result,
-                    _ = &mut stderr_output, if !drained => drained = true,
+    enum Settled {
+        /// The child's exit, stdout and input delivery, and whether cleanup already killed
+        /// its group.
+        Exited(std::process::ExitStatus, Vec<u8>, InputDelivery, bool),
+        Stopped(bool, ChildTermination, String),
+    }
+    // The session deadline and cancellation bound the child itself. Once it exits, its answer
+    // is complete and only cleanup remains, bounded on its own: its pipes get a grace, then
+    // the group is killed so a descendant holding one releases it, and one more grace ends
+    // the wait. Stdout still open after that is incomplete where stdout is the answer
+    // (`capture_limit`), and of no account where the answer travels another way.
+    let settled = {
+        let wait = child.wait();
+        tokio::pin!(wait, output, send, stderr_output, deadline, cancellation);
+        let mut status = None;
+        let mut captured = None;
+        let mut delivery = None;
+        let mut stderr_open = true;
+        let mut cleanup: Option<(tokio::time::Instant, bool)> = None;
+        loop {
+            if let (Some(status), Some(_), Some(_)) = (status, &captured, &delivery)
+                && !stderr_open
+            {
+                break Settled::Exited(
+                    status,
+                    captured.take().expect("captured stdout"),
+                    delivery.take().expect("input delivery"),
+                    cleanup.is_some_and(|(_, killed)| killed),
+                );
+            }
+            let grace = async {
+                match cleanup {
+                    Some((at, _)) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending::<()>().await,
                 }
             };
-            if !drained {
-                let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_output).await;
-            }
-            result
-        } => {
-            match result {
-                Ok((status, stdout, delivery)) => {
-                    signal_group(running.group, Signal::KILL)?;
-                    running.cleaned = true;
-                    let closed = matches!(delivery, InputDelivery::Closed);
-                    let incomplete_success = closed && status.success();
-                    let detail = if incomplete_success {
-                        Some("child IO: request input closed before complete delivery".into())
-                    } else if !status.success() {
-                        Some(if closed {
-                            format!("child {status}; request input closed before complete delivery")
-                        } else {
-                            format!("child {status}")
-                        })
-                    } else {
-                        None
-                    };
-                    return Ok(ChildResult {
-                        success: status.success() && !closed, exit_code: status.code(), cancelled: false,
-                        detail, stdout,
-                        stdout_capture: if capture_limit.is_some() {StdoutCapture::Complete} else {StdoutCapture::NotCaptured},
-                        stderr_tail: tail.lock().expect("stderr tail").render(),
-                        termination: if incomplete_success {ChildTermination::IoFailed} else {ChildTermination::Exited},
-                        finished_at: jiff::Timestamp::now(),
-                    });
+            tokio::select! {
+                result = &mut wait, if status.is_none() => match result {
+                    Ok(exited) => {
+                        status = Some(exited);
+                        cleanup = Some((tokio::time::Instant::now() + CLEANUP_GRACE, false));
+                    }
+                    Err(error) => break Settled::Stopped(false, ChildTermination::IoFailed, format!("child IO: {error}")),
                 },
-                Err(error) => (false, ChildTermination::IoFailed, format!("child IO: {error}")),
+                result = &mut output, if captured.is_none() => match result {
+                    Ok(bytes) => captured = Some(bytes),
+                    Err(error) => break Settled::Stopped(false, ChildTermination::IoFailed, format!("child IO: {error}")),
+                },
+                result = &mut send, if delivery.is_none() => match result {
+                    Ok(delivered) => delivery = Some(delivered),
+                    Err(error) => break Settled::Stopped(false, ChildTermination::IoFailed, format!("child IO: {error}")),
+                },
+                _ = &mut stderr_output, if stderr_open => stderr_open = false,
+                reason = &mut cancellation, if status.is_none() => break Settled::Stopped(
+                    reason.is_user_cancelled(),
+                    if reason.is_user_cancelled() { ChildTermination::Cancelled } else { ChildTermination::SupervisionFailed },
+                    reason.detail().to_string(),
+                ),
+                _ = &mut deadline, if status.is_none() => break Settled::Stopped(false, ChildTermination::TimedOut, "session deadline exceeded".to_string()),
+                _ = grace => match cleanup {
+                    Some((_, false)) => {
+                        signal_group(running.group, Signal::KILL)?;
+                        cleanup = Some((tokio::time::Instant::now() + CLEANUP_GRACE, true));
+                    }
+                    _ => {
+                        // A descendant outside the group still holds a pipe.
+                        stderr_open = false;
+                        delivery.get_or_insert(InputDelivery::Closed);
+                        if captured.is_none() {
+                            if capture_limit.is_some() {
+                                break Settled::Stopped(false, ChildTermination::IoFailed, "child IO: stdout stayed open after the child exited and its group was killed".to_string());
+                            }
+                            captured = Some(Vec::new());
+                        }
+                    }
+                },
             }
         }
-        reason = cancellation => (reason.is_user_cancelled(), if reason.is_user_cancelled() {ChildTermination::Cancelled} else {ChildTermination::SupervisionFailed}, reason.detail().to_string()),
-        _ = deadline => (false, ChildTermination::TimedOut, "session deadline exceeded".to_string()),
+    };
+    let (cancelled, mut termination, mut detail) = match settled {
+        Settled::Exited(status, stdout, delivery, killed) => {
+            if !killed {
+                signal_group(running.group, Signal::KILL)?;
+            }
+            running.cleaned = true;
+            let closed = matches!(delivery, InputDelivery::Closed);
+            let incomplete_success = closed && status.success();
+            let detail = if incomplete_success {
+                Some("child IO: request input closed before complete delivery".into())
+            } else if !status.success() {
+                Some(if closed {
+                    format!("child {status}; request input closed before complete delivery")
+                } else {
+                    format!("child {status}")
+                })
+            } else {
+                None
+            };
+            return Ok(ChildResult {
+                success: status.success() && !closed,
+                exit_code: status.code(),
+                cancelled: false,
+                detail,
+                stdout,
+                stdout_capture: if capture_limit.is_some() {
+                    StdoutCapture::Complete
+                } else {
+                    StdoutCapture::NotCaptured
+                },
+                stderr_tail: tail.lock().expect("stderr tail").render(),
+                termination: if incomplete_success {
+                    ChildTermination::IoFailed
+                } else {
+                    ChildTermination::Exited
+                },
+                finished_at: jiff::Timestamp::now(),
+            });
+        }
+        Settled::Stopped(cancelled, termination, detail) => (cancelled, termination, detail),
     };
     if input_closed && termination == ChildTermination::TimedOut {
         termination = ChildTermination::IoFailed;
@@ -1438,6 +1508,55 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn once_the_child_exits_neither_the_deadline_nor_a_held_stdout_discards_its_answer() {
+        let run = |script: &str, timeout: Duration, capture: Option<usize>| {
+            let mut command = tokio::process::Command::new("sh");
+            command.args(["-c", script]);
+            async move {
+                let mut child = RunningChild::spawn(command, false, ChildOutput::Discard).unwrap();
+                let started = Instant::now();
+                let result = run_child(
+                    &mut child,
+                    Some(timeout),
+                    capture,
+                    None,
+                    std::future::pending(),
+                )
+                .await
+                .unwrap();
+                (result, started.elapsed())
+            }
+        };
+        // The child answers shortly before the deadline while a helper keeps stderr open: the
+        // deadline passes during cleanup, and the answer stands.
+        let (result, _) = run(
+            "sleep 0.7; printf '%s' '{\"ok\":true}'; (sleep 30 >/dev/null </dev/null &); exit 0",
+            Duration::from_secs(1),
+            Some(1024),
+        )
+        .await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.stdout, b"{\"ok\":true}");
+        // A helper holding stdout is released by the group kill on the stdout route, and is of
+        // no account where the answer travels through a file.
+        for capture in [Some(1024), None] {
+            let (result, elapsed) = run(
+                "printf '%s' '{\"ok\":true}'; (sleep 30 </dev/null 2>/dev/null &); exit 0",
+                Duration::from_secs(10),
+                capture,
+            )
+            .await;
+            assert!(result.success, "{capture:?}: {result:?}");
+            assert_eq!(result.termination, ChildTermination::Exited);
+            assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+            if capture.is_some() {
+                assert_eq!(result.stdout, b"{\"ok\":true}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_descendant_holding_stderr_open_never_turns_a_complete_result_into_a_timeout() {
         let mut command = tokio::process::Command::new("sh");
         command.args([
@@ -1554,11 +1673,6 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         for (script, reason, termination) in [
             ("exec sleep 30", None, ChildTermination::IoFailed),
             (
-                "trap '' TERM; sleep 30 & exit 51",
-                None,
-                ChildTermination::IoFailed,
-            ),
-            (
                 "printf '%02048d' 0; exec sleep 30",
                 None,
                 ChildTermination::IoFailed,
@@ -1599,6 +1713,30 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             assert_eq!(result.failed_exit(), None);
             assert!(child.cleaned);
         }
+        // A child that exits while a descendant ignoring TERM holds its stdout settles once
+        // cleanup kills the group: its own exit, with the request it did not read, is reported.
+        let (mut child, _directory) =
+            build_closed_stdin_child("trap '' TERM; sleep 30 & exit 51").await;
+        let result = run_child(
+            &mut child,
+            Some(Duration::from_secs(10)),
+            Some(1024),
+            Some(b"request"),
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert!(!result.success);
+        assert_eq!(result.exit_code, Some(51), "{result:?}");
+        assert_eq!(result.termination, ChildTermination::Exited);
+        assert!(
+            result
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("request input closed")),
+            "{result:?}"
+        );
+        assert!(child.cleaned);
     }
 
     #[cfg(unix)]

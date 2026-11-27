@@ -29,7 +29,11 @@ paths:
   establishes support; unbound legacy inputs never gain original authority.
 
 - `commands/run.rs` owns daily/process/knowledge sequencing; `execution.rs` owns
-  host-specific invocation and supervised Unix process groups. The shared WorkflowLease
+  host-specific invocation and supervised Unix process groups. The session deadline and
+  cancellation bound a child only until it exits; its answer is then complete, and cleanup
+  is bounded on its own: its pipes get `CLEANUP_GRACE`, then the group is killed so a
+  descendant releases them, then one more grace. Stdout still open after that fails only
+  where stdout carries the answer. The shared WorkflowLease
   covers semantic reads through final publication. Native daily acquisition precedes a
   separate publication-only lease; `--wait` selects waiting rather than refusal at that
   boundary. Release it before the parent semantic lease. Never hold a writer claim
