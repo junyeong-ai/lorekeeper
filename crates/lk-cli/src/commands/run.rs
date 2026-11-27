@@ -4122,6 +4122,7 @@ mod native {
             let mut needs_action = false;
             let mut review_deferred = false;
             let mut rejected = false;
+            let mut inputs_changed = false;
             for (input, reply) in inputs.iter().zip(replies) {
                 let target = input["task"]["target"]["vault_path"]
                     .as_str()
@@ -4191,7 +4192,7 @@ mod native {
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
                         deferred = true;
-                        rejected = true;
+                        inputs_changed = true;
                         self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
                         if !self
                             .finalization_replans
@@ -4226,6 +4227,8 @@ mod native {
                 WorkOutcome::NeedsAction
             } else if review_deferred {
                 WorkOutcome::ReviewDeferred
+            } else if inputs_changed {
+                WorkOutcome::InputsChanged
             } else if rejected {
                 WorkOutcome::Rejected
             } else {

@@ -3525,6 +3525,15 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                         .iter()
                         .any(|stage| stage["name"] == "expanded extraction work")
                 );
+                assert!(
+                    result["work_steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|step| step["role"] == "finalizer"
+                            && step["outcome"] == "inputs-changed"),
+                    "a reply to a scope that changed during the call is not a rejection: {result}"
+                );
             } else {
                 assert!(bounded_calls(&fixture).is_empty());
                 assert!(
