@@ -974,7 +974,21 @@ pub(super) fn task_with_selected(
     }
     let mut prepared = captured.finish(prepared.subject, prepared.context, config);
     prepared.selected_owners = Some(selected.clone());
-    Ok(prepared)
+    // Selected owners are context, sealed like a synthesis's: a resynthesis of an owner's
+    // Lore-owned sections leaves the request's Work as planned, while an authored edit to an
+    // owner is read at once.
+    let Subject::Queue {
+        task_id,
+        cache_hash,
+        ..
+    } = &prepared.subject
+    else {
+        return Err(miette::miette!(
+            "extraction evidence requires a queue subject"
+        ));
+    };
+    let snapshot = super::snapshot::ContextSnapshot::load(root, read, task_id, cache_hash)?;
+    prepared.with_snapshot(snapshot)
 }
 
 /// Rebuild screened evidence from what its Work context names, without consulting the
@@ -1714,6 +1728,34 @@ mod tests {
         );
         assert!(!reread.frontmatter.fields.contains_key("source_count"));
         write(&root, selected, &owner_raw);
+
+        // Once its Work is planned, an owner's Lore-owned sections are read from the request's
+        // context snapshot, while an authored section is read as it is now.
+        let mut planned = admit(&[selected]).unwrap();
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        super::super::persist_prepared(&session, &config, "config", &mut planned).unwrap();
+        drop(session);
+        write(
+            &root,
+            selected,
+            &owner_raw.replace("declared scope", "resynthesized scope"),
+        );
+        assert_eq!(
+            admit(&[selected]).unwrap().revision("config").unwrap(),
+            planned.revision("config").unwrap(),
+            "an owner's resynthesis leaves the extraction's Work as planned"
+        );
+        write(
+            &root,
+            selected,
+            &format!("{owner_raw}\n## Notes\nAn authored correction.\n"),
+        );
+        assert_ne!(
+            admit(&[selected]).unwrap().revision("config").unwrap(),
+            planned.revision("config").unwrap(),
+            "an authored edit to an owner is read at once"
+        );
+        write(&root, selected, &owner_raw);
         #[cfg(unix)]
         {
             let roster = |prepared: &Prepared| {
@@ -1808,7 +1850,8 @@ mod tests {
         std::fs::remove_file(root.join("wiki/documents/new.md")).unwrap();
         for path in [selected, &review_paths[1], &evidence_paths[1]] {
             let raw = std::fs::read_to_string(root.join(path)).unwrap();
-            write(&root, path, &format!("{raw}\nExternally edited.\n"));
+            // An authored section: the owner's own sections are read through its snapshot.
+            write(&root, path, &format!("{raw}\n## Notes\nExternally edited.\n"));
             assert_ne!(
                 admit(&[selected]).unwrap().revision("config").unwrap(),
                 revision

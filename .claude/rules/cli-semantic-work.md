@@ -40,7 +40,8 @@ paths:
   Work protocol whatever its part count. 0.144.0's line projection is not reconstructed: its
   Work replans, and a hold bound only to an input revision follows the semantic reading.
 - A synthesis request reads its context-only pages (direct links and ranked discovery
-  matches no subject, citation or review evidence also reads) through its context snapshot
+  matches no subject, citation or review evidence also reads), and a screened extraction
+  its selected owners, through its context snapshot
   (`work/snapshot.rs`, `.lorekeeper/queue/context/`): the exact page bytes its Work first
   read, recorded in the journal that persists its Work and guarded wherever the request is
   staged or published. A snapshotted page is read as it is now except the content of the

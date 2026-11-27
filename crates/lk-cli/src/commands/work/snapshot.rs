@@ -1,5 +1,6 @@
-//! A synthesis request's context snapshot: the exact bytes of each context-only page (a
-//! direct link or ranked discovery match) its Work read. A later preparation of the same
+//! A queue request's context snapshot: the exact bytes of each context-only page its Work
+//! read (a synthesis's direct links and ranked discovery matches, a screened extraction's
+//! selected owners). A later preparation of the same
 //! request reads the sections Lore owns on such a page from those bytes and everything else
 //! as it is now, so a neighbor's resynthesis does not replan the request while an authored
 //! correction is read at once. Its subject, citations and reviews stay current reads, and
