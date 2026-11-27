@@ -49,21 +49,28 @@ paths:
   its selected owners, through its context snapshot
   (`work/snapshot.rs`, `.lorekeeper/queue/context/`): the exact page bytes its Work first
   read, recorded in the journal that persists its Work and guarded wherever the request is
-  staged or published. A snapshotted page is read as it is now except the content of the
-  sections Lore derives and rewrites on its declared format (a concept's synthesis, related
-  and sources sections, a document's summary and related concepts), which keeps its recorded
-  bytes in the current line ending, gaining a line break only where it would otherwise run
-  into the current text around it, so a page only Lore rewrote composes to its recorded bytes;
-  every section of any other format is its author's. A neighbor's
-  resynthesis therefore does not replan the request, which would otherwise rarely finish
-  while its neighbors keep changing, while an authored correction (frontmatter or any other
-  section) is read at once and recorded. A request that never persisted Work has no
-  snapshot and reads its pages as they are now; a published synthesis is not refreshed when
-  a neighbor later changes. Membership still binds: a page that joins the context is read
-  as it is now, one that leaves is dropped at the next record. Live bytes stay in
-  `Prepared.pages`, so publication still guards every page as it is. Extraction owners and
-  audit related pages read current bytes: reuse publication writes an owner, and audit
-  currency has its own contract.
+  staged or published. A snapshotted page is read as it is now except a section whose
+  current body the page records as Lore's own write (`llm_inputs.generated_sections`,
+  `lk_vault::record_generated_sections`: each heading with the digest of the body written
+  under it), which keeps its recorded bytes in the current line ending, gaining a line break
+  only where it would otherwise run into the current text around it, so a page only Lore
+  rewrote composes to its recorded bytes. Concept synthesis publication records the
+  synthesis and related sections it writes, and backlinks reconciliation the sources section
+  it rewrites. Nothing else records: a document render rebuilds its `llm_inputs`, so its
+  summary and related concepts are read as they are now, as is a body edited after Lore
+  wrote it and every other section. A neighbor's resynthesis therefore does not replan the
+  request, which would otherwise rarely finish while its neighbors keep changing, while an
+  authored correction (frontmatter, authored prose or an edit to a body Lore wrote) is read
+  at once and recorded. A request that never persisted Work has no snapshot and reads its
+  pages as they are now; a published synthesis is not refreshed when a neighbor later
+  changes. Membership still binds: a page that joins the context is read as it is now, one
+  that leaves is dropped at the next record. Live bytes stay in `Prepared.pages`, so
+  publication still guards every page as it is. A reused extraction owner is published
+  against two pins: its live file revision, which Rust takes at assembly from the capture
+  whose reading matched the Work, and the result's context revision, which publication
+  compares with the owner as read now, so an authored change to the owner's identity or
+  scope after planning needs a fresh judgment. Audit related pages read current bytes:
+  audit currency has its own contract.
 - A newly persisted Work reuses, through the attributed reuse path and its page guards,
   the observation of each unrefined inspection whose content revision (partition policy,
   semantic purpose and exact assigned evidence) another stored Work recorded fresh.

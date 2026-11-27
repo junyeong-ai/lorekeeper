@@ -1879,6 +1879,18 @@ fn synthesis_results_preserve_edits_and_apply_both_sections_only_to_current_inpu
             assert!(after.contains("A sourced relationship."));
             assert!(after.contains("Keep this."));
             assert!(after.contains("synthesis_done:"));
+            // The page records the bodies the synthesis wrote, and only those.
+            let recorded = lk_vault::generated_sections(&lk_vault::parse_page(&after).unwrap());
+            assert_eq!(
+                recorded.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["Related", "Synthesis"]
+            );
+            for (heading, digest) in &recorded {
+                assert_eq!(
+                    Some(digest.clone()),
+                    lk_vault::section_body(&after, heading).map(lk_vault::generated_body_digest)
+                );
+            }
             assert!(ws.run(&["queue", "apply"]).status.success());
             assert_eq!(after, ws.read("wiki/concepts/timeout.md"));
         } else {
@@ -2323,6 +2335,7 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
             "deleted-review",
             "unrelated-review",
             "related-changed",
+            "related-corrected",
             "config-changed",
             "config-formatting",
             "operational-config-changed",
@@ -2423,9 +2436,18 @@ fn synthesis_read_scope_guards_scoped_reviews_and_context_for_whole_and_bounded_
                     review_path,
                     &review("wiki/concepts/unrelated.md", "Separate assessment."),
                 ),
+                // A resynthesis records the body it wrote; an author's correction does not.
                 "related-changed" => ws.write(
                     "wiki/concepts/related.md",
-                    "---\ntype: concept\n---\n## Synthesis\nChanged related context.\n",
+                    &lk_vault::record_generated_sections(
+                        "---\ntype: concept\n---\n## Synthesis\nChanged related context.\n",
+                        &["Synthesis"],
+                    )
+                    .unwrap(),
+                ),
+                "related-corrected" => ws.write(
+                    "wiki/concepts/related.md",
+                    "---\ntype: concept\n---\n## Synthesis\nCorrected related context.\n",
                 ),
                 "config-changed" => {
                     let path = ws.root.path().join("config.yaml");

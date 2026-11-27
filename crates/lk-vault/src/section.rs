@@ -566,6 +566,45 @@ pub fn record_llm_input(content: &str, key: &str, value: &str) -> Option<String>
     set_llm_input(&created, key, value)
 }
 
+/// The digest under which `record_generated_sections` records a body Lore wrote: of its text
+/// without framing whitespace, which section replacement normalizes.
+pub fn generated_body_digest(body: &str) -> String {
+    blake3::hash(body.trim().as_bytes()).to_hex()[..32].to_string()
+}
+
+/// The sections `page` records as written by Lore (`field::GENERATED_SECTIONS`): each heading
+/// with the `generated_body_digest` of the body written under it. A body is Lore's own only
+/// while its digest still matches; a record that does not decode records nothing.
+pub fn generated_sections(page: &crate::VaultPage) -> std::collections::BTreeMap<String, String> {
+    page.frontmatter
+        .get(lk_core::frontmatter::field::LLM_INPUTS)
+        .and_then(|inputs| inputs.get(lk_core::frontmatter::field::GENERATED_SECTIONS))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|record| serde_json::from_str(record).ok())
+        .unwrap_or_default()
+}
+
+/// `content` recording that Lore wrote the current body of each of `headings`, beside the
+/// sections it already records. `None` when a heading is missing or the frontmatter cannot
+/// hold the record (`record_llm_input`).
+pub fn record_generated_sections(content: &str, headings: &[&str]) -> Option<String> {
+    let mut recorded = crate::parse_page(content)
+        .map(|page| generated_sections(&page))
+        .unwrap_or_default();
+    for heading in headings {
+        recorded.insert(
+            (*heading).to_owned(),
+            generated_body_digest(section_body(content, heading)?),
+        );
+    }
+    let record = serde_json::to_string(&recorded).expect("a section record serializes");
+    record_llm_input(
+        content,
+        lk_core::frontmatter::field::GENERATED_SECTIONS,
+        &lk_core::concept::yaml_scalar(&record),
+    )
+}
+
 /// Whether the frontmatter block carries `key` as a TOP-LEVEL entry, by the same column-0
 /// match [`set_frontmatter_field`] uses to find one — so what this reports present is exactly
 /// what that writer would replace.
@@ -891,6 +930,47 @@ mod tests {
         let out = record_llm_input(page, "synthesis", "\"d\"").expect("joined");
         assert!(out.contains("summary: \"abc\""), "{out}");
         assert!(out.contains("synthesis: \"d\""), "{out}");
+    }
+
+    /// A recorded body is Lore's while it is unchanged: an edit under the heading, or a body
+    /// no record names, is the author's. Recording one section keeps the others' records.
+    #[test]
+    fn a_recorded_section_is_lores_until_its_body_changes() {
+        let page = "---\ntype: concept\nllm_inputs:\n  synthesis: \"abc\"\n---\n## Synthesis\n\nLimit is 5.\n\n## Sources\n\nCompact.\n";
+        let generated = |content: &str| {
+            let parsed = crate::parse_page(content).unwrap();
+            let recorded = generated_sections(&parsed);
+            ["Synthesis", "Sources"]
+                .into_iter()
+                .filter(|heading| {
+                    recorded.get(*heading).map(String::as_str)
+                        == section_body(content, heading)
+                            .map(generated_body_digest)
+                            .as_deref()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(generated(page).is_empty());
+        let synthesis = record_generated_sections(page, &["Synthesis"]).unwrap();
+        assert!(synthesis.contains("synthesis: \"abc\""), "{synthesis}");
+        assert_eq!(generated(&synthesis), ["Synthesis"]);
+        let both = record_generated_sections(&synthesis, &["Sources"]).unwrap();
+        assert_eq!(generated(&both), ["Synthesis", "Sources"]);
+        let edited = both.replace("Limit is 5.", "Limit is 7.");
+        assert_eq!(
+            generated(&edited),
+            ["Sources"],
+            "an authored edit is no longer Lore's"
+        );
+        assert_eq!(record_generated_sections(page, &["Missing"]), None);
+        assert_eq!(
+            record_generated_sections(
+                "---\nllm_inputs: {synthesis: \"abc\"}\n---\n## Synthesis\nBody.\n",
+                &["Synthesis"]
+            ),
+            None,
+            "a flow mapping cannot hold the record"
+        );
     }
 
     /// A page renamed by a `vault.locale` switch carries the answer under its old heading.

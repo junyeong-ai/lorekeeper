@@ -301,6 +301,19 @@ pub(super) fn apply(
                 .ok_or_else(|| miette::miette!("cannot record referenced reviews"))?,
                 None => content,
             };
+            // The bodies this publication wrote, so a request that read the concept before can
+            // tell this rewrite from an authored correction (`work/snapshot.rs`).
+            let headings = task
+                .anchors()
+                .into_iter()
+                .map(|anchor| {
+                    anchor
+                        .strip_prefix("## ")
+                        .ok_or_else(|| miette::miette!("invalid section anchor"))
+                })
+                .collect::<miette::Result<Vec<_>>>()?;
+            let content = lk_vault::record_generated_sections(&content, &headings)
+                .ok_or_else(|| miette::miette!("cannot record the sections synthesis wrote"))?;
             if !dry_run {
                 if classify_task(root, task, &mut BTreeMap::new())? != TaskStatus::Current
                     || super::read_page(root, &target).map_err(|e| miette::miette!("{e}"))?

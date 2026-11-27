@@ -184,43 +184,27 @@ pub(super) fn plan_prune(
     Ok(removed)
 }
 
-type SectionKey = fn(&'static lk_core::i18n::Strings) -> &'static str;
-
-/// The sections Lore writes on a context page of `format`: a concept's synthesis, related
-/// concepts and sources list, and a document's summary and related concepts. Their bodies are
-/// derived and a later run rewrites them, so an edit there is not an authored correction.
-/// Every section of any other page is the author's.
-fn owned_sections(format: &str) -> &'static [SectionKey] {
-    match format {
-        "concept" => &[
-            |s| s.concept_synthesis,
-            |s| s.related,
-            |s| s.concept_sources,
-        ],
-        "document" => &[|s| s.summary, |s| s.related_concepts],
-        _ => &[],
-    }
-}
-
-/// `current` with each section Lore owns on its page format taken byte for byte from
-/// `stored`, where both pages declare that format and carry that section once, so a page
-/// whose only changes are Lore's rewrites composes to `stored`. Frontmatter and every other
-/// section stay current: an authored correction is read at once while a neighbor's rewrite of
-/// its derived sections is not. A kept body takes the current page's line ending, and gains a
-/// line break only where it would otherwise run into the current text around it.
+/// `current` with each section whose current body its page records as Lore's own write
+/// (`lk_vault::generated_sections`) taken byte for byte from `stored`, where both pages declare
+/// the same format and carry that section once, so a page whose only changes are Lore's
+/// rewrites composes to `stored`. Frontmatter and every other section stay current, and so does
+/// a recorded section whose body changed after Lore wrote it: an authored correction is read at
+/// once while a neighbor's resynthesis is not. A kept body takes the current page's line ending,
+/// and gains a line break only where it would otherwise run into the current text around it.
 fn compose(stored: &str, current: &str) -> String {
-    let format = |raw: &str| {
-        lk_core::frontmatter::parse_page(raw).ok().and_then(|page| {
-            page.frontmatter
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-    };
-    let Some(format) = format(current).filter(|current| format(stored).as_ref() == Some(current))
+    let (Ok(page), Ok(prior)) = (lk_vault::parse_page(current), lk_vault::parse_page(stored))
     else {
         return current.to_owned();
     };
+    let format = |page: &lk_vault::VaultPage| {
+        page.frontmatter
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    if format(&page).is_none() || format(&page) != format(&prior) {
+        return current.to_owned();
+    }
     fn body<'a>(content: &'a str, heading: &str) -> Option<(std::ops::Range<usize>, &'a str)> {
         lk_vault::section_body(content, heading).map(|body| {
             let start = body.as_ptr() as usize - content.as_ptr() as usize;
@@ -228,41 +212,39 @@ fn compose(stored: &str, current: &str) -> String {
         })
     }
     let mut spans = Vec::new();
-    for section in owned_sections(&format) {
-        for heading in lk_vault::section_headings(section) {
-            if let (Some((_, old)), Some((range, new))) =
-                (body(stored, heading), body(current, heading))
-            {
-                if old == new {
-                    continue;
-                }
-                let crlf = current.contains("\r\n");
-                let newline = if crlf { "\r\n" } else { "\n" };
-                let mut kept = if crlf && !old.contains('\r') {
-                    old.replace('\n', newline)
-                } else {
-                    old.to_owned()
-                };
-                if !kept.is_empty()
-                    && !kept.starts_with(['\r', '\n'])
-                    && !current[..range.start].ends_with('\n')
-                {
-                    kept.insert_str(0, newline);
-                }
-                if range.end < current.len() {
-                    // An ATX heading starts at any line; another heading form after text needs a
-                    // blank line or the text would join it.
-                    let needed: usize =
-                        if kept.trim().is_empty() || current[range.end..].starts_with('#') {
-                            1
-                        } else {
-                            2
-                        };
-                    let present = kept[kept.trim_end().len()..].matches('\n').count();
-                    kept.push_str(&newline.repeat(needed.saturating_sub(present)));
-                }
-                spans.push((range, kept));
+    for (heading, digest) in lk_vault::generated_sections(&page) {
+        if let (Some((_, old)), Some((range, new))) =
+            (body(stored, &heading), body(current, &heading))
+        {
+            if old == new || lk_vault::generated_body_digest(new) != digest {
+                continue;
             }
+            let crlf = current.contains("\r\n");
+            let newline = if crlf { "\r\n" } else { "\n" };
+            let mut kept = if crlf && !old.contains('\r') {
+                old.replace('\n', newline)
+            } else {
+                old.to_owned()
+            };
+            if !kept.is_empty()
+                && !kept.starts_with(['\r', '\n'])
+                && !current[..range.start].ends_with('\n')
+            {
+                kept.insert_str(0, newline);
+            }
+            if range.end < current.len() {
+                // An ATX heading starts at any line; another heading form after text needs a
+                // blank line or the text would join it.
+                let needed: usize =
+                    if kept.trim().is_empty() || current[range.end..].starts_with('#') {
+                        1
+                    } else {
+                        2
+                    };
+                let present = kept[kept.trim_end().len()..].matches('\n').count();
+                kept.push_str(&newline.repeat(needed.saturating_sub(present)));
+            }
+            spans.push((range, kept));
         }
     }
     spans.sort_by_key(|(range, _)| range.start);
@@ -310,72 +292,107 @@ mod tests {
         )
     }
 
+    /// `content` as Lore leaves it after writing the bodies under `headings`.
+    fn written(content: &str, headings: &[&str]) -> String {
+        lk_vault::record_generated_sections(content, headings).unwrap()
+    }
+
     #[test]
-    fn only_sections_lore_owns_keep_their_recorded_bodies() {
+    fn only_sections_lore_recorded_writing_keep_their_recorded_bodies() {
         let stored = page("Limit is 5.", "Owner: platform.");
         assert_eq!(compose(&stored, &stored), stored);
+        let rewritten = written(&page("Limit is 7.", "Owner: platform."), &["Synthesis"]);
+        assert_eq!(
+            compose(&stored, &rewritten),
+            rewritten.replace("Limit is 7.", "Limit is 5."),
+            "a resynthesis Lore recorded keeps the recorded body"
+        );
         assert_eq!(
             compose(&stored, &page("Limit is 7.", "Owner: platform.")),
-            stored
+            page("Limit is 7.", "Owner: platform."),
+            "a body no record names is its author's, whatever its heading"
         );
+        let corrected = rewritten.replace("Limit is 7.", "Limit is 6.");
         assert_eq!(
-            compose(&stored, &page("Limit is 7.", "Owner: data.")),
-            page("Limit is 5.", "Owner: data."),
+            compose(&stored, &corrected),
+            corrected,
+            "an edit after Lore wrote the body is an authored correction"
+        );
+        let beside = written(&page("Limit is 7.", "Owner: data."), &["Synthesis"]);
+        assert_eq!(
+            compose(&stored, &beside),
+            beside.replace("Limit is 7.", "Limit is 5."),
             "an authored correction beside a rewrite is read as it is now"
         );
-        let renamed = stored.replace("title: Neighbor", "title: Renamed");
-        assert_eq!(compose(&stored, &renamed), renamed);
-        assert_eq!(compose(&stored, "not a page"), "not a page");
-
-        let exploration = |summary: &str| {
-            format!("---\ntype: exploration\ntitle: Notes\n---\n## Summary\n\n{summary}\n")
-        };
+        let renamed = rewritten.replace("title: Neighbor", "title: Renamed");
         assert_eq!(
-            compose(&exploration("Limit is 5."), &exploration("Limit is 9.")),
-            exploration("Limit is 9."),
-            "another format's sections are its author's"
+            compose(&stored, &renamed),
+            renamed.replace("Limit is 7.", "Limit is 5.")
+        );
+        assert_eq!(compose(&stored, "not a page"), "not a page");
+        let retyped = rewritten.replace("type: concept", "type: exploration");
+        assert_eq!(
+            compose(&stored, &retyped),
+            retyped,
+            "a page that changed its format is read as it is now"
         );
 
         let at_end = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.";
-        let adjacent =
-            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n## Notes\nOwner: data.\n";
+        let adjacent = written(
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n## Notes\nOwner: data.\n",
+            &["Synthesis"],
+        );
         assert_eq!(
-            compose(&page("Limit is 5.", "Owner: platform."), adjacent),
-            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\n\nLimit is 5.\n\n## Notes\nOwner: data.\n",
+            compose(&page("Limit is 5.", "Owner: platform."), &adjacent),
+            adjacent.replace(
+                "## Synthesis\n## Notes",
+                "## Synthesis\n\nLimit is 5.\n\n## Notes"
+            ),
             "an emptied current section still separates its content from the next heading"
         );
-        let crlf = adjacent.replace('\n', "\r\n");
+        let crlf = written(
+            "---\r\ntype: concept\r\ntitle: Neighbor\r\n---\r\n## Synthesis\r\n## Notes\r\nOwner: data.\r\n",
+            &["Synthesis"],
+        );
         assert!(
             compose(&page("Limit is 5.", "Owner: platform."), &crlf)
                 .contains("Limit is 5.\r\n\r\n## Notes"),
             "the page's own line ending separates them"
         );
-        let extended = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 7.\n\nNotes\n-----\nOwner: data.\n";
+        let extended = written(
+            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 7.\n\nNotes\n-----\nOwner: data.\n",
+            &["Synthesis"],
+        );
         assert_eq!(
-            compose(at_end, extended),
-            "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.\n\nNotes\n-----\nOwner: data.\n",
+            compose(at_end, &extended),
+            extended.replace("Limit is 7.\n", "Limit is 5.\n"),
             "a following section is separated from the kept body"
         );
-        let filled = page("Limit is 5.", "Owner: platform.").replace(
-            "## Related\n\n## Sources",
-            "## Related\n\nA neighbor's new related list.\n\n## Sources",
-        );
         let stored = page("Limit is 5.", "Owner: platform.");
+        let filled = written(
+            &stored.replace(
+                "## Related\n\n## Sources",
+                "## Related\n\nA neighbor's new related list.\n\n## Sources",
+            ),
+            &["Related"],
+        );
         assert_eq!(
             compose(&stored, &filled),
-            stored,
+            filled.replace("A neighbor's new related list.\n\n", ""),
             "a section a neighbor filled composes to its recorded empty body"
         );
         let tight = "---\ntype: concept\ntitle: Neighbor\n---\n## Synthesis\nLimit is 5.\n## Notes\nOwner: data.\n";
+        let retightened = written(&tight.replace("Limit is 5.", "Limit is 7."), &["Synthesis"]);
         assert_eq!(
-            compose(tight, &tight.replace("Limit is 5.", "Limit is 7.")),
-            tight,
+            compose(tight, &retightened),
+            retightened.replace("Limit is 7.", "Limit is 5."),
             "a body that already ends its line before an ATX heading stays as recorded"
         );
         let indented = page("    let limit = 5;", "Owner: platform.");
+        let reindented = written(&page("let limit = 5;", "Owner: platform."), &["Synthesis"]);
         assert_eq!(
-            compose(&indented, &page("let limit = 5;", "Owner: platform.")),
-            indented,
+            compose(&indented, &reindented),
+            reindented.replace("\nlet limit = 5;", "\n    let limit = 5;"),
             "significant indentation is part of the recorded body"
         );
     }
@@ -388,7 +405,10 @@ mod tests {
         let read = lk_vault::ReadControl::default();
         let neighbor = "wiki/concepts/neighbor.md";
         let first = page("Prior answer.", "Operational note.");
-        let second = page("Resynthesized answer.", "Operational note.");
+        let second = written(
+            &page("Resynthesized answer.", "Operational note."),
+            &["Synthesis"],
+        );
         let mut snapshot = ContextSnapshot::load(&root, &read, "task", "hash").unwrap();
         snapshot.bind(BTreeMap::from([(neighbor.into(), first.clone())]));
         let mut plan = lk_vault::MutationPlan::default();
@@ -398,8 +418,15 @@ mod tests {
         assert!(!snapshot.plan_record(&root, &mut unchanged).unwrap());
 
         let mut reloaded = ContextSnapshot::load(&root, &read, "task", "hash").unwrap();
-        reloaded.bind(BTreeMap::from([(neighbor.into(), second)]));
-        assert_eq!(reloaded.page(neighbor), Some(first.as_str()));
+        reloaded.bind(BTreeMap::from([(neighbor.into(), second.clone())]));
+        assert_eq!(
+            reloaded.page(neighbor),
+            Some(
+                second
+                    .replace("Resynthesized answer.", "Prior answer.")
+                    .as_str()
+            )
+        );
 
         let file = root.join(path("task", "hash"));
         let raw = std::fs::read_to_string(&file).unwrap();

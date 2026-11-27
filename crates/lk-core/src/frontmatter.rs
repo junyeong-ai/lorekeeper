@@ -59,6 +59,11 @@ pub mod field {
     /// referenced, as JSON text. Written by synthesis publication; carried by concept rerender
     /// with the synthesis it describes.
     pub const SYNTHESIS_REVIEWS: &str = "synthesis_reviews";
+    /// The `llm_inputs` child key recording, as JSON text, the sections whose bodies Lore wrote
+    /// on a concept page: each heading with the digest of the body written under it
+    /// (`lk_vault::record_generated_sections`). An edit to such a body no longer matches it, so
+    /// the record proves a body is Lore's only while the body is unchanged.
+    pub const GENERATED_SECTIONS: &str = "generated_sections";
 
     /// The build that rendered a generated page, carried on the page itself.
     ///

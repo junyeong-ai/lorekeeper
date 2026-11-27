@@ -1735,22 +1735,36 @@ mod tests {
         assert!(!reread.frontmatter.fields.contains_key("source_count"));
         write(&root, selected, &owner_raw);
 
-        // Once its Work is planned, an owner's Lore-owned sections are read from the request's
-        // context snapshot, while an authored section is read as it is now.
+        // Once its Work is planned, an owner's sections whose bodies Lore recorded writing are
+        // read from the request's context snapshot, while anything authored is read as it is
+        // now. Publication compares the result's context revision with this reading, so a
+        // reused owner is published against the scope its admission judged.
         let mut planned = admit(&[selected]).unwrap();
         let session = lk_vault::MutationSession::acquire(&root).unwrap();
         super::super::persist_prepared(&session, &config, "config", &mut planned).unwrap();
         drop(session);
-        write(
-            &root,
-            selected,
+        let resynthesized = lk_vault::record_generated_sections(
             &owner_raw.replace("declared scope", "resynthesized scope"),
-        );
+            &["Synthesis"],
+        )
+        .unwrap();
+        write(&root, selected, &resynthesized);
         assert_eq!(
             admit(&[selected]).unwrap().revision("config").unwrap(),
             planned.revision("config").unwrap(),
             "an owner's resynthesis leaves the extraction's Work as planned"
         );
+        for corrected in [
+            owner_raw.replace("declared scope", "corrected scope"),
+            resynthesized.replace("resynthesized scope", "corrected scope"),
+        ] {
+            write(&root, selected, &corrected);
+            assert_ne!(
+                admit(&[selected]).unwrap().revision("config").unwrap(),
+                planned.revision("config").unwrap(),
+                "an authored correction of an owner's synthesis needs a fresh judgment"
+            );
+        }
         write(
             &root,
             selected,
@@ -2335,11 +2349,15 @@ mod tests {
 
         // A neighbor's resynthesis is read through the request's context snapshot.
         let original = std::fs::read_to_string(root.join(context)).unwrap();
-        let resynthesized = lk_vault::replace_section(
-            &original,
-            "Synthesis",
-            "Context with a distinct authority.\nA resynthesized neighbor body.",
-        );
+        let resynthesized = lk_vault::record_generated_sections(
+            &lk_vault::replace_section(
+                &original,
+                "Synthesis",
+                "Context with a distinct authority.\nA resynthesized neighbor body.",
+            ),
+            &["Synthesis"],
+        )
+        .unwrap();
         write(&root, context, &resynthesized);
         assert_eq!(load(index).unwrap().text, planned[index]);
 
@@ -2381,11 +2399,15 @@ mod tests {
             };
         let work = persist(&tasks[0]);
         let original = std::fs::read_to_string(root.join(context)).unwrap();
-        let resynthesized = lk_vault::replace_section(
-            &original,
-            "Synthesis",
-            "Context with a distinct authority.\nA resynthesized neighbor body.",
-        );
+        let resynthesized = lk_vault::record_generated_sections(
+            &lk_vault::replace_section(
+                &original,
+                "Synthesis",
+                "Context with a distinct authority.\nA resynthesized neighbor body.",
+            ),
+            &["Synthesis"],
+        )
+        .unwrap();
         write(&root, context, &resynthesized);
 
         let (continued, prepared) = resumed(&tasks[0]).unwrap();

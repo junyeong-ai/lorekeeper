@@ -1047,11 +1047,21 @@ fn plan_concept_backlinks_inner(
                     .iter()
                     .find(|locale| locale.strings().concept_sources == section.heading)
                     .expect("resolved source heading belongs to a known locale");
-                replace_section(
+                let replaced = replace_section(
                     raw,
                     section.heading,
                     lk_core::concept_sources::render(*locale),
-                )
+                );
+                // A rewrite records the body it wrote, so a request that read the concept
+                // before can tell it from an authored correction. A page whose frontmatter
+                // cannot hold that record keeps the rewrite unrecorded, which such a request
+                // reads as authored.
+                if replaced == raw {
+                    replaced
+                } else {
+                    lk_vault::record_generated_sections(&replaced, &[section.heading])
+                        .unwrap_or(replaced)
+                }
             }
         };
         let Some(updated_content) = set_source_count(&sources_content, desired_count).and_then(
@@ -3812,9 +3822,17 @@ mod tests {
 
         let content = std::fs::read_to_string(&path).unwrap();
         let digest = fixture_digest(&["daily/slack/2026-05-20".to_owned()]);
-        assert!(
-            content.contains(&format!("llm_inputs:\n  synthesis: \"{digest}\"")),
-            "{content}"
+        let page = lk_vault::parse_page(&content).unwrap();
+        let inputs = &page.frontmatter.fields["llm_inputs"];
+        assert_eq!(inputs["synthesis"], digest.as_str(), "{content}");
+        assert_eq!(
+            lk_vault::generated_sections(&page)
+                .get("출처")
+                .map(String::as_str),
+            lk_vault::section_body(&content, "출처")
+                .map(lk_vault::generated_body_digest)
+                .as_deref(),
+            "the rewritten sources section records the body it wrote: {content}"
         );
     }
 

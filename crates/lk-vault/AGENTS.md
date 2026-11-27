@@ -24,6 +24,10 @@ canonical; SQLite navigation is derived.
   a top-level key; `set_llm_input` changes a child of block-style `llm_inputs`;
   `record_llm_input` may establish that mapping. Missing placement returns `None`,
   never appends markers to body. Callers serialize values and handle failure.
+  `record_generated_sections` records under `llm_inputs.generated_sections` the digest of
+  each section body a Lore writer just wrote; `generated_sections` reads it. A body is
+  Lore's only while its digest matches, so the record never vouches for an author's edit; a
+  writer that cannot record leaves its body unrecorded, which readers treat as authored.
 - Read `continuation_span` before changing setters: deeper indentation belongs to
   an entry; siblings end it; blank lines don't belong/end; comments belong to the
   following entry except inside per-line-tracked block scalars (including `- |`).

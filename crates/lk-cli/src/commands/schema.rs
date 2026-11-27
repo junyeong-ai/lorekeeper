@@ -561,6 +561,8 @@ pub fn render_agents_md(
          `/lore-process` stages a typed result and `lore queue apply` validates and publishes \
          the body and completion marker together. Never edit a queued target or stamp its \
          markers directly. `lore doctor` reports unanswered inputs, including pending work. \
+         On a concept page, `generated_sections` records the digest of each section body Lore \
+         wrote, which tells a later rewrite by Lore from an author's edit; never set it by hand. \
          Directly authored pages omit this block until a machine writer establishes it."
     )
     .unwrap();
