@@ -6993,10 +6993,11 @@ mod native {
             })
         }
 
-        /// The plan after recording a screening of `path`. A recorded screening changes only
-        /// that subject's selection state, so its candidate is read again from `screened`, the
-        /// scan the recording checked against, and the other planned subjects stand; a
-        /// deferral (`screened` is `None`) changes the batch, which is planned again.
+        /// The plan after recording a screening of `path`, or after its candidates drifted. A
+        /// recorded screening changes only that subject's selection state, so its candidate is
+        /// read again from `screened`, the scan the recording checked against (or a fresh one
+        /// after drift), and the other planned subjects stand; a deferral (`screened` is `None`)
+        /// changes the batch, which is planned again.
         fn replan_screening(
             &mut self,
             paths: &[String],
@@ -7097,6 +7098,54 @@ mod native {
                         self.defer_audit_screening(&candidate, error.to_string());
                         refreshed = false;
                         plan = match self.audit_plan(paths) {
+                            Ok(plan) => plan,
+                            Err(error) => {
+                                self.failure("audit screening replanning", error);
+                                return None;
+                            }
+                        };
+                        continue;
+                    }
+                    // A writer changed this subject's candidates after it was read, as while
+                    // another subject's packet ran: read it again once, and defer it when they
+                    // change again.
+                    Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                        if !drifted.insert(candidate.path.clone()) {
+                            self.defer_audit_screening(
+                                &candidate,
+                                "candidate inputs changed repeatedly before screening".into(),
+                            );
+                            refreshed = false;
+                            plan = match self.audit_plan(paths) {
+                                Ok(plan) => plan,
+                                Err(error) => {
+                                    self.failure("audit screening replanning", error);
+                                    return None;
+                                }
+                            };
+                            continue;
+                        }
+                        let pages = match lk_graph::scan::scan_vault_controlled(
+                            &self.root,
+                            self.config.graph.scope.follow_links,
+                            self.supervisor.read_control(),
+                        ) {
+                            Ok(pages) => pages,
+                            Err(error) => {
+                                self.failure(
+                                    "audit screening replanning",
+                                    miette::miette!("{error}"),
+                                );
+                                return None;
+                            }
+                        };
+                        refreshed = true;
+                        plan = match self.replan_screening(
+                            paths,
+                            plan,
+                            &candidate.path,
+                            Some(pages),
+                        ) {
                             Ok(plan) => plan,
                             Err(error) => {
                                 self.failure("audit screening replanning", error);

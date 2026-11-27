@@ -17,7 +17,10 @@ paths:
   The screening loop plans the batch once and, after recording a packet, reads only that
   subject again from the scan the recording checked against; a deferral changes the batch
   and plans it again, and before admission the loop plans once more if it refreshed only
-  screened subjects since its last plan, since the others were read before its calls.
+  screened subjects since its last plan, since the others were read before its calls. A
+  subject whose candidates changed after it was read (a writer during another subject's
+  packet) is read again once from a fresh scan when its packet is prepared; a second change
+  in the run defers it. Drift never halts the loop.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.

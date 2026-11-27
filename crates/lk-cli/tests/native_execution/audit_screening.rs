@@ -54,6 +54,13 @@ with (root/'screen-calls.jsonl').open('a') as stream:
         'subject_text':subject.decode('utf-8'),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
 if mode=='failed': raise SystemExit(51)
+if mode=='edit-peer' and not (root/'peer-edited').exists():
+    # A writer changes another planned subject's candidate while this packet runs.
+    (root/'peer-edited').write_text('')
+    for subject_path, page in json.loads((root/'peer-edits.json').read_text()).items():
+        if request['subject']['path'].endswith(subject_path):
+            page=root/'vault'/page
+            page.write_text(page.read_text()+'\nA concurrent correction.\n')
 response={'status':'complete','reason':None,'decisions':[{'candidate_ref':card['candidate_ref'],
     'decision':('defer' if mode=='defer-first' and card['candidate']['path'].endswith('/candidate-00.md') else 'not-selected'),
     'reason':'The declared scope is inapplicable, or its explicit prerequisite is unresolved.'}
@@ -243,6 +250,60 @@ fn native_audit_screening_continues_its_packets_and_assessment_in_one_run() {
             .collect::<Vec<_>>();
         assert_eq!(keys.len(), 21, "each candidate is screened once");
         assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 21);
+    }
+}
+
+#[test]
+fn native_audit_screening_reads_again_a_subject_whose_candidates_changed_during_another_packet() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 3, "edit-peer", false, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 1", "max_calls: 4")
+            .replace("batch_size: 1", "batch_size: 2");
+        std::fs::write(&fixture.config, config).unwrap();
+        let peer = "wiki/documents/candidate-00.md";
+        let vault = fixture.root().join("vault");
+        std::fs::write(
+            vault.join("wiki/documents/peer-00.md"),
+            "---\ntype: document\ntitle: Peer 00\n---\nThe peer-roof scope covers peer 00.\n",
+        )
+        .unwrap();
+        discover(&fixture, peer, &["peer-roof"]);
+        // Whichever subject screens first, its call edits a candidate only the other reads.
+        std::fs::write(
+            fixture.root().join("peer-edits.json"),
+            serde_json::to_vec(&serde_json::json!({
+                SUBJECT: "wiki/documents/peer-00.md",
+                peer: "wiki/documents/candidate-01.md",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let planned = json(&fixture, &["wiki", "audit-plan"])["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+            .map(|candidate| candidate["path"].as_str().unwrap().to_owned())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            planned,
+            BTreeSet::from([SUBJECT.to_owned(), peer.to_owned()])
+        );
+
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(fixture.root().join("peer-edited").exists());
+        assert_eq!(
+            calls(&fixture).len(),
+            2,
+            "one packet for each subject: {report}"
+        );
+        for subject in [SUBJECT, peer] {
+            let packet = json(&fixture, &["wiki", "audit-candidates", subject]);
+            assert_eq!(packet["progress"]["unknown"], 0, "{subject}: {packet}");
+        }
     }
 }
 
