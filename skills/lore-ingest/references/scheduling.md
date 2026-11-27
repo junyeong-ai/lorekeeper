@@ -123,6 +123,12 @@ is unavailable, never a zero-use success. This snapshot does not verify OS regis
 or guarantee progress while the computer is off, asleep or out of agent allowance.
 After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json`
 clears only its pause; it preserves usage, rejected proposals and exact semantic holds.
+An upgrade clears no pause an earlier version recorded, except a `host environment`
+pause (below): a stage name alone cannot tell a host failure from an integrity
+failure, so a host that failed under another stage (an unsupported CLI version at its
+first call, for example) stays paused under that stage. After upgrading, read each
+remaining pause's recorded stage and detail in `lore status`, repair its cause, then
+resume only that operation with `--resume`.
 Unchanged holds spend no calls. A failed invocation of one request holds only that
 exact input, without pausing the operation or earning semantic progress;
 [bounded work](../../lore-process/references/bounded-work.md#native-holds-and-retries)
