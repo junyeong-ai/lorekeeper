@@ -685,8 +685,15 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             let root = session.root().to_path_buf();
             let pages = lk_graph::scan::scan_vault(&root, config.graph.scope.follow_links)
                 .map_err(|error| miette::miette!("{error}"))?;
-            lk_graph::audit::record_discovery(&session, &config.vault.dirs, &pages, request)
-                .map_err(|error| miette::miette!("{error}"))?;
+            super::audit::record_discovery_controlled(
+                &session,
+                &config.vault.dirs,
+                &pages,
+                request,
+                lk_graph::audit::DiscoveryWrite::Replace,
+                &lk_vault::ReadControl::default(),
+            )
+            .map_err(|error| miette::miette!("{error}"))?;
             println!("{}", serde_json::json!({"recorded": true}));
             Ok(())
         }

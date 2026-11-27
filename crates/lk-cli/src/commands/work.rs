@@ -1978,17 +1978,11 @@ pub(super) fn record_audit_controlled(
         lk_graph::audit::AuditResults {
             assessments: vec![assessment],
         },
-        |assessment, mutation| {
+        |_, mutation| {
             prepared.guard_pages(mutation);
             mutation.require_unchanged(final_path.clone(), final_raw.clone());
             mutation.require_unchanged(path.clone(), raw.clone());
-            preparation::plan_retire(
-                root,
-                &preparation::Key::AuditAssessment {
-                    path: assessment.path.clone(),
-                },
-                mutation,
-            )
+            Ok(())
         },
         read,
     )

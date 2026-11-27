@@ -214,23 +214,6 @@ impl WholeSubject {
         self.prepared.guard_pages(mutation);
     }
 
-    /// Guards this subject's inputs for its published assessment and retires the attempt
-    /// retained for the subject.
-    pub fn plan_publication(
-        &self,
-        root: &std::path::Path,
-        mutation: &mut lk_vault::MutationPlan,
-    ) -> miette::Result<()> {
-        self.guard(mutation);
-        super::preparation::plan_retire(
-            root,
-            &super::preparation::Key::AuditAssessment {
-                path: self.candidate.path.clone(),
-            },
-            mutation,
-        )
-    }
-
     pub fn assessment(
         &self,
         disposition: lk_graph::audit::AuditDisposition,

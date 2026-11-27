@@ -527,7 +527,6 @@ impl Runner<'_> {
         };
         let mut usable = false;
         let mut recorded = 0;
-        let mut retired = lk_vault::MutationPlan::default();
         for (subject, queries) in complete {
             match subject.is_current(session.root(), self.supervisor.read_control()) {
                 Ok(true) => {}
@@ -540,19 +539,17 @@ impl Runner<'_> {
                     return self.failure("audit discovery input", error);
                 }
             }
-            let key = crate::commands::work::preparation::Key::AuditDiscovery {
-                path: subject.path.clone(),
-            };
             let output = lk_graph::audit::AuditDiscoveryRequest {
                 path: subject.path,
                 file_revision: subject.revision,
                 queries,
             };
-            match lk_graph::audit::record_discovery_if_missing(
+            match crate::commands::audit::record_discovery_controlled(
                 &session,
                 &self.config.vault.dirs,
                 &pages,
                 output,
+                lk_graph::audit::DiscoveryWrite::IfMissing,
                 self.supervisor.read_control(),
             ) {
                 Ok(changed) => {
@@ -564,16 +561,6 @@ impl Runner<'_> {
                     return self.failure("audit discovery recording", error);
                 }
             }
-            if let Err(error) =
-                crate::commands::work::preparation::plan_retire(session.root(), &key, &mut retired)
-            {
-                self.record_work_step(metrics);
-                return self.failure("audit discovery recording", error);
-            }
-        }
-        if let Err(error) = session.apply(retired).into_diagnostic() {
-            self.record_work_step(metrics);
-            return self.failure("audit discovery recording", error);
         }
         self.result
             .work_telemetry

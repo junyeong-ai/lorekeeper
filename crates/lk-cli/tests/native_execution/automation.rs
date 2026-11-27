@@ -1186,6 +1186,90 @@ fn scheduled_tool_enabled_failure_holds_its_request_without_pausing_or_refunding
     }
 }
 
+#[test]
+fn a_manual_audit_record_settles_the_attempts_a_native_failure_left() {
+    let attempts = |fixture: &Fixture| -> Vec<serde_json::Value> {
+        let directory = fixture
+            .root()
+            .join("vault/.lorekeeper/audit-preparation-attempts");
+        std::fs::read_dir(directory)
+            .map(|entries| {
+                entries
+                    .map(|entry| {
+                        serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap())
+                            .unwrap()
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let stages = |fixture: &Fixture| {
+        attempts(fixture)
+            .iter()
+            .map(|attempt| attempt["key"]["stage"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let fixture = Fixture::new("codex", 30, "exit 7");
+    configure(&fixture, Some(64), 60);
+    let subject = "wiki/concepts/stable.md";
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::create_dir_all(&concepts).unwrap();
+    std::fs::write(
+        concepts.join("stable.md"),
+        include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md")
+            .replace("Unlinked note", "stable")
+            .replace("unlinked-note", "stable"),
+    )
+    .unwrap();
+
+    // The native discovery fails and holds the subject; recording its discovery by hand
+    // settles that stage.
+    run(&fixture, "knowledge", false);
+    assert_eq!(stages(&fixture), ["audit-discovery"]);
+    record_discovery(&fixture, subject);
+    assert!(stages(&fixture).is_empty(), "{:?}", attempts(&fixture));
+
+    // The native assessment fails and holds the subject; recording its assessment by hand
+    // settles that stage, so the next run has no probe to release or withdraw.
+    run(&fixture, "knowledge", false);
+    assert_eq!(stages(&fixture), ["audit-assessment"]);
+    let plan = fixture
+        .command()
+        .args(["wiki", "audit-plan", "--path", subject])
+        .output()
+        .unwrap();
+    let candidate =
+        serde_json::from_slice::<serde_json::Value>(&plan.stdout).unwrap()["candidates"][0].clone();
+    let assessment = fixture.root().join("manual-assessment.json");
+    std::fs::write(&assessment, serde_json::to_vec(&serde_json::json!({"assessments":[{
+        "path":subject, "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+        "disposition":"reviewed", "reason":"The subject was read in full by hand.", "reviews":[]
+    }]})).unwrap()).unwrap();
+    let recorded = fixture
+        .command()
+        .args(["wiki", "audit-record", "--file"])
+        .arg(&assessment)
+        .output()
+        .unwrap();
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert!(stages(&fixture).is_empty(), "{:?}", attempts(&fixture));
+    let settled = run(&fixture, "knowledge", false);
+    assert_eq!(calls(&settled), 0, "{settled}");
+    assert!(
+        settled["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|run| run["stages"].as_array().unwrap())
+            .all(|stage| stage["name"] != "host probe"),
+        "{settled}"
+    );
+}
+
 fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
     configure(fixture, Some(64), 60);
     let first = run(fixture, "knowledge", false);

@@ -127,6 +127,10 @@ pub(super) fn record(
     )
 }
 
+/// Records `results` through the shared audit owner with `guard`'s steps, and retires each
+/// recorded subject's retained audit-assessment attempt in the same mutation: whichever path
+/// publishes an assessment (`wiki audit-record`, a native whole or bounded audit), whatever
+/// input or profile the attempt failed on, nothing of the stage is pending any more.
 pub(super) fn record_controlled(
     session: &lk_vault::MutationSession,
     config: &lk_core::config::Config,
@@ -187,6 +191,15 @@ pub(super) fn record_controlled(
                 guarded.map_err(into_graph_error)?;
             }
             guard(assessment, mutation).map_err(into_graph_error)?;
+            #[cfg(unix)]
+            super::work::preparation::plan_retire(
+                root,
+                &super::work::preparation::Key::AuditAssessment {
+                    path: assessment.path.clone(),
+                },
+                mutation,
+            )
+            .map_err(into_graph_error)?;
             action::guard_completed(root, &assessment.path, mutation).map_err(into_graph_error)?;
             super::work::guard_audit_controlled(
                 root,
@@ -208,6 +221,42 @@ pub(super) fn record_controlled(
         read,
     )
     .map_err(miette::Report::msg)
+}
+
+/// Records an audit discovery recipe through the shared audit owner and retires the subject's
+/// retained audit-discovery attempt in the same mutation, also when `IfMissing` keeps a recipe
+/// already current: whichever path publishes the stage's result (`wiki audit-discover`, a
+/// native discovery), nothing of the stage is pending any more. Whether a recipe was recorded.
+pub(super) fn record_discovery_controlled(
+    session: &lk_vault::MutationSession,
+    dirs: &lk_core::config::VaultDirs,
+    pages: &[lk_graph::scan::ScannedPage],
+    request: lk_graph::audit::AuditDiscoveryRequest,
+    write: lk_graph::audit::DiscoveryWrite,
+    read: &lk_vault::ReadControl,
+) -> Result<bool, lk_graph::GraphError> {
+    let root = session.root();
+    let path = request.path.clone();
+    lk_graph::audit::record_discovery_with_guard_controlled(
+        session,
+        dirs,
+        pages,
+        request,
+        write,
+        |mutation| {
+            #[cfg(unix)]
+            super::work::preparation::plan_retire(
+                root,
+                &super::work::preparation::Key::AuditDiscovery { path },
+                mutation,
+            )
+            .map_err(into_graph_error)?;
+            #[cfg(not(unix))]
+            let _ = (root, path, mutation);
+            Ok(())
+        },
+        read,
+    )
 }
 
 pub(super) const MAX_DEFERRED_DETAILS: usize = 100;

@@ -222,21 +222,31 @@ fn record_discovery_with_policy(
         request,
         policy,
         DiscoveryWrite::Replace,
+        |_| Ok(()),
         &lk_vault::ReadControl::default(),
     )
     .map(|_| ())
 }
 
-enum DiscoveryWrite {
+/// How a discovery recording treats a recipe already recorded for the subject's revision.
+pub enum DiscoveryWrite {
+    /// Records the request's queries in its place.
     Replace,
+    /// Keeps it, recording nothing new.
     IfMissing,
 }
 
-pub fn record_discovery_if_missing(
+/// Records a screened discovery recipe with `guard`'s steps in the same mutation. `guard`
+/// also runs when `IfMissing` keeps a recipe already current for the subject's revision,
+/// against those receipt bytes, so a caller settling the stage's pending state settles it
+/// whichever write published the recipe. Whether a recipe was recorded.
+pub fn record_discovery_with_guard_controlled(
     session: &MutationSession,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     request: AuditDiscoveryRequest,
+    write: DiscoveryWrite,
+    guard: impl FnOnce(&mut MutationPlan) -> Result<(), GraphError>,
     read: &lk_vault::ReadControl,
 ) -> Result<bool, GraphError> {
     record_discovery_guarded(
@@ -245,11 +255,13 @@ pub fn record_discovery_if_missing(
         pages,
         request,
         Some(selection::SelectionPlan::default()),
-        DiscoveryWrite::IfMissing,
+        write,
+        guard,
         read,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_discovery_guarded(
     session: &MutationSession,
     dirs: &VaultDirs,
@@ -257,6 +269,7 @@ fn record_discovery_guarded(
     request: AuditDiscoveryRequest,
     policy: Option<selection::SelectionPlan>,
     mode: DiscoveryWrite,
+    guard: impl FnOnce(&mut MutationPlan) -> Result<(), GraphError>,
     read: &lk_vault::ReadControl,
 ) -> Result<bool, GraphError> {
     let root = session.root();
@@ -294,6 +307,15 @@ fn record_discovery_guarded(
             .get(&request.path)
             .is_some_and(|plan| plan.subject_revision == revision)
     {
+        let mut plan = MutationPlan::default();
+        if let Some(before) = before {
+            plan.require_unchanged(STATE, before);
+        }
+        guard(&mut plan)?;
+        if plan.has_changes() {
+            read.check().map_err(GraphError::from)?;
+            session.apply(plan).map_err(error)?;
+        }
         return Ok(false);
     }
     // Decisions bind the subject revision and each candidate's own matched queries, so a
@@ -325,6 +347,7 @@ fn record_discovery_guarded(
         serde_json::to_string_pretty(&receipts).map_err(error)? + "\n",
     )
     .map_err(error)?;
+    guard(&mut plan)?;
     read.check().map_err(GraphError::from)?;
     session.apply(plan).map_err(error)?;
     Ok(true)
@@ -4777,22 +4800,26 @@ mod tests {
             }],
         };
         assert!(
-            record_discovery_if_missing(
+            record_discovery_with_guard_controlled(
                 &session,
                 &dirs,
                 &scan(root.path()),
                 request(original, "authored scope"),
+                DiscoveryWrite::IfMissing,
+                |_| Ok(()),
                 &lk_vault::ReadControl::default(),
             )
             .unwrap()
         );
         let before = std::fs::read(root.path().join(STATE)).unwrap();
         assert!(
-            !record_discovery_if_missing(
+            !record_discovery_with_guard_controlled(
                 &session,
                 &dirs,
                 &scan(root.path()),
                 request(original, "another scope"),
+                DiscoveryWrite::IfMissing,
+                |_| Ok(()),
                 &lk_vault::ReadControl::default(),
             )
             .unwrap()
@@ -4801,22 +4828,26 @@ mod tests {
         let changed = original.replace("authored", "changed");
         write(root.path(), path, &changed);
         assert!(
-            record_discovery_if_missing(
+            record_discovery_with_guard_controlled(
                 &session,
                 &dirs,
                 &scan(root.path()),
                 request(original, "stale scope"),
+                DiscoveryWrite::IfMissing,
+                |_| Ok(()),
                 &lk_vault::ReadControl::default(),
             )
             .is_err()
         );
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         assert!(
-            record_discovery_if_missing(
+            record_discovery_with_guard_controlled(
                 &session,
                 &dirs,
                 &scan(root.path()),
                 request(&changed, "changed scope"),
+                DiscoveryWrite::IfMissing,
+                |_| Ok(()),
                 &lk_vault::ReadControl::default(),
             )
             .unwrap()
