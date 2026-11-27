@@ -40,12 +40,16 @@ pub struct KnowledgeReview {
     /// question cannot have been settled by new evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_citation_digest: Option<String>,
-    /// For a typed review a synthesis proposed, the digest of the open reviews naming its
-    /// concept that are not unedited synthesis publications, by address and revision, when it
-    /// was proposed. With the citation digest it tells a later synthesis whether anything but
-    /// synthesis publications changed since.
+    /// Superseded by `judged_input_digest`: the digest of the other open reviews an earlier
+    /// release recorded. It is kept and validated, but no longer shows the review loop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_review_digest: Option<String>,
+    /// For a typed review a synthesis proposed, the digest of every input that synthesis read
+    /// (its Work's resources and the open reviews naming the concept, by address and revision),
+    /// unedited synthesis publications naming the concept aside. With the citation digest it
+    /// tells a later synthesis whether anything but those publications changed since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judged_input_digest: Option<String>,
     /// For a typed review a synthesis proposed, its `publication_digest` as published. While the
     /// page's current digest equals it, the review is exactly what automation published; an
     /// edit makes it an ordinary input. A review without one is never treated as automation's.
@@ -86,6 +90,8 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             #[serde(default)]
             judged_review_digest: Option<String>,
             #[serde(default)]
+            judged_input_digest: Option<String>,
+            #[serde(default)]
             publication_digest: Option<String>,
         }
         let mapping = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
@@ -99,6 +105,7 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             resolution: fields.resolution,
             judged_citation_digest: fields.judged_citation_digest,
             judged_review_digest: fields.judged_review_digest,
+            judged_input_digest: fields.judged_input_digest,
             publication_digest: fields.publication_digest,
         })
     }
@@ -246,6 +253,7 @@ impl KnowledgeReview {
         for (field, digest) in [
             ("judged_citation_digest", &self.judged_citation_digest),
             ("judged_review_digest", &self.judged_review_digest),
+            ("judged_input_digest", &self.judged_input_digest),
             ("publication_digest", &self.publication_digest),
         ] {
             if let Some(digest) = digest

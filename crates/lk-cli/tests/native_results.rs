@@ -1145,7 +1145,7 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             .fields["review"];
         assert_eq!(metadata["judged_citation_digest"], task.cache_hash);
         assert!(
-            metadata["judged_review_digest"].is_string(),
+            metadata["judged_input_digest"].is_string(),
             "a synthesis-proposed review records the other reviews it was judged against"
         );
         assert!(fixture.done(&task), "{report}");

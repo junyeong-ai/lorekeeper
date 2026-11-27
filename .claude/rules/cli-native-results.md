@@ -122,10 +122,13 @@ paths:
   current page still matches; an operator's edit, or a review recorded without that digest,
   makes it an ordinary input. The loop holds while an unedited publication naming the concept
   records `judged_citation_digest` equal to the task's citation digest and
-  `judged_review_digest` equal to the digest of the open reviews naming the concept that are
-  not unedited publications (by address and file revision). Alternating kinds therefore does
-  not reopen the loop, an edit to a publication does, and a review without
-  `publication_digest` or `judged_review_digest` never shows it. Any other synthesis may propose
+  `judged_input_digest` equal to the digest of every input this synthesis read (its Work's
+  resources and the open reviews naming the concept, by address and revision), unedited
+  publications naming the concept aside. Alternating kinds therefore does not reopen the
+  loop, while any other changed input (a revised linked concept, new discovery context, an
+  edit to a publication) does; a review without `publication_digest` or
+  `judged_input_digest`, such as one recording only the superseded `judged_review_digest`,
+  never shows it. Any other synthesis may propose
   a review of a kind already open for its concept when `distinct_from` declares, for each
   open review of that kind naming the concept (its verified owner, among every review in the
   vault's review inventory), how its question differs; Rust refuses an incomplete list. A
@@ -135,7 +138,7 @@ paths:
   whose absence the request guards. A target publishes at most one review per run, spent when
   it publishes: a further admissible proposal in that run publishes and records nothing and
   defers only that target, while one admission refuses for any reason has its synthesis staged for guarded queue application. The published
-  review records its `kind`, `judged_citation_digest`, `judged_review_digest` and
+  review records its `kind`, `judged_citation_digest`, `judged_input_digest` and
   `publication_digest`, with its concept as its subject, so automation's own unedited reviews
   are recognizable.
 - A synthesis capture lists every open review whose subject owner is the concept in

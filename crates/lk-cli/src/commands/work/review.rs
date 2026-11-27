@@ -5,8 +5,8 @@
 //!
 //! Only the causal loop is blocked. A synthesis finalizer that publishes a review makes its concept
 //! owed a resynthesis; that resynthesis, when the only changed inputs are unedited publications of
-//! syntheses of this concept (the citations and every other open review are as they were when one
-//! of them was published), may not propose another review of any kind, or rephrased or alternating
+//! syntheses of this concept (everything else it reads is as it was when one of them was
+//! published), may not propose another review of any kind, or rephrased or alternating
 //! questions would open review after review. A publication is unedited while its page still matches
 //! the `publication_digest` it was published with; an operator's edit makes it an ordinary input,
 //! as is a review recorded without that digest. Any other synthesis may propose a review of a kind
@@ -18,8 +18,8 @@
 //! A refused proposal never holds the synthesis: every needs-review reply carries the complete
 //! synthesis the finalizer would publish without the review, whose references name only existing
 //! reviews, and Rust stages it and drops only the proposal. A review a synthesis publishes records
-//! the citation digest and the digest of the other inputs it was judged against, the open reviews
-//! that are not unedited publications (`judged_citation_digest`, `judged_review_digest`), and its
+//! the citation digest and the digest of every other input it was judged against, unedited
+//! publications aside (`judged_citation_digest`, `judged_input_digest`), and its
 //! own `publication_digest`, with its concept as its subject: that is how a later synthesis
 //! recognizes the loop. The run bounds the rest: a target publishes at most one review per run, and
 //! a further admissible proposal waits unrecorded for a later run, whose request then scopes the
@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lk_core::semantic::SemanticAuthority;
+use lk_core::semantic::{SemanticAuthority, SemanticResource};
 use lk_queue::{QueueTask, TaskKind};
 use lk_vault::{MutationPlan, MutationSession};
 use miette::IntoDiagnostic;
@@ -164,14 +164,16 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
-    if let Some(refusal) = rule_refusal(root, config, task, &proposal)? {
+    if let Some(refusal) = rule_refusal(root, config, task, prepared, &proposal)? {
         return Ok(Err(refusal));
     }
-    let judged_review_digest =
-        judged_review_digest(&open_naming(root, config, &task.target.vault_path)?);
+    let judged_input_digest = judged_input_digest(
+        &prepared.resources,
+        &open_naming(root, config, &task.target.vault_path)?,
+    );
     let mut metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash,
-        "judged_review_digest":judged_review_digest});
+        "judged_input_digest":judged_input_digest});
     let render = |metadata: &Value| -> miette::Result<String> {
         Ok(format!(
             "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
@@ -211,23 +213,24 @@ pub(in crate::commands) fn admit(
 
 /// The refusal of `proposal` under the review rule, if it breaks it: it is the causal loop (an
 /// unedited synthesis publication naming this concept, judged against the same citations and
-/// the same other inputs, the open reviews that are not unedited synthesis publications), or it
-/// leaves an open review of its kind without a declared difference.
+/// the same other inputs, everything this Work read but unedited synthesis publications), or
+/// it leaves an open review of its kind without a declared difference.
 fn rule_refusal(
     root: &Path,
     config: &lk_core::config::Config,
     task: &QueueTask,
+    prepared: &Prepared,
     proposal: &ReviewProposal,
 ) -> miette::Result<Option<String>> {
     let open = open_naming(root, config, &task.target.vault_path)?;
-    let judged = judged_review_digest(&open);
+    let judged = judged_input_digest(&prepared.resources, &open);
     if let Some(review) = open.iter().find(|review| {
         review.is_unedited_publication
             && review.judged_citation_digest.as_deref() == Some(task.cache_hash.as_str())
-            && review.judged_review_digest.as_deref() == Some(judged.as_str())
+            && review.judged_input_digest.as_deref() == Some(judged.as_str())
     }) {
         return Ok(Some(format!(
-            "this synthesis is owed only to reviews syntheses of this concept published, such as the open review {}, and no citation or other review changed since; reference them in the synthesis instead of proposing another review",
+            "this synthesis is owed only to reviews syntheses of this concept published, such as the open review {}, and nothing else it read changed since; reference them in the synthesis instead of proposing another review",
             review.path
         )));
     }
@@ -261,24 +264,35 @@ struct NamingReview {
     revision: String,
     kind: Option<lk_vault::ReviewKind>,
     judged_citation_digest: Option<String>,
-    judged_review_digest: Option<String>,
+    judged_input_digest: Option<String>,
     /// Whether the page is exactly what a synthesis published: it records a
     /// `publication_digest` that its current content still matches. A review edited since, or
     /// one recorded without that digest, is an ordinary input.
     is_unedited_publication: bool,
 }
 
-/// The digest, by address and file revision, of the open reviews naming a concept that are not
-/// unedited synthesis publications: the inputs a synthesis's proposal is judged against.
-/// Unedited publications are left out, so a resynthesis they alone caused finds the digest its
-/// predecessor recorded, whatever their kinds, while an edit to one of them changes it.
-fn judged_review_digest(open: &[NamingReview]) -> String {
-    let mut entries = open
+/// The digest, by address and revision, of what a synthesis's proposal is judged against:
+/// every resource its Work read (citations, links, discovery context, reviews) and every open
+/// review naming the concept, unedited synthesis publications naming it aside. A resynthesis
+/// those publications alone caused finds the digest its predecessor recorded, whatever their
+/// kinds; any other changed input, an edit to a publication included, changes it.
+fn judged_input_digest(resources: &[SemanticResource], open: &[NamingReview]) -> String {
+    let unedited = open
         .iter()
-        .filter(|review| !review.is_unedited_publication)
-        .map(|review| (review.path.as_str(), review.revision.as_str()))
+        .filter(|review| review.is_unedited_publication)
+        .map(|review| review.path.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut entries = resources
+        .iter()
+        .map(|resource| (resource.address.as_str(), resource.revision.as_str()))
+        .chain(
+            open.iter()
+                .map(|review| (review.path.as_str(), review.revision.as_str())),
+        )
+        .filter(|(address, _)| !unedited.contains(address))
         .collect::<Vec<_>>();
     entries.sort_unstable();
+    entries.dedup();
     let bytes = serde_json::to_vec(&entries).expect("review entries serialize");
     blake3::hash(&bytes).to_hex()[..32].to_string()
 }
@@ -397,7 +411,7 @@ fn open_naming(
             path,
             kind: review.kind,
             judged_citation_digest: review.judged_citation_digest,
-            judged_review_digest: review.judged_review_digest,
+            judged_input_digest: review.judged_input_digest,
             is_unedited_publication,
         });
     }
@@ -645,6 +659,46 @@ mod tests {
                 .is_err(),
             "an origin this Work did not read"
         );
+    }
+
+    #[test]
+    fn the_judged_inputs_leave_out_only_unedited_publications() {
+        use super::{NamingReview, judged_input_digest};
+        use lk_core::semantic::{SemanticAuthority, SemanticResource};
+        let resource = |address: &str, revision: &str, authority| SemanticResource {
+            address: address.into(),
+            revision: revision.into(),
+            authority,
+            text: String::new(),
+        };
+        let review = |path: &str, revision: &str, unedited| NamingReview {
+            path: path.into(),
+            revision: revision.into(),
+            kind: None,
+            judged_citation_digest: None,
+            judged_input_digest: None,
+            is_unedited_publication: unedited,
+        };
+        let read = vec![
+            resource("wiki/documents/source.md", "a", SemanticAuthority::Page),
+            resource("wiki/concepts/linked.md", "b", SemanticAuthority::Context),
+        ];
+        let judged = judged_input_digest(&read, &[]);
+        // A resynthesis owed only to the review a synthesis published reads it unchanged.
+        let mut owed = read.clone();
+        owed.push(resource(
+            "wiki/explorations/gap.md",
+            "c",
+            SemanticAuthority::Review,
+        ));
+        let published = [review("wiki/explorations/gap.md", "c", true)];
+        assert_eq!(judged_input_digest(&owed, &published), judged);
+        // An edit to that review, or any other changed input, is a new input.
+        let edited = [review("wiki/explorations/gap.md", "c", false)];
+        assert_ne!(judged_input_digest(&owed, &edited), judged);
+        let mut revised = owed.clone();
+        revised[1].revision = "b2".into();
+        assert_ne!(judged_input_digest(&revised, &published), judged);
     }
 
     #[test]
