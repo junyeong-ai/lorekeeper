@@ -542,6 +542,56 @@ fn a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held() {
 }
 
 #[test]
+fn a_ledger_probe_whose_hold_was_renewed_is_retired() {
+    let behavior =
+        format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
+    let fixture = bounded_audit_fixture("codex", 1, &behavior);
+    configure(&fixture, Some(20), 60);
+    std::fs::write(fixture.root().join("fail"), "").unwrap();
+    run(&fixture, "knowledge", false);
+    std::fs::remove_file(fixture.root().join("fail")).unwrap();
+    let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name() == "inspection-timeouts.json")
+        .unwrap()
+        .into_path();
+    let held: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let (node, entry) = held["entries"].as_object().unwrap().iter().next().unwrap();
+    let failed_at: jiff::Timestamp = entry["failure"]["host"]["at"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // The ledger still names the hold as released at an earlier failure, which the hold has
+    // since renewed: it releases no current request.
+    let ledger = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/host-answers.json");
+    let mut answers: serde_json::Value = std::fs::read(&ledger).map_or_else(
+        |_| serde_json::json!({"schema": "host-answers-v1", "answers": {}}),
+        |raw| serde_json::from_slice(&raw).unwrap(),
+    );
+    answers["probe"] = serde_json::json!({
+        "identity": {"store": "inspection", "work_id": held["work_id"], "node_id": node},
+        "engine": "codex",
+        "host": {"profile": "0".repeat(64), "at": (failed_at - jiff::SignedDuration::from_hours(1)).to_string()},
+    });
+    std::fs::write(&ledger, serde_json::to_vec(&answers).unwrap()).unwrap();
+    write_audit_concept(&fixture, "fresh");
+    let report = run(&fixture, "knowledge", false);
+    let probe = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&ledger).unwrap())
+        .unwrap()
+        .get("probe")
+        .cloned();
+    assert_ne!(
+        probe.as_ref(),
+        Some(&answers["probe"]),
+        "a probe whose hold was renewed does not outlive it: {report}"
+    );
+}
+
+#[test]
 fn an_audit_probe_outside_the_current_audit_scope_is_withdrawn() {
     let behavior =
         format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");

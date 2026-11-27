@@ -208,8 +208,11 @@ paths:
   sent beside it; they release by the ordinary answered-after-failure rule. Each side therefore waits at
   most one run, even at one call per run. While the
   probe's host has given no outcome in the run, waves send one call at a time; a probe an
-  earlier run released and whose host has not answered since counts as this run's probe,
-  since that run may have stopped before sending it. A probe that
+  earlier run released counts as this run's probe, since that run may have stopped before
+  sending it, while its hold still stands released: the same request, failed at the same
+  time (neither settled nor renewed since), whose host has not answered since. It becomes
+  its drain's released probe, so it goes first or is withdrawn like one released now;
+  otherwise the ledger's probe is retired when the run takes its lease. A probe that
   fails without an answer renews its failure time and stays pending, so an outage costs at
   most one unanswered call per host per run and exhausts nothing. The renewed failure counts
   its consecutive failed probes (`HostEnd.probe_failures`), and the hold is a probe

@@ -231,6 +231,14 @@ pub(in crate::commands) enum HoldScope {
 
 #[cfg(unix)]
 impl HoldScope {
+    /// The drain that reaches this hold.
+    pub(in crate::commands) fn drain(&self) -> ProbeScope {
+        match self {
+            Self::Queue { .. } => ProbeScope::Queue,
+            Self::Audit { .. } => ProbeScope::Audit,
+        }
+    }
+
     /// Whether the held request still applies. `queue` is the pending queue one probe
     /// selection loaded, read at most once for all of its holds.
     fn is_current(
@@ -443,24 +451,26 @@ impl HostAnswers {
         false
     }
 
-    /// The host of a probe an earlier run released and whose host has not answered since:
-    /// the run may have ended before sending it, so this run treats it as its own probe.
+    /// The pending hold an earlier run released as this vault's probe, while it still stands
+    /// released: the same request, failed at the same time (neither settled nor renewed since),
+    /// whose host has not answered since. That run may have ended before sending it, so this
+    /// run takes it as its drain's released probe; without such a hold the ledger's probe is
+    /// stale.
     #[cfg(unix)]
-    pub(in crate::commands) fn pending_probe(
+    pub(in crate::commands) fn inherited_probe(
         &self,
-    ) -> Option<(Option<AgentEngine>, Option<ProfileKey>)> {
-        self.probe
-            .as_ref()
-            .filter(|probe| {
-                let host = probe.host.clone().map(|host| (host.profile, host.at));
-                !self.answered_since(probe.engine, host)
-            })
-            .map(|probe| {
-                (
-                    probe.engine,
-                    probe.host.as_ref().map(|host| host.profile.clone()),
-                )
-            })
+        holds: Vec<PendingHold>,
+    ) -> Option<PendingHold> {
+        holds.into_iter().find(|hold| {
+            self.is_probe(&hold.identity, hold.host.as_ref().map(|host| host.at))
+                && !self.answered_since(hold.engine, host_key(hold.host.as_ref()))
+        })
+    }
+
+    /// Whether the ledger names a released probe.
+    #[cfg(unix)]
+    pub(in crate::commands) fn has_probe(&self) -> bool {
+        self.probe.is_some()
     }
 
     /// The pending holds a probe may release for `scope`, oldest failure first: their
@@ -765,13 +775,27 @@ mod tests {
                 at: at(10).unwrap(),
             }),
         });
+        let pending = |seconds| {
+            vec![PendingHold {
+                identity: identity(),
+                engine: Some(AgentEngine::Codex),
+                scope: HoldScope::Audit {
+                    path: "wiki/concepts/subject.md".into(),
+                    subject_revision: "0".repeat(32),
+                },
+                host: host("synthesis", seconds),
+            }]
+        };
         assert_eq!(
-            answers.pending_probe(),
-            Some((
-                Some(AgentEngine::Codex),
-                Some(ProfileKey::from_profile("synthesis"))
-            )),
+            answers
+                .inherited_probe(pending(10))
+                .map(|hold| hold.identity),
+            Some(identity()),
             "an unanswered released probe carries into the next run"
+        );
+        assert!(
+            answers.inherited_probe(pending(30)).is_none(),
+            "a renewed hold no longer carries its old release"
         );
         assert_eq!(
             answers.standing(&identity(), &prior, false),
@@ -793,9 +817,8 @@ mod tests {
         answers
             .profiles
             .insert(ProfileKey::from_profile("synthesis"), at(20).unwrap());
-        assert_eq!(
-            answers.pending_probe(),
-            None,
+        assert!(
+            answers.inherited_probe(pending(10)).is_none(),
             "an answer of the probe's host settles it"
         );
         assert!(answers.settle(&mut repeat.clone(), Some((&prior, false))));

@@ -414,12 +414,30 @@ mod native {
 
     /// Pending unanswered holds a run may release, one at a time, as the probe an operator would
     /// send, and the one released now.
+    #[derive(Default)]
     struct HostProbe {
-        remaining: std::collections::VecDeque<crate::commands::work::host::PendingHold>,
+        /// The candidates still to try, `None` until the drain first chooses among them.
+        remaining: Option<std::collections::VecDeque<crate::commands::work::host::PendingHold>>,
         released: Option<crate::commands::work::host::PendingHold>,
         /// The queue target or audit subject the released hold belongs to, which its drain
         /// sends before other work.
         target: Option<String>,
+    }
+
+    /// The queue target or audit subject a released hold belongs to.
+    #[cfg(unix)]
+    fn probe_hold_target(
+        root: &Path,
+        hold: &crate::commands::work::host::PendingHold,
+    ) -> Option<String> {
+        match &hold.scope {
+            crate::commands::work::host::HoldScope::Queue { task_id, .. } => {
+                crate::commands::queue::current_task(root, task_id)
+                    .ok()
+                    .map(|task| task.target.vault_path)
+            }
+            crate::commands::work::host::HoldScope::Audit { path, .. } => Some(path.clone()),
+        }
     }
 
     /// Why a run releases a probe.
@@ -440,12 +458,6 @@ mod native {
     struct HostProbes {
         queue: Option<HostProbe>,
         audit: Option<HostProbe>,
-        /// The host of a probe an earlier run released but may not have sent; until that host
-        /// gives an outcome, this run treats it as its own probe.
-        inherited: Option<(
-            Option<lk_core::execution::AgentEngine>,
-            Option<crate::commands::work::host::ProfileKey>,
-        )>,
     }
 
     impl HostProbes {
@@ -480,7 +492,6 @@ mod native {
                         }),
                     )
                 })
-                .chain(self.inherited.clone())
         }
     }
 
@@ -1099,8 +1110,11 @@ mod native {
         ) -> bool {
             use crate::commands::work::host;
             let root = self.root.clone();
-            let mut probe = match self.host_probes.scope(scope).take() {
-                Some(probe) => probe,
+            let mut probe = self.host_probes.scope(scope).take().unwrap_or_default();
+            let withdrawn = probe.released.take();
+            probe.target = None;
+            let mut remaining = match probe.remaining.take() {
+                Some(remaining) => remaining,
                 None => {
                     let candidates = host::pending_holds(&root).and_then(|holds| {
                         host::HostAnswers::load(&root)?.probe_candidates(
@@ -1113,11 +1127,16 @@ mod native {
                         )
                     });
                     match candidates {
-                        Ok(candidates) => HostProbe {
-                            remaining: candidates.into(),
-                            released: None,
-                            target: None,
-                        },
+                        // A probe inherited from an earlier run and withdrawn now is not tried
+                        // again among the candidates.
+                        Ok(candidates) => candidates
+                            .into_iter()
+                            .filter(|hold| {
+                                withdrawn
+                                    .as_ref()
+                                    .is_none_or(|withdrawn| withdrawn.identity != hold.identity)
+                            })
+                            .collect(),
                         Err(error) => {
                             self.failure("host probe", error);
                             return false;
@@ -1125,14 +1144,13 @@ mod native {
                     }
                 }
             };
-            probe.released = None;
-            probe.target = None;
             let next = loop {
-                match probe.remaining.pop_front() {
+                match remaining.pop_front() {
                     Some(hold) if self.hosts_invoked.reached(hold.engine, hold.host.as_ref()) => {}
                     next => break next,
                 }
             };
+            probe.remaining = Some(remaining);
             *self.host_probes.scope(scope) = Some(probe);
             if let Err(error) = host::record_probe(&root, next.as_ref()) {
                 self.failure("host probe", error);
@@ -1145,14 +1163,7 @@ mod native {
                 self.failure("host probe", error);
                 return false;
             }
-            let target = match &hold.scope {
-                host::HoldScope::Queue { task_id, .. } => {
-                    crate::commands::queue::current_task(&root, task_id)
-                        .ok()
-                        .map(|task| task.target.vault_path)
-                }
-                host::HoldScope::Audit { path, .. } => Some(path.clone()),
-            };
+            let target = probe_hold_target(&root, &hold);
             self.record(
                 "host probe",
                 StageState::Completed,
@@ -1173,7 +1184,6 @@ mod native {
             );
             // The vault keeps one probe, so this release replaces the other drain's and any
             // earlier run's.
-            self.host_probes.inherited = None;
             for drain in [host::ProbeScope::Queue, host::ProbeScope::Audit] {
                 if let Some(probe) = self.host_probes.scope(drain) {
                     probe.released = None;
@@ -1188,6 +1198,39 @@ mod native {
             released.target = target;
             self.queue_replan = QueueReplan::Invalidate;
             true
+        }
+
+        /// Takes the probe an earlier run released, while its hold still stands released, as
+        /// its drain's released probe: it goes first, or is withdrawn when planning cannot take
+        /// it, exactly like one released now. A ledger probe whose hold was settled or renewed
+        /// is retired. Returns whether the run continues.
+        fn inherit_host_probe(&mut self) -> bool {
+            use crate::commands::work::host;
+            let root = self.root.clone();
+            let inherited = host::HostAnswers::load(&root).and_then(|answers| {
+                Ok((
+                    answers.has_probe(),
+                    answers.inherited_probe(host::pending_holds(&root)?),
+                ))
+            });
+            match inherited {
+                Ok((_, Some(hold))) => {
+                    let target = probe_hold_target(&root, &hold);
+                    let drain = hold.scope.drain();
+                    *self.host_probes.scope(drain) = Some(HostProbe {
+                        remaining: None,
+                        released: Some(hold),
+                        target,
+                    });
+                    true
+                }
+                Ok((true, None)) => match host::record_probe(&root, None) {
+                    Ok(()) => true,
+                    Err(error) => self.failure("host probe", error),
+                },
+                Ok((false, None)) => true,
+                Err(error) => self.failure("host probe", error),
+            }
         }
 
         /// The target of `scope`'s released probe while its host has given no outcome in this
@@ -1244,6 +1287,19 @@ mod native {
                     return;
                 }
             };
+            if due
+                && self
+                    .host_probes
+                    .scope(scope)
+                    .as_ref()
+                    .is_some_and(|probe| probe.released.is_some())
+            {
+                // A probe inherited from an earlier run already goes first in this drain.
+                if let Err(error) = host::record_recovery_due(&root, scope, false) {
+                    self.failure("host probe", error);
+                }
+                return;
+            }
             if due {
                 self.release_host_probe(scope, ProbeRelease::RecoveryTurn);
                 return;
@@ -1905,9 +1961,8 @@ mod native {
                     self.config.vault.root = self.root.clone();
                     self.result.workflow_id = Some(lease.id().clone());
                     self.lease = Some(lease);
-                    match crate::commands::work::host::HostAnswers::load(&self.root) {
-                        Ok(answers) => self.host_probes.inherited = answers.pending_probe(),
-                        Err(error) => return self.failure("host probe", error),
+                    if !self.inherit_host_probe() {
+                        return false;
                     }
                     if let Some(control) = &mut self.automation {
                         match control.enter(&self.root) {
