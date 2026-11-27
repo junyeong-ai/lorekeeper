@@ -87,7 +87,10 @@ paths:
   request, so plans under different policies share no observation. An audit Work 0.163
   planned under byte-filled parts continues under its stored plan while its reads are
   unchanged (`tests/fixtures/audit-work-0.163.1`); once they change it replans as
-  `semantic-ranges-v3` and pays its inspections again.
+  `semantic-ranges-v3` and pays its inspections again. The upgrade itself changes them for
+  a screened subject that selected more than `AUDIT_CONTEXT_PAGES` owners (0.163 read all
+  of them) and for a legacy recipe a run adopts into screening: such Work replans once,
+  by design, rather than reconstructing the earlier scope.
 - `work source` pages one planned resource from the Work's stored plan: `--resource`
   selects it by roster index, and its default is the unique retained task input. Only that
   resource is read, from its current bytes (the task's retained input, or the page read

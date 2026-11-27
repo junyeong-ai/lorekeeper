@@ -6138,7 +6138,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn an_audit_work_paid_under_0_163_continues_after_the_upgrade() {
+    fn an_audit_work_paid_under_0_163_continues_while_its_reads_are_unchanged() {
         // Written by 0.163.1 itself: an audit Work planned under byte-filled parts, with
         // one of its three inspections observed.
         let fixture =
