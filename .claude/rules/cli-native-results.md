@@ -116,10 +116,12 @@ paths:
   through `subjects`, so the next finalization completes against it. `needs-review` is only
   for an issue no open review in scope records. Only the causal loop is blocked: a review a
   synthesis publishes makes its concept owed a resynthesis, and that resynthesis may not
-  propose another review of the same kind while nothing else changed, that is, while an open
-  review of that kind naming the concept records `judged_citation_digest` equal to the
-  task's citation digest and `judged_review_digest` equal to the digest of the other open
-  reviews naming the concept (by address and file revision). Any other synthesis may propose
+  propose another review of any kind while the only changed inputs are reviews syntheses of
+  the concept proposed, that is, while an open review naming the concept records
+  `judged_citation_digest` equal to the task's citation digest and `judged_review_digest`
+  equal to the digest of the open reviews naming the concept that record no
+  `judged_citation_digest` (by address and file revision). Alternating kinds therefore does
+  not reopen the loop, and a review recording no `judged_review_digest` never shows it. Any other synthesis may propose
   a review of a kind already open for its concept when `distinct_from` declares, for each
   open review of that kind naming the concept (its verified owner, among every review in the
   vault's review inventory), how its question differs; Rust refuses an incomplete list. A

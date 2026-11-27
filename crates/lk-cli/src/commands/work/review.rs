@@ -3,23 +3,24 @@
 //! material evidence gap: it proposes one durable review, and Rust publishes it as an open review
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
 //!
-//! Only the causal loop is blocked. A synthesis finalizer that publishes a review makes its
-//! concept owed a resynthesis; that resynthesis, with no other changed input (the citations
-//! and the other open reviews naming the concept are as they were when the review was
-//! proposed), may not propose another review of that kind, or a rephrased question would open
-//! review after review. Any other synthesis may propose a review of a kind already open for its
-//! concept when the proposal declares, for each such open review, how its question differs
-//! (`distinct_from`); Rust checks that the list is complete. A proposal repeating a scoped
-//! review exactly (kind, title, judgment and evidence) is that review and publishes nothing.
+//! Only the causal loop is blocked. A synthesis finalizer that publishes a review makes its concept
+//! owed a resynthesis; that resynthesis, when the only changed inputs are reviews syntheses of this
+//! concept proposed (the citations and the open reviews no synthesis proposed are as they were when
+//! one of them was proposed), may not propose another review of any kind, or rephrased or
+//! alternating questions would open review after review. Any other synthesis may propose a review
+//! of a kind already open for its concept when the proposal declares, for each such open review,
+//! how its question differs (`distinct_from`); Rust checks that the list is complete. A proposal
+//! repeating a scoped review exactly (kind, title, judgment and evidence) is that review and
+//! publishes nothing.
 //!
 //! A refused proposal never holds the synthesis: every needs-review reply carries the complete
-//! synthesis the finalizer would publish without the review, whose references name only
-//! existing reviews, and Rust publishes it and drops only the proposal. A review a synthesis
-//! publishes records the citation digest and the digest of the other open reviews it was
+//! synthesis the finalizer would publish without the review, whose references name only existing
+//! reviews, and Rust publishes it and drops only the proposal. A review a synthesis publishes
+//! records the citation digest and the digest of the open reviews no synthesis proposed it was
 //! judged against (`judged_citation_digest`, `judged_review_digest`), with its concept as its
-//! subject: that is how a later synthesis recognizes the loop. The run bounds the rest: a
-//! target publishes at most one review per run, and a further admissible proposal waits
-//! unrecorded for a later run, whose request then scopes the reviews published.
+//! subject: that is how a later synthesis recognizes the loop. The run bounds the rest: a target
+//! publishes at most one review per run, and a further admissible proposal waits unrecorded for a
+//! later run, whose request then scopes the reviews published.
 
 use std::path::{Path, PathBuf};
 
@@ -160,11 +161,11 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
-    if let Some(refusal) = same_kind_refusal(root, config, task, &proposal)? {
+    if let Some(refusal) = rule_refusal(root, config, task, &proposal)? {
         return Ok(Err(refusal));
     }
     let judged_review_digest =
-        review_digest(open_naming(root, config, &task.target.vault_path)?.iter());
+        judged_review_digest(&open_naming(root, config, &task.target.vault_path)?);
     let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash,
         "judged_review_digest":judged_review_digest});
@@ -196,40 +197,31 @@ pub(in crate::commands) fn admit(
 }
 
 /// The refusal of `proposal` under the review rule, if it breaks it: it is the causal loop (an
-/// open review of its kind that a synthesis of this concept proposed against the same
-/// citations and the same other open reviews), or it leaves an open review of its kind
-/// without a declared difference.
-fn same_kind_refusal(
+/// open review a synthesis of this concept proposed against the same citations and the same
+/// open reviews no synthesis proposed), or it leaves an open review of its kind without a
+/// declared difference.
+fn rule_refusal(
     root: &Path,
     config: &lk_core::config::Config,
     task: &QueueTask,
     proposal: &ReviewProposal,
 ) -> miette::Result<Option<String>> {
     let open = open_naming(root, config, &task.target.vault_path)?;
+    let judged = judged_review_digest(&open);
+    if let Some(review) = open.iter().find(|review| {
+        review.judged_citation_digest.as_deref() == Some(task.cache_hash.as_str())
+            && review.judged_review_digest.as_deref() == Some(judged.as_str())
+    }) {
+        return Ok(Some(format!(
+            "this synthesis is owed only to reviews syntheses of this concept proposed, such as the open review {}, and no citation or other review changed since; reference them in the synthesis instead of proposing another review",
+            review.path
+        )));
+    }
     let kind = serde_json::to_value(proposal.kind)
         .into_diagnostic()?
         .as_str()
         .unwrap_or_default()
         .to_owned();
-    for review in open
-        .iter()
-        .filter(|review| review.kind == Some(proposal.kind))
-    {
-        let proposed_here = review.judged_citation_digest.as_deref()
-            == Some(task.cache_hash.as_str())
-            && review
-                .judged_review_digest
-                .as_deref()
-                .is_some_and(|digest| {
-                    digest == review_digest(open.iter().filter(|other| other.path != review.path))
-                });
-        if proposed_here {
-            return Ok(Some(format!(
-                "this synthesis is owed because of the open {kind} review {} a synthesis of this concept proposed, and nothing else changed since; reference it in the synthesis instead of proposing another {kind} review",
-                review.path
-            )));
-        }
-    }
     let undeclared = open
         .iter()
         .filter(|review| review.kind == Some(proposal.kind))
@@ -258,9 +250,14 @@ struct NamingReview {
     judged_review_digest: Option<String>,
 }
 
-/// The digest of a set of open reviews by address and file revision.
-fn review_digest<'a>(reviews: impl Iterator<Item = &'a NamingReview>) -> String {
-    let mut entries = reviews
+/// The digest, by address and file revision, of the open reviews naming a concept that no
+/// synthesis proposed: the reviews a synthesis's proposal is judged against. Reviews syntheses
+/// proposed (they record `judged_citation_digest`) are left out, so a resynthesis they alone
+/// caused finds the digest its predecessor recorded, whatever their kinds.
+fn judged_review_digest(open: &[NamingReview]) -> String {
+    let mut entries = open
+        .iter()
+        .filter(|review| review.judged_citation_digest.is_none())
         .map(|review| (review.path.as_str(), review.revision.as_str()))
         .collect::<Vec<_>>();
     entries.sort_unstable();
