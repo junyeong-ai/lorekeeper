@@ -3640,7 +3640,8 @@ mod native {
                     );
                     WorkStep::Deferred(reason)
                 }
-                Ok(crate::commands::work::ResultFinish::Staged) => {
+                Ok(crate::commands::work::ResultFinish::Staged(refused_review)) => {
+                    self.record_refused_review(refused_review);
                     metrics.outcome = WorkOutcome::Staged;
                     self.record(
                         "bounded work completion",
@@ -3734,6 +3735,18 @@ mod native {
         }
 
         /// The queue targets the bounded finalization in flight answers.
+        /// A refused review proposal is reported, never written to the vault: its synthesis
+        /// published without it.
+        fn record_refused_review(&mut self, refusal: Option<String>) {
+            if let Some(refusal) = refusal {
+                self.record(
+                    "synthesis review refused",
+                    StageState::Skipped,
+                    Some(refusal),
+                );
+            }
+        }
+
         fn finalization_targets(&self) -> Vec<String> {
             self.queue_turn.as_ref().map_or_else(
                 || self.reserved_targets.clone(),
@@ -3928,7 +3941,10 @@ mod native {
                         deferred = true;
                         self.record("native selected action", StageState::Skipped, Some(reason));
                     }
-                    Ok(crate::commands::work::generation::SelectedFinish::Staged) => {
+                    Ok(crate::commands::work::generation::SelectedFinish::Staged(
+                        refused_review,
+                    )) => {
+                        self.record_refused_review(refused_review);
                         staged = true;
                         self.record(
                             "native selected result",

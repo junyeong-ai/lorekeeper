@@ -36,6 +36,9 @@ actual provider model, effective effort, tokens or billed cost. The top-level
 `execution` describes the first prepared host; its `policy_profile` and `work` retain
 the job profile and aggregate budget. Stage routing is described in
 [optional stage profiles](../../lore-setup/references/config.md#optional-stage-profiles).
+A skipped `synthesis review refused` stage names the concept and why Rust refused its
+synthesis's review proposal; the synthesis the reply carried published instead, and the
+reason is never written to a vault page.
 
 A failed structured host includes `host_failure`. Its `phase` is `version-preflight`,
 `invocation` or `response`; preflight never consumes a semantic call. It reports the

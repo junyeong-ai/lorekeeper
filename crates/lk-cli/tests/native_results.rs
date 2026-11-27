@@ -1237,6 +1237,25 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             "a refused review publishes its synthesis: {planned}: {report}"
         );
         assert!(!fixture.root().join("vault/wiki/explorations").exists());
+        let refusal = report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["name"] == "synthesis review refused")
+            .unwrap_or_else(|| panic!("the run reports the refusal: {report}"));
+        let detail = refusal["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with(task.target.vault_path.as_str())
+                && detail.contains("would become that concept's citation"),
+            "{detail}"
+        );
+        let concept =
+            std::fs::read_to_string(fixture.root().join("vault").join(&task.target.vault_path))
+                .unwrap();
+        assert!(
+            !concept.contains("would become"),
+            "the refusal stays out of pages: {concept}"
+        );
     }
 }
 

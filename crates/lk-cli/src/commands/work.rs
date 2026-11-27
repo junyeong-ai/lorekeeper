@@ -3776,7 +3776,8 @@ fn prepare_finalization_from_capture(
 
 #[cfg(unix)]
 pub(super) enum ResultFinish {
-    Staged,
+    /// Staged, with the reason a review proposal was refused when its synthesis published.
+    Staged(Option<String>),
     NeedsAction(String),
     DiscoveryRecorded,
     ReviewRecorded(String),
@@ -3807,8 +3808,8 @@ pub(super) fn finish_result(
             "completed Work changed before native finalization",
         ));
     }
-    let outcome = match &prepared.subject {
-        Subject::Audit { .. } => audit::assemble(&prepared, reply.clone())?,
+    let (outcome, refused_review) = match &prepared.subject {
+        Subject::Audit { .. } => (audit::assemble(&prepared, reply.clone())?, None),
         Subject::Queue { task_id, .. } => generation::assemble_prepared(
             root,
             config,
@@ -3927,7 +3928,7 @@ pub(super) fn finish_result(
                 result.kind,
             )?;
             session.apply(plan).into_diagnostic()?;
-            Ok(ResultFinish::Staged)
+            Ok(ResultFinish::Staged(refused_review))
         }
     }
 }
