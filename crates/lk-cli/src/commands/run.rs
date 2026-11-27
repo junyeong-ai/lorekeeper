@@ -990,9 +990,10 @@ mod native {
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
-        /// Subjects whose discovery adoption was refused in this run: each keeps its legacy
-        /// derivation until the run ends, so a later replan does not adopt it.
-        adoption_refused: std::collections::BTreeSet<String>,
+        /// Legacy subjects this run keeps on their derivation until it ends, so a later replan
+        /// does not adopt them: those whose adoption was refused, and those continuing a stored
+        /// Work with recorded observations.
+        legacy_kept: std::collections::BTreeSet<String>,
         /// The discovery adoptions left to this run: as many as its remaining calls could
         /// screen when it first adopted (at least one), whatever replans follow; `None` until
         /// then.
@@ -7646,12 +7647,14 @@ mod native {
         /// run's duration stop it between commits, and each commit counts as it lands. The
         /// rest keep their legacy derivation and their place for a later run. A current
         /// subject keeps its legacy derivation, which its receipt's currency still verifies.
-        /// A subject whose adoption is refused (a current processing action, an assessment
-        /// that became current, or inputs that changed since planning) keeps it for the rest
-        /// of this run, as a stage record names, and the run's released probe keeps it until
-        /// its attempt settles. Its predecessor Work stays as it is. Whether
-        /// the plan must be read again (a subject was adopted or refused), or `None` after a
-        /// failure the run recorded.
+        /// A subject whose stored Work for its present legacy inputs has recorded observations
+        /// continues that Work to its assessment instead, spending no allowance: adoption would
+        /// change those inputs and discard paid progress. A subject whose adoption is refused
+        /// (a current processing action, an assessment that became current, or inputs that
+        /// changed since planning) keeps its derivation for the rest of this run, as a stage
+        /// record names, and the run's released probe keeps it until its attempt settles. Its
+        /// predecessor Work stays as it is. Whether the plan must be read again (a subject
+        /// was adopted or kept), or `None` after a failure the run recorded.
         async fn adopt_legacy_screening(
             &mut self,
             plan: &lk_graph::audit::AuditPlan,
@@ -7680,7 +7683,7 @@ mod native {
             }
             let first = self.remaining_calls(budget).max(1);
             let allowance = *self.adoption_allowance.get_or_insert(first);
-            let requests = plan
+            let legacy = plan
                 .candidates
                 .iter()
                 .filter(|candidate| {
@@ -7689,22 +7692,16 @@ mod native {
                             .discovery
                             .as_ref()
                             .is_some_and(|discovery| discovery.selection.is_none())
-                        && !self.adoption_refused.contains(&candidate.path)
+                        && !self.legacy_kept.contains(&candidate.path)
                         && probe.as_ref() != Some(&candidate.path)
                 })
-                .take(allowance)
-                .map(|candidate| lk_graph::audit::selection::AdoptionRequest {
-                    path: candidate.path.clone(),
-                    file_revision: candidate.file_revision.clone(),
-                    input_revision: candidate.input_revision.clone(),
-                })
                 .collect::<Vec<_>>();
-            if requests.is_empty() {
+            if legacy.is_empty() || allowance == 0 {
                 return Some(false);
             }
             let (session, _) = self.mutation_session("audit discovery adoption").await?;
             let started_at = Instant::now();
-            let outcome = self.adopt_screening(&session, &requests);
+            let outcome = self.adopt_screening(&session, &legacy, allowance);
             drop(session);
             self.result.audit_adoption_duration_ms += started_at.elapsed().as_millis() as u64;
             let (adopted, kept) = match outcome {
@@ -7734,14 +7731,59 @@ mod native {
             Some(adopted > 0 || !kept.is_empty())
         }
 
-        /// Adopts `requests` in order under `session` (`adopt_legacy_screening`): how many
-        /// were adopted, and the refused subjects with why.
+        /// Adopts up to `allowance` of the `legacy` subjects in order under `session`
+        /// (`adopt_legacy_screening`), passing over those continuing a stored Work with
+        /// recorded observations: how many were adopted, and the kept subjects with why.
         fn adopt_screening(
             &mut self,
             session: &lk_vault::MutationSession,
-            requests: &[lk_graph::audit::selection::AdoptionRequest],
+            legacy: &[&lk_graph::audit::AuditCandidate],
+            allowance: usize,
         ) -> Result<(usize, Vec<String>), String> {
             let read = self.supervisor.read_control().clone();
+            let mut kept = Vec::new();
+            let mut requests = Vec::new();
+            for candidate in legacy {
+                if requests.len() == allowance {
+                    break;
+                }
+                // The same Work choice its preparation makes, under this writer claim.
+                match crate::commands::work::audit_work_in_progress_controlled(
+                    session.root(),
+                    &self.config,
+                    &self.config_revision,
+                    candidate,
+                    &read,
+                ) {
+                    Ok(false) => requests.push(lk_graph::audit::selection::AdoptionRequest {
+                        path: candidate.path.clone(),
+                        file_revision: candidate.file_revision.clone(),
+                        input_revision: candidate.input_revision.clone(),
+                    }),
+                    Ok(true) => {
+                        kept.push(format!(
+                            "{}: it continues its stored Work, which has recorded observations",
+                            candidate.path
+                        ));
+                        self.legacy_kept.insert(candidate.path.clone());
+                    }
+                    Err(error)
+                        if error
+                            .downcast_ref::<crate::commands::work::SourceChanged>()
+                            .is_some() =>
+                    {
+                        kept.push(format!(
+                            "{}: its inputs changed since planning",
+                            candidate.path
+                        ));
+                        self.legacy_kept.insert(candidate.path.clone());
+                    }
+                    Err(error) => return Err(error.to_string()),
+                }
+            }
+            if requests.is_empty() {
+                return Ok((0, kept));
+            }
             let pages = lk_graph::scan::scan_vault_controlled(
                 session.root(),
                 self.config.graph.scope.follow_links,
@@ -7752,12 +7794,11 @@ mod native {
                 session.root(),
                 &self.config.vault.dirs,
                 &pages,
-                requests,
+                &requests,
                 &read,
             )
             .map_err(|error| error.to_string())?;
             let mut adopted = 0;
-            let mut kept = Vec::new();
             loop {
                 if self.supervisor.is_cancelled()
                     || self
@@ -7816,7 +7857,7 @@ mod native {
                     Err(error) => return Err(error.to_string()),
                 };
                 kept.push(format!("{path}: {refusal}"));
-                self.adoption_refused.insert(path);
+                self.legacy_kept.insert(path);
             }
             Ok((adopted, kept))
         }
@@ -8630,7 +8671,7 @@ mod native {
             recovery_turns: std::collections::BTreeSet::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
-            adoption_refused: std::collections::BTreeSet::new(),
+            legacy_kept: std::collections::BTreeSet::new(),
             adoption_allowance: None,
             audit_batch: None,
             queue_turn: None,

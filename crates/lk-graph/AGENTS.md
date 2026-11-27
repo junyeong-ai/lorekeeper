@@ -72,7 +72,8 @@ and CLI discovery, not a second graph authority.
   `wiki audit-discover --adopt-screening`; `selection::Adoptions` for the due subjects a native
   knowledge run adopts: one shared capture of their inputs and bounded card rosters, then
   each subject's legacy-input guards read and journaled alone, refused as typed drift when
-  a page changed after that capture) guards the current pending subject and complete input before enabling
+  a page changed after that capture; the run passes over a subject whose stored legacy Work
+  has recorded observations, which continues that Work) guards the current pending subject and complete input before enabling
   screening; a current subject is never adopted, since its legacy derivation verifies it. It retains queries and required evidence/context;
   unknown candidates still block assessment. Preview publishes and recovers nothing;
   existing assessments and predecessor Work are never rewritten.

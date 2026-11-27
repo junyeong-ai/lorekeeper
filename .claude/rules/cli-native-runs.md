@@ -37,7 +37,12 @@ paths:
   later run, so a large legacy backlog never holds the writer claim across work the run
   cannot screen. `audit_adoption_duration_ms` measures that work after the claim is acquired.
   A current subject is not touched, and neither is the subject of the run's released probe
-  until that exact attempt settles: adoption would change the held request before it is sent. A refused
+  until that exact attempt settles: adoption would change the held request before it is sent.
+  Nor is a subject whose stored Work for its present legacy inputs (the Work `expected()`
+  chooses for its preparation, `work::audit_work_in_progress_controlled`, read under the
+  adoption's writer claim) has a recorded observation: it continues that Work to its
+  assessment and spends no allowance. A subject with no stored Work, a stored Work with
+  nothing recorded, or inputs its stored Work no longer matches is adopted. A refused
   adoption (a current processing action, an assessment recorded since planning, inputs
   changed since planning, while its processing state and guards are read or before its
   journal, as typed drift: `GraphError::AuditInputChanged`, `work::SourceChanged`) keeps

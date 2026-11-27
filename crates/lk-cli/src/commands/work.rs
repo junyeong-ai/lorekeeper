@@ -2719,6 +2719,27 @@ impl AuditProcessingHold {
     }
 }
 
+/// Whether the Work a preparation of `candidate` continues for its present inputs (the one
+/// choice `expected` makes for preparation) is stored with at least one recorded
+/// observation: paid progress that changing those inputs, as discovery adoption would,
+/// discards. A Work not stored, stored with nothing recorded, or over the input bound is none.
+#[cfg(unix)]
+pub(super) fn audit_work_in_progress_controlled(
+    root: &Path,
+    config: &lk_core::config::Config,
+    config_revision: &str,
+    candidate: &lk_graph::audit::AuditCandidate,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<bool> {
+    let mut prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
+    let work = match expected(root, &mut prepared, config, config_revision) {
+        Ok(work) => work,
+        Err(error) if state::is_input_capacity(&error) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    Ok(work.is_planned(root)? && work.progress(root, &prepared.resources)?.completed > 0)
+}
+
 #[cfg(unix)]
 pub(super) fn audit_processing_hold_controlled(
     root: &Path,
