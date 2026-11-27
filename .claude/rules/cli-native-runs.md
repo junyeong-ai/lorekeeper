@@ -160,8 +160,10 @@ paths:
   run, excludes only those profiles (`execution::preflight_hosts`, their turns deferred as
   host-unavailable without holds) and the next run checks again. A host that cannot start
   at its first call in a scheduled run (no executable, a `ChildStartFailure`, a failed or
-  unsupported `--version`) is excluded the same way (`unstartable_host`); cancellation, and
-  any attended run, keep that error fatal. That stage never halts, so the ledger drops a pause
+  unsupported `--version`) is excluded the same way (`unstartable_host`), as is one that
+  passed its version check and then cannot start a semantic call (`unstarted_call`, serial
+  or in a wave: that step is unsent, peers that returned still record, and the run
+  replans); cancellation, and any attended run, keep that error fatal. That stage never halts, so the ledger drops a pause
   0.163 recorded under it when it loads; an unresolvable profile is configuration and
   still halts, as `host configuration`. Fatal scheduled failures
   pause that operation: the `automation-usage-v2` ledger records the first halting stage

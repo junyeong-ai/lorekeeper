@@ -603,13 +603,18 @@ fn a_scheduled_run_defers_only_the_work_of_a_profile_that_cannot_start() {
 
 #[test]
 fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() {
-    // Both pass the preflight's metadata check, which only finds the executable.
+    // Each passes the preflight's metadata check, which only finds the executable; the last
+    // also answers `--version`, then cannot start for its first semantic call.
     for (form, broken) in [
-        ("unsupported version", "#!/bin/sh\necho 'codex-cli 0.0.1'\n"),
+        (
+            "unsupported version",
+            "#!/bin/sh\necho 'codex-cli 0.0.1'\n".to_owned(),
+        ),
         (
             "missing interpreter",
-            "#!/nonexistent/lorekeeper-test-interpreter\n",
+            "#!/nonexistent/lorekeeper-test-interpreter\n".to_owned(),
         ),
+        ("lost after its version", String::new()),
     ] {
         let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
         super::stage_profiles::route_profiles(
@@ -621,6 +626,13 @@ fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() 
         configure(&fixture, Some(64), 120);
         let reducer = fixture.root().join("reducer executable");
         let saved = std::fs::read(&reducer).unwrap();
+        let broken = if broken.is_empty() {
+            let script = String::from_utf8(saved.clone()).unwrap();
+            let (shebang, rest) = script.split_once('\n').unwrap();
+            format!("{shebang}\n[ \"$1\" = --version ] && chmod -x \"$0\"\n{rest}")
+        } else {
+            broken
+        };
         std::fs::write(&reducer, broken).unwrap();
         let report = run(&fixture, "knowledge", false);
         let runs = report["runs"].as_array().unwrap();
@@ -659,6 +671,9 @@ fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() 
         );
         // Replaced by a supported host, the profile is checked again and its work completes.
         std::fs::write(&reducer, saved).unwrap();
+        let mut permissions = std::fs::metadata(&reducer).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&reducer, permissions).unwrap();
         let recovered = run(&fixture, "knowledge", false);
         assert!(
             recovered["runs"]

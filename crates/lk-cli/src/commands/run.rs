@@ -344,12 +344,16 @@ mod native {
         accepted: bool,
         replies: Vec<ScreeningReply>,
         metrics: Vec<WorkStepMetrics>,
+        /// A turn's host could not start; its profile is deferred for the run.
+        unstarted: bool,
     }
 
     struct DecodedObservations {
         accepted: bool,
         replies: Vec<crate::commands::work::InspectionReply>,
         returned: Vec<ObservationTurn>,
+        /// A turn's host could not start; its profile is deferred for the run.
+        unstarted: bool,
     }
 
     struct ObservationTurn {
@@ -1522,6 +1526,39 @@ mod native {
             unavailable.into()
         }
 
+        /// The deferral of a scheduled call whose host could not start (`ChildStartFailure`)
+        /// after its version check passed, as when its executable or interpreter went away:
+        /// its profile is excluded for the rest of the run like one that cannot start at its
+        /// first call, and the step is unsent. Any other error, and every error of an attended
+        /// run, is returned as it is.
+        fn unstarted_call(
+            &mut self,
+            metrics: &mut WorkStepMetrics,
+            error: miette::Report,
+        ) -> Result<String, miette::Report> {
+            if error
+                .downcast_ref::<execution::ChildStartFailure>()
+                .is_none()
+            {
+                return Err(error);
+            }
+            let Some(profile) = metrics
+                .execution
+                .as_ref()
+                .map(|execution| execution.profile.clone())
+            else {
+                return Err(error);
+            };
+            let error = self.unstartable_host(&profile, error);
+            match error.downcast_ref::<HostUnavailable>() {
+                Some(unavailable) => {
+                    metrics.outcome = WorkOutcome::Unsent;
+                    Ok(unavailable.to_string())
+                }
+                None => Err(error),
+            }
+        }
+
         /// The deferral of a call routed to a profile whose host environment cannot start in
         /// this run, if it is one.
         fn unavailable_profile(&self, profile: &str) -> Option<HostUnavailable> {
@@ -2522,11 +2559,14 @@ mod native {
             self.result.semantic_duration_ms += duration_ms;
             let child = match outcome {
                 Ok(child) => child,
-                Err(error) => {
-                    metrics.outcome = WorkOutcome::Failed;
-                    self.failure("bounded work receipt", error);
-                    return None;
-                }
+                Err(error) => match self.unstarted_call(metrics, error) {
+                    Ok(reason) => return Some(ObservationReply::HostUnavailable(reason)),
+                    Err(error) => {
+                        metrics.outcome = WorkOutcome::Failed;
+                        self.failure("bounded work receipt", error);
+                        return None;
+                    }
+                },
             };
             metrics.host_end = Self::host_end(metrics, child.finished_at);
             if !child.success {
@@ -3419,6 +3459,8 @@ mod native {
             let mut accepted = current && !cancelled;
             let mut replies = Vec::new();
             let mut returned = Vec::new();
+            // Turns whose host could not start: deferred with their profile, never fatal.
+            let mut unstarted = false;
             for ((mut turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 turn.metrics.agent_duration_ms = Some(attempt.duration_ms);
                 turn.metrics.host_end = match &attempt.result {
@@ -3497,13 +3539,26 @@ mod native {
                         self.record_work_step(turn.metrics);
                         continue;
                     }
-                    Err(error) => {
-                        accepted = false;
-                        turn.metrics.outcome = WorkOutcome::Failed;
-                        self.failure("bounded work receipt", error);
-                        self.record_work_step(turn.metrics);
-                        continue;
-                    }
+                    Err(error) => match self.unstarted_call(&mut turn.metrics, error) {
+                        Ok(reason) => {
+                            self.inspection_deferred
+                                .insert(turn.work_id.clone(), reason.clone());
+                            self.deferred(
+                                "host unavailable",
+                                format!("{}: {reason}", turn.work_id),
+                            );
+                            unstarted = true;
+                            self.record_work_step(turn.metrics);
+                            continue;
+                        }
+                        Err(error) => {
+                            accepted = false;
+                            turn.metrics.outcome = WorkOutcome::Failed;
+                            self.failure("bounded work receipt", error);
+                            self.record_work_step(turn.metrics);
+                            continue;
+                        }
+                    },
                 };
                 if !self.configuration_is_current() {
                     accepted = false;
@@ -3535,6 +3590,7 @@ mod native {
                 accepted,
                 replies,
                 returned,
+                unstarted,
             }
         }
         fn finish_observation_attempts(
@@ -3549,6 +3605,7 @@ mod native {
                 mut accepted,
                 replies: _,
                 mut returned,
+                unstarted,
             } = decoded;
             let mut usable = false;
             let mut failed = false;
@@ -3614,7 +3671,10 @@ mod native {
             if failed {
                 self.replan_after_hold();
             }
-            accepted && (usable || replanned || failed)
+            if unstarted {
+                self.replan_after_hold();
+            }
+            accepted && (usable || replanned || failed || unstarted)
         }
         async fn settle_observation_attempts(
             &mut self,
@@ -3794,11 +3854,14 @@ mod native {
             self.result.semantic_duration_ms += duration;
             let child = match child {
                 Ok(child) => child,
-                Err(error) => {
-                    metrics.outcome = WorkOutcome::Failed;
-                    self.failure("native result host", error);
-                    return None;
-                }
+                Err(error) => match self.unstarted_call(metrics, error) {
+                    Ok(reason) => return Some(ResultReply::HostUnavailable(reason)),
+                    Err(error) => {
+                        metrics.outcome = WorkOutcome::Failed;
+                        self.failure("native result host", error);
+                        return None;
+                    }
+                },
             };
             metrics.host_end = Self::host_end(metrics, child.finished_at);
             if child.cancelled {
@@ -5490,6 +5553,8 @@ mod native {
             let mut accepted = current && !cancelled;
             let mut replies = Vec::new();
             let mut metrics = Vec::new();
+            // Turns whose host could not start: deferred with their profile, never fatal.
+            let mut unstarted = false;
             for ((turn, attempt), engine) in turns.into_iter().zip(attempts).zip(engines) {
                 let ScreeningAttempt {
                     task_id,
@@ -5610,11 +5675,19 @@ mod native {
                             self.halt("candidate screening", child.detail);
                             None
                         }
-                        Err(error) => {
-                            step.outcome = WorkOutcome::Failed;
-                            self.failure("candidate screening", error);
-                            None
-                        }
+                        Err(error) => match self.unstarted_call(&mut step, error) {
+                            Ok(reason) => {
+                                self.queue_admitted.clear();
+                                self.deferred("host unavailable", format!("{task_id}: {reason}"));
+                                unstarted = true;
+                                None
+                            }
+                            Err(error) => {
+                                step.outcome = WorkOutcome::Failed;
+                                self.failure("candidate screening", error);
+                                None
+                            }
+                        },
                     }
                 };
                 if let Some(output) = decoded {
@@ -5634,6 +5707,7 @@ mod native {
                 accepted,
                 replies,
                 metrics,
+                unstarted,
             }
         }
         fn finish_screening_attempts(
@@ -5648,6 +5722,7 @@ mod native {
                 mut accepted,
                 replies,
                 mut metrics,
+                unstarted,
             } = decoded;
             let mut usable = false;
             let mut failed = false;
@@ -5729,7 +5804,10 @@ mod native {
             if failed {
                 self.replan_after_hold();
             }
-            accepted && (usable || failed)
+            if unstarted {
+                self.replan_after_hold();
+            }
+            accepted && (usable || failed || unstarted)
         }
         async fn record_screening_batch(
             &mut self,
