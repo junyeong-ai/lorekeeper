@@ -566,10 +566,12 @@ pub fn record_llm_input(content: &str, key: &str, value: &str) -> Option<String>
     set_llm_input(&created, key, value)
 }
 
-/// The digest under which `record_generated_sections` records a body Lore wrote: of its text
-/// without framing whitespace, which section replacement normalizes.
+/// The digest under which `record_generated_sections` records a body Lore wrote: of its exact
+/// text without the line breaks around it, the framing section replacement writes and a
+/// rerender's preserved body drops. Spaces stay part of the text: indentation can change
+/// what the Markdown means.
 pub fn generated_body_digest(body: &str) -> String {
-    blake3::hash(body.trim().as_bytes()).to_hex()[..32].to_string()
+    blake3::hash(body.trim_matches(['\r', '\n']).as_bytes()).to_hex()[..32].to_string()
 }
 
 /// The sections `page` records as written by Lore (`field::GENERATED_SECTIONS`): each heading
@@ -961,6 +963,18 @@ mod tests {
             generated(&edited),
             ["Sources"],
             "an authored edit is no longer Lore's"
+        );
+        let indented = both.replace("\nLimit is 5.", "\n    Limit is 5.");
+        assert_eq!(
+            generated(&indented),
+            ["Sources"],
+            "an indentation that turns the body into code is an authored edit"
+        );
+        let reframed = both.replace("Limit is 5.\n\n## Sources", "Limit is 5.\n\n\n## Sources");
+        assert_eq!(
+            generated(&reframed),
+            ["Synthesis", "Sources"],
+            "the line breaks the writer frames a body with are not its text"
         );
         assert_eq!(record_generated_sections(page, &["Missing"]), None);
         assert_eq!(
