@@ -399,7 +399,7 @@ pub(in crate::commands) fn decode_value(
 /// order. Each event it lists in `off_focus` is written here from its heading, the locale's
 /// off-focus sentence and its 🔗 source links (the template's `🔗 {original_link}` links), in
 /// place of what the reply wrote under it; every other event must keep each of those links'
-/// destinations. A reply breaking either, or declaring an event off-focus on a source without
+/// destinations, as CommonMark reads them. A reply breaking either, or declaring an event off-focus on a source without
 /// a focus, is an invalid body, held as a rejected reply. A request without events takes its
 /// body as returned and declares no off-focus event.
 fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse {
@@ -445,7 +445,7 @@ fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse
     let links = |markdown: &str| {
         let mut links = Vec::new();
         lk_core::link::rewrite_links_outside_code(markdown, |link| {
-            links.push((link.raw_text.to_owned(), link.raw_destination.to_owned()));
+            links.push((link.raw_text.to_owned(), link.destination.to_owned()));
             None
         });
         links
@@ -700,6 +700,14 @@ mod tests {
         assert_eq!(
             reply(&both, Value::Null),
             SectionResponse::Complete(both.clone())
+        );
+        let respelled = refined.replace("(https://a.invalid)", "(<https://a.invalid>)");
+        assert_eq!(
+            reply(&respelled, json!([1])),
+            SectionResponse::Complete(
+                "### Kept\nA refined finding.\n\n[🔗 Source](<https://a.invalid>)\n\n### Elsewhere\n\nThis item is outside the source's focus.\n\n[🔗 Source](https://b.invalid)\n".into()
+            ),
+            "a destination is compared as CommonMark reads it, not by its spelling"
         );
         let lost = "### Kept\nA refined finding.\n\n### Elsewhere\nAnything.\n";
         assert!(
