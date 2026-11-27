@@ -86,6 +86,10 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
     }
 }
 
+/// How long a child's stderr may stay open after the child itself exited.
+#[cfg(unix)]
+const STDERR_GRACE: Duration = Duration::from_millis(500);
+
 /// The bounded end of a child's stderr.
 #[cfg(unix)]
 #[derive(Default)]
@@ -494,9 +498,26 @@ async fn run_child(
         }
     };
     let (cancelled, mut termination, mut detail) = tokio::select! {
-        result = async { tokio::try_join!(child.wait(), output, send, stderr_output) } => {
+        result = async {
+            // Stderr is drained beside the child, but a descendant that keeps it open after the
+            // child exits must not hold a complete result hostage: past a short grace the group
+            // is killed and the tail read so far stands.
+            let main = async { tokio::try_join!(child.wait(), output, send) };
+            tokio::pin!(main, stderr_output);
+            let mut drained = false;
+            let result = loop {
+                tokio::select! {
+                    result = &mut main => break result,
+                    _ = &mut stderr_output, if !drained => drained = true,
+                }
+            };
+            if !drained {
+                let _ = tokio::time::timeout(STDERR_GRACE, &mut stderr_output).await;
+            }
+            result
+        } => {
             match result {
-                Ok((status, stdout, delivery, ())) => {
+                Ok((status, stdout, delivery)) => {
                     signal_group(running.group, Signal::KILL)?;
                     running.cleaned = true;
                     let closed = matches!(delivery, InputDelivery::Closed);
@@ -1345,6 +1366,36 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             .await
             .unwrap();
         assert_eq!(result.stderr_tail, None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_descendant_holding_stderr_open_never_turns_a_complete_result_into_a_timeout() {
+        let mut command = tokio::process::Command::new("sh");
+        command.args([
+            "-c",
+            "printf '%s' '{\"ok\":true}'; printf 'helper started\\n' >&2; (sleep 30 >/dev/null </dev/null &); exit 0",
+        ]);
+        let mut child = RunningChild::spawn(command, false, ChildOutput::Discard).unwrap();
+        let started = Instant::now();
+        let result = run_child(
+            &mut child,
+            Some(Duration::from_secs(5)),
+            Some(1024),
+            None,
+            std::future::pending(),
+        )
+        .await
+        .unwrap();
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.termination, ChildTermination::Exited);
+        assert_eq!(result.stdout, b"{\"ok\":true}");
+        assert_eq!(result.stderr_tail.as_deref(), Some("helper started"));
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[cfg(unix)]
