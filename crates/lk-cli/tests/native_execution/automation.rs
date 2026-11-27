@@ -762,6 +762,34 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
 }
 
 #[test]
+fn an_answerless_host_that_exits_zero_still_reports_its_stderr() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = Fixture::new(
+            engine,
+            30,
+            "printf 'host-stderr-marker no session\\n' >&2\nexit 0",
+        );
+        write_audit_concept(&fixture, "stable");
+        configure(&fixture, Some(4), 60);
+        let report = run(&fixture, "knowledge", false);
+        assert!(calls(&report) >= 1, "{report}");
+        let stage = report["runs"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["name"] == "host failure output")
+            .unwrap_or_else(|| panic!("{engine}: {report}"));
+        assert!(
+            stage["detail"]
+                .as_str()
+                .unwrap()
+                .ends_with("stderr: host-stderr-marker no session"),
+            "{engine}: {stage}"
+        );
+    }
+}
+
+#[test]
 fn scheduled_tool_free_failure_holds_its_input_without_pausing_or_refunding_calls() {
     for engine in ["codex", "claude-code"] {
         let fixture = bounded_audit_fixture(engine, 64, "exit 7");

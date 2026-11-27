@@ -110,16 +110,6 @@ impl HostFailure {
         failure
     }
 
-    pub fn from_response(engine: AgentEngine, bytes: &[u8]) -> Self {
-        Self::from_output(
-            engine,
-            Phase::Response,
-            Some(0),
-            StdoutCapture::Complete,
-            bytes,
-        )
-    }
-
     fn from_output(
         engine: AgentEngine,
         phase: Phase,
@@ -182,7 +172,23 @@ mod tests {
     use serde_json::json;
 
     fn summary(bytes: &[u8]) -> Value {
-        serde_json::to_value(HostFailure::from_response(AgentEngine::ClaudeCode, bytes)).unwrap()
+        let child = ChildResult {
+            success: true,
+            exit_code: Some(0),
+            cancelled: false,
+            detail: None,
+            stdout: bytes.to_vec(),
+            stdout_capture: StdoutCapture::Complete,
+            stderr_tail: None,
+            termination: ChildTermination::Exited,
+            finished_at: jiff::Timestamp::now(),
+        };
+        serde_json::to_value(HostFailure::from_child(
+            AgentEngine::ClaudeCode,
+            Phase::Response,
+            &child,
+        ))
+        .unwrap()
     }
 
     #[test]

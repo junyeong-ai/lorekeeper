@@ -284,9 +284,10 @@ mod native {
     }
 
     enum ObservationReply {
+        /// A host that exited and answered on stdout; its diagnostic keeps the exit and stderr.
         Output {
             engine: lk_core::execution::AgentEngine,
-            bytes: Vec<u8>,
+            child: execution::ChildResult,
             limit: usize,
         },
         InvocationFailed(crate::commands::work::state::InvocationFailure),
@@ -2346,7 +2347,7 @@ mod native {
             }
             Some(ObservationReply::Output {
                 engine: invocation.engine,
-                bytes: child.stdout,
+                child,
                 limit: budget.max_result_bytes,
             })
         }
@@ -2378,12 +2379,12 @@ mod native {
             reply: ObservationReply,
             metrics: &mut WorkStepMetrics,
         ) -> Option<crate::commands::work::InspectionResponse> {
-            let (engine, bytes, limit) = match reply {
+            let (engine, child, limit) = match reply {
                 ObservationReply::Output {
                     engine,
-                    bytes,
+                    child,
                     limit,
-                } => (engine, bytes, limit),
+                } => (engine, child, limit),
                 ObservationReply::InvocationFailed(failure) => {
                     return Some(crate::commands::work::InspectionResponse::InvocationFailed(
                         failure,
@@ -2393,23 +2394,24 @@ mod native {
                     unreachable!("an unsent observation is deferred before it is decoded")
                 }
             };
-            let answerless = execution::observation::is_answerless(engine, &bytes);
+            let bytes = &child.stdout;
+            let answerless = execution::observation::is_answerless(engine, bytes);
             metrics.unanswered |= answerless;
             metrics.answered = !answerless;
             let host = metrics.host_end.clone();
             let invalid = || {
                 crate::commands::work::InspectionResponse::InvocationFailed(
-                    execution::observation::response_failure(engine, &bytes, host.clone()),
+                    execution::observation::response_failure(engine, bytes, host.clone()),
                 )
             };
-            let output = match execution::observation::decode_response(engine, &bytes, limit) {
+            let output = match execution::observation::decode_response(engine, bytes, limit) {
                 Ok(output) => output,
                 Err(error) => {
                     if let Some(capacity) =
                         error.downcast_ref::<crate::commands::work::state::OutputCapacity>()
                     {
                         metrics.result_json_bytes = Some(capacity.actual_bytes);
-                        if execution::observation::validate_evidence_response(engine, &bytes)
+                        if execution::observation::validate_evidence_response(engine, bytes)
                             .is_err()
                         {
                             return Some(invalid());
@@ -2418,8 +2420,10 @@ mod native {
                             capacity.clone(),
                         ));
                     }
-                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_response(
-                        engine, &bytes,
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        engine,
+                        execution::diagnostic::Phase::Response,
+                        &child,
                     ));
                     return Some(invalid());
                 }
@@ -2436,7 +2440,7 @@ mod native {
                         .downcast_ref::<crate::commands::work::state::OutputCapacity>()
                         .is_some()
                 }))
-                && execution::observation::validate_evidence_response(engine, &bytes).is_err()
+                && execution::observation::validate_evidence_response(engine, bytes).is_err()
             {
                 return Some(invalid());
             }
@@ -2445,7 +2449,7 @@ mod native {
                     Box::new(crate::commands::work::state::ObservationCandidate {
                         output,
                         text_violation,
-                        response_revision: lk_core::rss_original::digest(&bytes),
+                        response_revision: lk_core::rss_original::digest(bytes),
                         response_json_bytes: metrics
                             .result_json_bytes
                             .expect("decoded observation size"),
@@ -2467,7 +2471,7 @@ mod native {
                     crate::commands::work::InspectionResponse::SmallerInspection {
                         reason,
                         response: crate::commands::work::state::RefinementResponse {
-                            response_revision: lk_core::rss_original::digest(&bytes),
+                            response_revision: lk_core::rss_original::digest(bytes),
                             response_json_bytes: metrics
                                 .result_json_bytes
                                 .expect("decoded response size"),
@@ -3190,7 +3194,7 @@ mod native {
                     &turn.request,
                     ObservationReply::Output {
                         engine,
-                        bytes: child.stdout,
+                        child,
                         limit: result_limit,
                     },
                     &mut turn.metrics,
@@ -3539,15 +3543,11 @@ mod native {
                 }
                 Err(error) => {
                     metrics.outcome = WorkOutcome::Failed;
-                    if self.agent_profile(metrics).engine()
-                        == lk_core::execution::AgentEngine::ClaudeCode
-                    {
-                        metrics.host_failure =
-                            Some(execution::diagnostic::HostFailure::from_response(
-                                lk_core::execution::AgentEngine::ClaudeCode,
-                                &child.stdout,
-                            ));
-                    }
+                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                        self.agent_profile(metrics).engine(),
+                        execution::diagnostic::Phase::Response,
+                        &child,
+                    ));
                     if let execution::result::ResponseError::Remote { failure, .. } = &error {
                         metrics.answered = !failure.is_unanswered();
                     }
@@ -4045,16 +4045,13 @@ mod native {
                     return self.defer_turn_for_host(&reason);
                 }
                 Some(ObservationReply::InvocationFailed(failure)) => Err(failure),
-                Some(ObservationReply::Output { engine, bytes, .. }) => {
-                    match execution::finalization::decode(
-                        engine,
-                        &bytes,
-                        section.max_response_bytes,
-                    )
-                    .and_then(|(response, size)| {
-                        section.validate_response(&response)?;
-                        Ok((response, size))
-                    }) {
+                Some(ObservationReply::Output { engine, child, .. }) => {
+                    let bytes = child.stdout.as_slice();
+                    match execution::finalization::decode(engine, bytes, section.max_response_bytes)
+                        .and_then(|(response, size)| {
+                            section.validate_response(&response)?;
+                            Ok((response, size))
+                        }) {
                         Ok((response, size)) => {
                             metrics.answered = true;
                             metrics.result_json_bytes = Some(size);
@@ -4064,12 +4061,15 @@ mod native {
                             metrics.result_json_bytes = error
                                 .downcast_ref::<crate::commands::work::state::OutputCapacity>()
                                 .map(|capacity| capacity.actual_bytes);
-                            metrics.host_failure = Some(
-                                execution::diagnostic::HostFailure::from_response(engine, &bytes),
-                            );
+                            metrics.host_failure =
+                                Some(execution::diagnostic::HostFailure::from_child(
+                                    engine,
+                                    execution::diagnostic::Phase::Response,
+                                    &child,
+                                ));
                             let failure = execution::observation::response_failure(
                                 engine,
-                                &bytes,
+                                bytes,
                                 metrics.host_end.clone(),
                             );
                             metrics.unanswered = failure.is_unanswered();
@@ -5116,15 +5116,15 @@ mod native {
                                             })
                                         }
                                         Err(_) => {
-                                            step.host_failure = Some(execution::diagnostic::HostFailure::from_response(engine, &child.stdout));
+                                            step.host_failure = Some(execution::diagnostic::HostFailure::from_child(engine, execution::diagnostic::Phase::Response, &child));
                                             Some(invalid_reply(&child.stdout))
                                         }
                                     }
                                 }
                                 Err(error) => {
                                     if error.downcast_ref::<crate::commands::work::state::OutputCapacity>().is_none() {
-                                        step.host_failure = Some(execution::diagnostic::HostFailure::from_response(
-                                            engine, &child.stdout,
+                                        step.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                                            engine, execution::diagnostic::Phase::Response, &child,
                                         ));
                                     }
                                     Some(invalid_reply(&child.stdout))
