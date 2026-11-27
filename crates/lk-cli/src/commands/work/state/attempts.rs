@@ -198,6 +198,23 @@ pub(super) fn path(work: &Work) -> miette::Result<PathBuf> {
     work_path(&work.plan.id, "inspection-timeouts.json")
 }
 
+impl Attempt {
+    /// The engine and host of an unanswered hold a probe may release, as one exact selector
+    /// for the probe scan, admission and request preparation: an unexhausted unanswered failure
+    /// with what it recorded, or a legacy timeout, which kept neither.
+    fn pending_hold(&self) -> Option<(Option<lk_core::execution::AgentEngine>, Option<&HostEnd>)> {
+        match self {
+            Self::Failed {
+                failure,
+                exhausted: false,
+                ..
+            } if failure.is_unanswered() => Some((Some(failure.engine()), failure.host())),
+            Self::Timeout { .. } => Some((None, None)),
+            _ => None,
+        }
+    }
+}
+
 impl InspectionAttempts {
     #[cfg(unix)]
     fn new(work_id: String) -> Self {
@@ -287,19 +304,17 @@ impl InspectionAttempts {
 
     /// The node whose unanswered failure is the vault's released probe, if this Work holds it.
     pub(super) fn released_probe(&self, answers: &HostAnswers) -> Option<&str> {
-        self.entries.iter().find_map(|(id, entry)| match entry {
-            Attempt::Failed { failure, .. }
-                if answers.is_probe(
+        self.entries.iter().find_map(|(id, entry)| {
+            let (_, host) = entry.pending_hold()?;
+            answers
+                .is_probe(
                     &HoldIdentity::Inspection {
                         work_id: self.work_id.clone(),
                         node_id: id.clone(),
                     },
-                    failure.host().map(|host| host.at),
-                ) =>
-            {
-                Some(id.as_str())
-            }
-            _ => None,
+                    host.map(|host| host.at),
+                )
+                .then_some(id.as_str())
         })
     }
 
@@ -399,16 +414,10 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
                 .collect::<Vec<_>>(),
             StoredAttempts::Attempts { entries, .. } => entries
                 .into_iter()
-                .filter_map(|(node_id, entry)| match entry {
-                    Attempt::Failed {
-                        failure,
-                        exhausted: false,
-                        ..
-                    } if failure.is_unanswered() => {
-                        Some((node_id, Some(failure.engine()), failure.host().cloned()))
-                    }
-                    Attempt::Timeout { .. } => Some((node_id, None, None)),
-                    _ => None,
+                .filter_map(|(node_id, entry)| {
+                    let (engine, host) = entry.pending_hold()?;
+                    let host = host.cloned();
+                    Some((node_id, engine, host))
                 })
                 .collect(),
         };

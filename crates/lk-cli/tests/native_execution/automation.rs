@@ -538,6 +538,12 @@ fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects(
 
 #[test]
 fn a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held() {
+    for legacy in [false, true] {
+        a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held_for(legacy);
+    }
+}
+
+fn a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held_for(legacy: bool) {
     let behavior =
         format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
     let fixture = bounded_audit_fixture("codex", 64, &behavior);
@@ -567,7 +573,14 @@ fn a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held() {
         .collect::<Vec<_>>();
     assert!(nodes.len() >= 2, "{held}");
     for node in &nodes {
-        held["entries"][node]["failure"]["host"]["profile"] = "retired".into();
+        if legacy {
+            // A timeout counted before timeouts became unanswered failures kept neither its
+            // engine nor its time.
+            let request_revision = held["entries"][node]["request_revision"].clone();
+            held["entries"][node] = serde_json::json!({"kind": "timeout", "request_revision": request_revision, "count": 1});
+        } else {
+            held["entries"][node]["failure"]["host"]["profile"] = "retired".into();
+        }
     }
     std::fs::write(&path, serde_json::to_vec(&held).unwrap()).unwrap();
     let work = held["work_id"].as_str().unwrap().to_owned();
