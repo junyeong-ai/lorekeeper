@@ -27,9 +27,12 @@ paths:
   validate their exact manifest before using recorded observations.
 - Context pages (selected owners, discovery matches, audit related pages) follow one
   `ContextReading` per preparation (`work/resources.rs`). An audit Work reads only the
-  candidate's bounded `related_pages` as resources; its `context_cards` enter the Work
-  context as address and title, with authority text that they were not read. New Work reads them as
-  `lk_core::concept::semantic_text`: parsed frontmatter without `BOOKKEEPING_FIELDS`, so a
+  candidate's bounded `related_pages` as resources. Its `context_cards` stay outside the
+  Work, its context and its inspections: only the assessment request shows them
+  (`work/audit.rs`), by address and title with authority text that they were not read,
+  within their own byte allowance and the room the complete request leaves, counting the
+  rest as omitted, so cards never displace evidence or defer a subject. New Work reads
+  context pages as `lk_core::concept::semantic_text`: parsed frontmatter without `BOOKKEEPING_FIELDS`, so a
   citation or task-state update leaves the Work current whatever its YAML spelling; an
   authored change does not, and an unparseable page keeps its exact bytes. Work planned
   before 0.144.0 read exact bytes. `expected()` decides once which Work a preparation

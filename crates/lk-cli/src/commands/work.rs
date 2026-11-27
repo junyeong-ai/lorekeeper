@@ -6028,6 +6028,114 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn audit_context_cards_stay_outside_the_work_and_only_the_assessment_shows_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = bounded_config(&root, 262144, 32768);
+        let subject = "wiki/documents/subject.md";
+        let raw =
+            "---\ntype: document\ntitle: Subject\n---\n## Content\nA source-scoped observation.\n";
+        write(&root, subject, raw);
+        let owners = lk_graph::audit::AUDIT_CANDIDATES_PER_QUERY;
+        for index in 0..owners {
+            write(
+                &root,
+                &format!("wiki/documents/match-{index:02}.md"),
+                &format!(
+                    "---\ntype: document\ntitle: Match {index} {}\n---\nScreen candidate {index}.\n",
+                    "with a long declared title ".repeat(20)
+                ),
+            );
+        }
+        let session = MutationSession::acquire(&root).unwrap();
+        let pages = || lk_graph::scan::scan_vault(&root, false).unwrap();
+        lk_graph::audit::record_discovery(
+            &session,
+            &config.vault.dirs,
+            &pages(),
+            lk_graph::audit::AuditDiscoveryRequest {
+                path: subject.into(),
+                file_revision: file_revision(raw),
+                queries: vec![lk_core::discovery::DiscoveryQuery {
+                    query: "screen candidate".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let limits = lk_graph::audit::selection::ScreeningLimits {
+            max_input_bytes: 262144,
+            max_result_bytes: 32768,
+            max_candidates: 20,
+            max_batches: None,
+        };
+        let packet = lk_graph::audit::selection::candidates(
+            &root,
+            &config.vault.dirs,
+            &pages(),
+            subject,
+            limits,
+            false,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        let request = packet.request.unwrap();
+        assert_eq!(request.candidates.len(), owners);
+        lk_graph::audit::selection::record(
+            &session,
+            &config.vault.dirs,
+            &pages(),
+            lk_graph::audit::selection::ScreeningOutput::Record {
+                path: subject.into(),
+                purpose_revision: request.purpose_revision,
+                packet_revision: packet.request_revision.unwrap(),
+                reassess: false,
+                decisions: request
+                    .candidates
+                    .iter()
+                    .map(|card| lk_graph::audit::selection::CandidateDecision {
+                        candidate_key: card.candidate_key.clone(),
+                        decision: lk_core::discovery::ScreeningDecision::Inspect,
+                        reason: "The declared condition applies to this audit.".into(),
+                    })
+                    .collect(),
+            },
+            limits,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+
+        let cards = owners - lk_graph::audit::AUDIT_CONTEXT_PAGES;
+        let mut prepared = resources::audit(&root, &config, subject).unwrap();
+        assert!(
+            prepared.context.get("context_cards").is_none(),
+            "unread owners are no part of what the Work reads or is identified by"
+        );
+        assert_eq!(prepared.audit_context_cards.len(), cards);
+        let work = expected(&root, &mut prepared, &config, &revision).unwrap();
+        assert_eq!(work.plan.parts.len(), 1);
+        let candidate = lk_graph::audit::load_selected_inputs(
+            &root,
+            &config.vault.dirs,
+            &pages(),
+            &[subject.into()],
+        )
+        .unwrap()
+        .remove(0);
+        let whole = audit::capture_prepared(&root, &revision, &candidate, prepared, &work).unwrap();
+        let request = audit::whole_request(&config, &[whole]).unwrap();
+        let disclosed = &request["subjects"][0]["context_cards"];
+        let shown = disclosed["pages"].as_array().unwrap().len();
+        assert!(
+            shown > 0 && shown < cards,
+            "the cards are shown within their byte allowance: {shown} of {cards}"
+        );
+        assert_eq!(disclosed["omitted"], cards - shown);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn an_audit_work_paid_under_0_163_continues_after_the_upgrade() {
         // Written by 0.163.1 itself: an audit Work planned under byte-filled parts, with
         // one of its three inspections observed.

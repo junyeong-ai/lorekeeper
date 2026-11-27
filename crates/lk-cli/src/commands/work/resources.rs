@@ -135,6 +135,10 @@ pub(super) struct Prepared {
     /// A synthesis request's context snapshot, which its context-only pages are read from.
     snapshot: Option<super::snapshot::ContextSnapshot>,
     audit_reviews: Option<Vec<lk_graph::audit::AuditReviewDependency>>,
+    /// An audit subject's selected discovery owners beyond its read scope, shown to its
+    /// assessment by address and title only. They are outside the Work's context, so they
+    /// enter no inspection or Work identity.
+    pub(super) audit_context_cards: Vec<lk_graph::audit::AuditContextCard>,
     pub(super) selected_owners: Option<BTreeSet<String>>,
     /// The current candidate roster that admits this screened evidence. Result completion
     /// needs it; reading the evidence does not, so it is absent from a plain refresh.
@@ -622,6 +626,7 @@ impl<'a> Capture<'a> {
             absent: self.absent,
             snapshot: None,
             audit_reviews: None,
+            audit_context_cards: Vec::new(),
             selected_owners: None,
             roster: None,
             graph_citations: None,
@@ -1437,18 +1442,13 @@ fn capture_audit_scope_controlled(
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });
-    if !candidate.context_cards.is_empty() {
-        context["context_cards"] = json!({
-            "authority": "These pages matched the discovery queries beyond the pages read in full. Only their address and title are shown: they were not read, support nothing and settle nothing.",
-            "pages": candidate.context_cards,
-        });
-    }
     if let Some(reference) = selection {
         context["purpose"]["audit_selection"] =
             serde_json::to_value(reference).into_diagnostic()?;
     }
     let mut prepared = captured.finish(subject, context, config);
     prepared.audit_reviews = Some(candidate.reviews.clone());
+    prepared.audit_context_cards = candidate.context_cards.clone();
     Ok(prepared)
 }
 
@@ -1980,6 +1980,7 @@ mod tests {
             snapshot: None,
             roster: None,
             graph_citations: None,
+            audit_context_cards: Vec::new(),
             audit_reviews: Some(vec![lk_graph::audit::AuditReviewDependency {
                 path: review.into(),
                 file_revision: None,

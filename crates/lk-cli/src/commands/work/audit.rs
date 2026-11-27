@@ -45,6 +45,56 @@ fn assessment(prepared: &Prepared) -> miette::Result<lk_graph::audit::AuditAsses
     })
 }
 
+/// Compact JSON bytes an assessment request gives one subject's context cards.
+const CONTEXT_CARD_BYTES: usize = 2048;
+
+const CONTEXT_CARD_AUTHORITY: &str = "These pages matched the discovery queries beyond the pages read in full. Only their address and title are shown: they were not read, support nothing and settle nothing.";
+
+/// Shows subject `index` its context cards in `request`, in roster order while they fit
+/// `CONTEXT_CARD_BYTES` and the complete request fits `max_input_bytes`, and counts the rest
+/// as omitted. The request already holds the subject's evidence, so cards only take the room
+/// it leaves; without room even for the count they are not shown.
+fn disclose_context_cards(
+    request: &mut Value,
+    index: usize,
+    cards: &[lk_graph::audit::AuditContextCard],
+    max_input_bytes: usize,
+) -> miette::Result<()> {
+    if cards.is_empty() {
+        return Ok(());
+    }
+    let disclosure = |shown: usize| {
+        json!({"authority":CONTEXT_CARD_AUTHORITY, "pages":&cards[..shown],
+            "omitted":cards.len() - shown})
+    };
+    let fits = |request: &mut Value, shown: usize| -> miette::Result<bool> {
+        if serde_json::to_vec(&cards[..shown]).into_diagnostic()?.len() > CONTEXT_CARD_BYTES {
+            return Ok(false);
+        }
+        request["subjects"][index]["context_cards"] = disclosure(shown);
+        Ok(serde_json::to_vec(request).into_diagnostic()?.len() <= max_input_bytes)
+    };
+    // The largest fitting prefix: fitting is monotone in the number shown.
+    let (mut low, mut high) = (0, cards.len());
+    if !fits(request, low)? {
+        request["subjects"][index]
+            .as_object_mut()
+            .expect("an assessment subject is an object")
+            .remove("context_cards");
+        return Ok(());
+    }
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if fits(request, middle)? {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    request["subjects"][index]["context_cards"] = disclosure(low);
+    Ok(())
+}
+
 pub(super) fn request(
     work: &Work,
     prepared: &Prepared,
@@ -55,7 +105,7 @@ pub(super) fn request(
             "audit finalizer differs from completed Work"
         ));
     }
-    Ok(json!({
+    let mut request = json!({
         "schema":"native-audit-results-v1",
         "subjects":[{"subject_ref":"s0", "work":completed}],
         "max_input_bytes":work.max_input_bytes,
@@ -65,7 +115,14 @@ pub(super) fn request(
         "instructions":audit::instructions(),
         "contracts":audit::contracts()?,
         "contract_revision":contract_revision()?,
-    }))
+    });
+    disclose_context_cards(
+        &mut request,
+        0,
+        &prepared.audit_context_cards,
+        work.max_input_bytes,
+    )?;
+    Ok(request)
 }
 
 pub(super) fn assemble(
@@ -321,7 +378,7 @@ pub(in crate::commands) fn whole_request(
             &subject.binding(),
         )?);
     }
-    Ok(json!({
+    let mut request = json!({
         "schema":"native-audit-results-v1",
         "subjects":subjects.iter().enumerate().map(|(index, subject)| json!({
             "subject_ref":format!("s{index}"), "context":subject.prepared.context,
@@ -333,12 +390,69 @@ pub(in crate::commands) fn whole_request(
         "response_schema":audit::schema(), "instructions":audit::instructions(),
         "contracts":audit::contracts()?,
         "contract_revision":contract_revision()?,
-    }))
+    });
+    for (index, subject) in subjects.iter().enumerate() {
+        disclose_context_cards(
+            &mut request,
+            index,
+            &subject.prepared.audit_context_cards,
+            bounds.max_input_bytes,
+        )?;
+    }
+    Ok(request)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn context_cards(count: usize) -> Vec<lk_graph::audit::AuditContextCard> {
+        (0..count)
+            .map(|index| lk_graph::audit::AuditContextCard {
+                path: format!("wiki/documents/match-{index:02}.md"),
+                title: format!("Match {index} {}", "with a long declared title ".repeat(4)),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn context_cards_take_only_the_room_their_allowance_and_the_request_leave() {
+        let evidence = json!({"subjects":[{"subject_ref":"s0", "resources":["evidence"]}]});
+        let cards = context_cards(40);
+        let shown = |request: &Value| {
+            request["subjects"][0]["context_cards"]["pages"]
+                .as_array()
+                .unwrap()
+                .len()
+        };
+        let bytes = |value: &Value| serde_json::to_vec(value).unwrap().len();
+
+        let mut request = evidence.clone();
+        disclose_context_cards(&mut request, 0, &cards, usize::MAX).unwrap();
+        let allowed = shown(&request);
+        assert!(bytes(&request["subjects"][0]["context_cards"]["pages"]) <= CONTEXT_CARD_BYTES);
+        assert!(serde_json::to_vec(&cards[..=allowed]).unwrap().len() > CONTEXT_CARD_BYTES);
+        assert_eq!(
+            request["subjects"][0]["context_cards"]["omitted"],
+            cards.len() - allowed
+        );
+
+        // Near the input bound the cards give way, and the request still fits.
+        let bound = bytes(&request) - 1;
+        let mut tight = evidence.clone();
+        disclose_context_cards(&mut tight, 0, &cards, bound).unwrap();
+        assert!(bytes(&tight) <= bound);
+        assert!(shown(&tight) < allowed);
+        assert_eq!(
+            tight["subjects"][0]["context_cards"]["omitted"],
+            cards.len() - shown(&tight)
+        );
+
+        // Without room even for the count, the evidence stands alone.
+        let mut full = evidence.clone();
+        disclose_context_cards(&mut full, 0, &cards, bytes(&evidence)).unwrap();
+        assert_eq!(full, evidence);
+    }
 
     #[test]
     fn repair_procedure_changes_reopen_the_contract_without_expanding_its_payload() {
