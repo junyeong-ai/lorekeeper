@@ -416,6 +416,18 @@ mod native {
     struct HostProbe {
         remaining: std::collections::VecDeque<crate::commands::work::host::PendingHold>,
         released: Option<crate::commands::work::host::PendingHold>,
+        /// The queue target or audit subject the released hold belongs to, which its drain
+        /// sends before other work.
+        target: Option<String>,
+    }
+
+    /// Why a run releases a probe.
+    #[derive(Clone, Copy)]
+    enum ProbeRelease {
+        /// Planning found nothing else admissible.
+        Idle,
+        /// The previous run of this drain gave its turn to ordinary work while probes waited.
+        RecoveryTurn,
     }
 
     /// The probe each drain is choosing. A queue drain and a knowledge audit reach different
@@ -915,6 +927,8 @@ mod native {
         hosts_invoked: crate::commands::work::host::InvokedHosts,
         /// The probe each drain of this run is choosing, once it found no admissible work.
         host_probes: HostProbes,
+        /// The drains whose first turn this run already decided (`take_recovery_turn`).
+        recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
@@ -1074,7 +1088,11 @@ mod native {
         /// would send. Called again after planning still found nothing admissible, the probe
         /// released last could not run: it is withdrawn and the next oldest is tried, until
         /// one admits a call or none remains. Returns whether planning should run again.
-        fn release_host_probe(&mut self, scope: crate::commands::work::host::ProbeScope) -> bool {
+        fn release_host_probe(
+            &mut self,
+            scope: crate::commands::work::host::ProbeScope,
+            why: ProbeRelease,
+        ) -> bool {
             use crate::commands::work::host;
             let root = self.root.clone();
             let mut probe = match self.host_probes.scope(scope).take() {
@@ -1094,6 +1112,7 @@ mod native {
                         Ok(candidates) => HostProbe {
                             remaining: candidates.into(),
                             released: None,
+                            target: None,
                         },
                         Err(error) => {
                             self.failure("host probe", error);
@@ -1103,6 +1122,7 @@ mod native {
                 }
             };
             probe.released = None;
+            probe.target = None;
             let next = loop {
                 match probe.remaining.pop_front() {
                     Some(hold) if self.hosts_invoked.reached(hold.engine, hold.host.as_ref()) => {}
@@ -1117,11 +1137,27 @@ mod native {
             let Some(hold) = next else {
                 return false;
             };
+            if let Err(error) = host::record_recovery_due(&root, scope, false) {
+                self.failure("host probe", error);
+                return false;
+            }
+            let target = match &hold.scope {
+                host::HoldScope::Queue { task_id, .. } => {
+                    crate::commands::queue::current_task(&root, task_id)
+                        .ok()
+                        .map(|task| task.target.vault_path)
+                }
+                host::HoldScope::Audit { path, .. } => Some(path.clone()),
+            };
             self.record(
                 "host probe",
                 StageState::Completed,
                 Some(format!(
-                    "no work was admissible; released the oldest pending unanswered hold {} as a probe of its {} host",
+                    "{}; released the oldest pending unanswered hold {} as a probe of its {} host",
+                    match why {
+                        ProbeRelease::Idle => "no work was admissible",
+                        ProbeRelease::RecoveryTurn => "the previous run gave its turn to other work while this hold waited, so recovery goes first",
+                    },
                     serde_json::to_string(&hold.identity).expect("hold identity serializes"),
                     hold.host
                         .as_ref()
@@ -1138,13 +1174,74 @@ mod native {
                     probe.released = None;
                 }
             }
-            self.host_probes
+            let released = self
+                .host_probes
                 .scope(scope)
                 .as_mut()
-                .expect("probe candidates")
-                .released = Some(hold);
+                .expect("probe candidates");
+            released.released = Some(hold);
+            released.target = target;
             self.queue_replan = QueueReplan::Invalidate;
             true
+        }
+
+        /// The target of `scope`'s released probe while its host has given no outcome in this
+        /// run: the drain sends it before other work.
+        fn probe_target(
+            &mut self,
+            scope: crate::commands::work::host::ProbeScope,
+        ) -> Option<String> {
+            let probe = self.host_probes.scope(scope).as_ref()?;
+            let hold = probe.released.as_ref()?;
+            if self.hosts_invoked.reached(hold.engine, hold.host.as_ref()) {
+                return None;
+            }
+            probe.target.clone()
+        }
+
+        /// Decides, once per run and drain, who takes the first turn. When the previous run
+        /// gave it to ordinary work while probes waited, a probe is released now and sent
+        /// first; otherwise ordinary work goes first and, if probes wait, recovery is owed the
+        /// next run's first turn. Either side thus waits at most one run, even at one call per
+        /// run.
+        fn take_recovery_turn(&mut self, scope: crate::commands::work::host::ProbeScope) {
+            use crate::commands::work::host;
+            if !self.recovery_turns.insert(scope) {
+                return;
+            }
+            let root = self.root.clone();
+            let due = match host::HostAnswers::load(&root) {
+                Ok(answers) => answers.is_recovery_due(scope),
+                Err(error) => {
+                    self.failure("host probe", error);
+                    return;
+                }
+            };
+            if due {
+                self.release_host_probe(scope, ProbeRelease::RecoveryTurn);
+                return;
+            }
+            let waiting = host::pending_holds(&root).and_then(|holds| {
+                host::HostAnswers::load(&root)?.probe_candidates(
+                    &root,
+                    scope,
+                    &self.hosts_invoked,
+                    holds,
+                    self.supervisor.read_control(),
+                    jiff::Timestamp::now(),
+                )
+            });
+            match waiting {
+                Ok(waiting) if !waiting.is_empty() => {
+                    if let Err(error) = host::record_recovery_due(&root, scope, true) {
+                        self.failure("host probe", error);
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.failure("host probe", error);
+                }
+            }
         }
 
         /// The host configuration that served a step whose host ended at `finished_at`.
@@ -5792,6 +5889,7 @@ mod native {
         }
 
         async fn dispatch_queue(&mut self) -> bool {
+            self.take_recovery_turn(crate::commands::work::host::ProbeScope::Queue);
             'planning: loop {
                 let replan = std::mem::take(&mut self.queue_replan);
                 if self.result.is_halted()
@@ -5839,7 +5937,10 @@ mod native {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
                     }
-                    if self.release_host_probe(crate::commands::work::host::ProbeScope::Queue) {
+                    if self.release_host_probe(
+                        crate::commands::work::host::ProbeScope::Queue,
+                        ProbeRelease::Idle,
+                    ) {
                         continue 'planning;
                     }
                     if let Some((target, reasons)) = plan.deferred.first_key_value() {
@@ -5869,7 +5970,11 @@ mod native {
                                 == Some(*binding)
                         })
                         .map(|binding| binding.target.clone());
-                    let selected = match admitted {
+                    let probing = self
+                        .probe_target(crate::commands::work::host::ProbeScope::Queue)
+                        .filter(|target| jobs.contains_key(target));
+                    let probe_turn = probing.is_some();
+                    let selected = match probing.or(admitted) {
                         Some(selected) => selected,
                         None => {
                             self.queue_admitted.clear();
@@ -5884,7 +5989,9 @@ mod native {
                         continue 'planning;
                     }
                     if jobs[&selected].is_read_only() {
-                        if !self.queue_read_wave(&selected, &mut jobs, keys).await {
+                        let probe_keys = std::collections::BTreeSet::from([selected.clone()]);
+                        let wave_keys = if probe_turn { &probe_keys } else { keys };
+                        if !self.queue_read_wave(&selected, &mut jobs, wave_keys).await {
                             return false;
                         }
                         if self.queue_replan.is_requested()
@@ -5902,7 +6009,13 @@ mod native {
                     }
                     self.reserved_targets.clear();
                     self.queue_turn = Some(QueueTurn {
-                        keys: keys.clone(),
+                        // A probe's turn is reserved for its target alone, outside the
+                        // round-robin order of ordinary targets.
+                        keys: if probe_turn {
+                            std::collections::BTreeSet::from([selected.clone()])
+                        } else {
+                            keys.clone()
+                        },
                         binding: jobs[&selected].binding(&selected),
                         targets: match &jobs[&selected] {
                             QueueDispatch::WholeInput { tasks, .. } => tasks
@@ -6843,6 +6956,7 @@ mod native {
             .map_err(|error| miette::miette!("{error}"))?;
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
+            let focus = self.probe_target(crate::commands::work::host::ProbeScope::Audit);
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             let mut processing_deferred = Vec::new();
@@ -6856,6 +6970,10 @@ mod native {
                 self.config.graph.audit.batch_size,
                 self.config.graph.audit.max_input_bytes,
                 &mut |candidate| {
+                    // A released probe's subject goes first: this batch admits it alone.
+                    if focus.as_ref().is_some_and(|focus| *focus != candidate.path) {
+                        return Ok(false);
+                    }
                     let available = readiness.check(candidate)?;
                     if !available {
                         input_deferred_paths.insert(candidate.path.clone());
@@ -7102,6 +7220,7 @@ mod native {
             if !self.inspect_review_health() {
                 return false;
             }
+            self.take_recovery_turn(crate::commands::work::host::ProbeScope::Audit);
             let mut plan = match self.admit_audit().await {
                 Ok(plan) => plan,
                 Err(_) if self.result.is_halted() || self.result.cancelled => return false,
@@ -7133,7 +7252,10 @@ mod native {
             }
             if plan.candidates.is_empty() {
                 if self.result.audit_deferred_count > 0 {
-                    if self.release_host_probe(crate::commands::work::host::ProbeScope::Audit) {
+                    if self.release_host_probe(
+                        crate::commands::work::host::ProbeScope::Audit,
+                        ProbeRelease::Idle,
+                    ) {
                         return true;
                     }
                     self.deferred("audit dependencies", "pending subjects have unfinished inputs or require processing action; retained for later assessment");
@@ -7239,7 +7361,15 @@ mod native {
                     if !self.call_budget_available() {
                         return false;
                     }
-                    let keys = jobs.keys().cloned().collect();
+                    // A released probe's subject takes its turn alone, outside the round-robin
+                    // order of the other subjects.
+                    let keys = match self
+                        .probe_target(crate::commands::work::host::ProbeScope::Audit)
+                        .filter(|target| jobs.contains_key(target))
+                    {
+                        Some(target) => std::collections::BTreeSet::from([target]),
+                        None => jobs.keys().cloned().collect(),
+                    };
                     let Some((session, _)) = self.mutation_session("audit scheduling").await else {
                         return false;
                     };
@@ -7580,6 +7710,7 @@ mod native {
             answered_hosts: std::collections::BTreeSet::new(),
             hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
             host_probes: HostProbes::default(),
+            recovery_turns: std::collections::BTreeSet::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,

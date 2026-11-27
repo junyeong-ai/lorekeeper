@@ -69,8 +69,9 @@ structural readiness, not admission or completion.
 A native failure holds its exact input instead of spending further calls. An invocation
 that ended without an answer (an exit, a timeout or a missing result) is retried
 automatically, once, after the same host (its execution profile) answers another request; a scheduled process
-or knowledge run with nothing else admissible sends the oldest such request it can still
-reach as a probe, one call at a time. A probe that fails again waits longer before the
+or knowledge run sends the oldest such request it can still reach as a probe, one call at
+a time, when nothing else is admissible or when the previous run gave its turn to other
+work, so new work on another profile cannot starve it. A probe that fails again waits longer before the
 next one: 5 minutes, doubling per failed probe, at most a day. Reasons say
 `retried automatically once the … host answers` for these, and name the next probe time
 after a failed probe. A request that fails again after

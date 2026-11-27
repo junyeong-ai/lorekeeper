@@ -405,6 +405,62 @@ fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning()
     );
 }
 
+#[test]
+fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects() {
+    let behavior =
+        format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
+    let fixture = bounded_audit_fixture("codex", 1, &behavior);
+    configure(&fixture, Some(20), 60);
+    std::fs::write(fixture.root().join("fail"), "").unwrap();
+    let first = run(&fixture, "knowledge", false);
+    assert_eq!(calls(&first), 1, "{first}");
+    std::fs::remove_file(fixture.root().join("fail")).unwrap();
+    // The held request's host is a profile ordinary work no longer uses, so no answer of
+    // ordinary work releases it: only a probe can.
+    let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name() == "inspection-timeouts.json")
+        .unwrap()
+        .into_path();
+    let mut held: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let node = held["entries"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    held["entries"][&node]["failure"]["host"]["profile"] = "retired".into();
+    std::fs::write(&path, serde_json::to_vec(&held).unwrap()).unwrap();
+    let work = held["work_id"].as_str().unwrap().to_owned();
+    let probed = || {
+        bounded_calls(&fixture)
+            .iter()
+            .any(|row| row["work_id"] == work.as_str() && row["node_id"] == node.as_str())
+    };
+    let mut runs = 0;
+    while !probed() {
+        runs += 1;
+        assert!(
+            runs <= 2,
+            "the held request waits at most one run for its turn"
+        );
+        write_audit_concept(&fixture, &format!("fresh-{runs}"));
+        let report = run(&fixture, "knowledge", false);
+        assert_eq!(calls(&report), 1, "{report}");
+    }
+    write_audit_concept(&fixture, "after");
+    run(&fixture, "knowledge", false);
+    assert!(
+        bounded_calls(&fixture)
+            .iter()
+            .any(|row| row["node_id"] != node.as_str()),
+        "recovery does not take every turn from new subjects"
+    );
+}
+
 fn configure(fixture: &Fixture, calls: Option<usize>, seconds: u64) {
     let calls = calls.map_or_else(|| "null".to_owned(), |calls| calls.to_string());
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(

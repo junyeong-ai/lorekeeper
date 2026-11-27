@@ -190,7 +190,13 @@ paths:
   knowledge audit, for its subjects) releases as a probe the oldest pending hold whose
   request is still current, whose host has not answered since and which this run has not
   invoked yet; if replanning still admits no call, that probe is withdrawn and the next
-  oldest is tried, within the same run, until one admits a call or none remains. While the
+  oldest is tried, within the same run, until one admits a call or none remains. Probes
+  also take turns beside ordinary work, so a recovered host is not starved by another
+  profile's stream of new work: when a run of a drain gives its first turn to ordinary
+  work while probe candidates wait, the ledger records that recovery is owed
+  (`recovery_due`), and the next run of that drain releases a probe first and sends its
+  target alone before other work; any release pays the debt. Each side therefore waits at
+  most one run, even at one call per run. While the
   probe's host has given no outcome in the run, waves send one call at a time; a probe an
   earlier run released and whose host has not answered since counts as this run's probe,
   since that run may have stopped before sending it. A probe that

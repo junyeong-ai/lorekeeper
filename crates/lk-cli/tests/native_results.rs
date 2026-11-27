@@ -432,6 +432,47 @@ fn consecutive_unanswered_finalizers_end_the_run(mode: &str) {
 }
 
 #[test]
+fn a_recovered_profiles_hold_gets_a_turn_while_another_profile_keeps_receiving_work() {
+    let fixture = Fixture::new("codex");
+    fixture.route_synthesis();
+    let (held, _) = fixture.add("held", lk_queue::TaskKind::SynthesizeConcept, false);
+    std::fs::write(fixture.root().join("mode"), "host-exit-synthesizer").unwrap();
+    let first = fixture.run();
+    assert!(!fixture.done(&held), "{first}");
+    std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 1"),
+    )
+    .unwrap();
+    let mut fresh = Vec::new();
+    let mut runs = 0;
+    while !fixture.done(&held) {
+        runs += 1;
+        assert!(
+            runs <= 2,
+            "the held request waits at most one run for its turn"
+        );
+        let (task, _) = fixture.add(
+            &format!("fresh{runs}"),
+            lk_queue::TaskKind::ExtractConcepts,
+            false,
+        );
+        fresh.push(task);
+        let report = fixture.run();
+        assert_eq!(report["semantic_calls"], 1, "{report}");
+    }
+    let (task, _) = fixture.add("after", lk_queue::TaskKind::ExtractConcepts, false);
+    fresh.push(task);
+    fixture.run();
+    assert!(
+        fresh.iter().any(|task| fixture.done(task)),
+        "recovery does not take every turn from ordinary work"
+    );
+}
+
+#[test]
 fn a_failing_profile_trips_alone_while_a_healthy_profile_keeps_its_work() {
     let fixture = Fixture::new("codex");
     fixture.route_synthesis();

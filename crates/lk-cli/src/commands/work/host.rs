@@ -104,15 +104,18 @@ struct Stored {
     profiles: BTreeMap<ProfileKey, Timestamp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     probe: Option<Probe>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    recovery_due: std::collections::BTreeSet<ProbeScope>,
 }
 
-/// The latest answer each host configuration and each engine gave, and the one pending hold
-/// released as a probe.
+/// The latest answer each host configuration and each engine gave, the one pending hold
+/// released as a probe, and the drains whose next run owes recovery the first turn.
 #[derive(Debug, Default)]
 pub(in crate::commands) struct HostAnswers {
     answers: BTreeMap<AgentEngine, Timestamp>,
     profiles: BTreeMap<ProfileKey, Timestamp>,
     probe: Option<Probe>,
+    recovery_due: std::collections::BTreeSet<ProbeScope>,
 }
 
 /// The hosts a run has invoked: the profiles it reached, and their engines for holds that
@@ -276,8 +279,8 @@ impl HoldScope {
 
 /// Which pending holds an operation can probe: the queue drain reaches queue tasks, the
 /// knowledge audit reaches audit subjects.
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub(in crate::commands) enum ProbeScope {
     Queue,
     Audit,
@@ -325,6 +328,7 @@ impl HostAnswers {
             answers: stored.answers,
             profiles: stored.profiles,
             probe: stored.probe,
+            recovery_due: stored.recovery_due,
         })
     }
 
@@ -506,6 +510,7 @@ impl HostAnswers {
             answers: self.answers.clone(),
             profiles: self.profiles.clone(),
             probe: self.probe.clone(),
+            recovery_due: self.recovery_due.clone(),
         })
         .into_diagnostic()?;
         if raw.len() > MAX_BYTES {
@@ -603,6 +608,35 @@ pub(in crate::commands) fn record_answer(
         answers.store(root)?;
     }
     Ok(())
+}
+
+/// Records whether the next run of `scope`'s drain owes recovery its first turn: a run that
+/// gave its turn to ordinary work while probe candidates waited owes it; a release pays it.
+/// Alternating keeps either from taking every turn, even at one call per run.
+#[cfg(unix)]
+pub(in crate::commands) fn record_recovery_due(
+    root: &Path,
+    scope: ProbeScope,
+    due: bool,
+) -> miette::Result<()> {
+    let mut answers = HostAnswers::load(root)?;
+    let changed = if due {
+        answers.recovery_due.insert(scope)
+    } else {
+        answers.recovery_due.remove(&scope)
+    };
+    if changed {
+        answers.store(root)?;
+    }
+    Ok(())
+}
+
+impl HostAnswers {
+    /// Whether `scope`'s drain owes recovery its first turn in this run.
+    #[cfg(unix)]
+    pub(in crate::commands) fn is_recovery_due(&self, scope: ProbeScope) -> bool {
+        self.recovery_due.contains(&scope)
+    }
 }
 
 /// Releases `hold` as this vault's probe, replacing any earlier probe, or withdraws the
