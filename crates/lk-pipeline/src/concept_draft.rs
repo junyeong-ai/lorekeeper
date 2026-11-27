@@ -858,6 +858,10 @@ impl ConceptDraft {
         }
 
         let llm_inputs = self.llm_inputs();
+        // Which bodies Lore wrote is Rust's record (below), never template data: a template
+        // emitting its inputs would otherwise carry an entry for a body edited since.
+        let mut template_inputs = llm_inputs.clone();
+        template_inputs.remove(field::GENERATED_SECTIONS);
 
         let context = serde_json::json!({
             "slug": self.slug,
@@ -869,7 +873,7 @@ impl ConceptDraft {
             // Preserved verbatim — backlinks-sync owns the real count; ingest never
             // recomputes or resets it (new pages start at 0).
             "source_count": self.source_count,
-            "llm_inputs": llm_inputs,
+            "llm_inputs": template_inputs,
             "i18n": strings,
         });
 
@@ -923,24 +927,29 @@ impl ConceptDraft {
             }
         }
         // Stamped here, like the review record, so the record that Lore wrote a spliced body
-        // survives any template. Only entries the spliced page still matches are carried: a
-        // body edited since Lore wrote it is its author's.
+        // survives any template. Exactly the entries the spliced page still matches are
+        // written: a body edited since Lore wrote it is its author's.
         if let Some(record) = llm_inputs.get(field::GENERATED_SECTIONS) {
             let recorded: BTreeMap<String, String> =
                 serde_json::from_str(record).unwrap_or_default();
             let matching = recorded
-                .iter()
+                .into_iter()
                 .filter(|(heading, digest)| {
                     lk_vault::section_body(&content, heading)
-                        .is_some_and(|body| lk_vault::generated_body_digest(body) == **digest)
+                        .is_some_and(|body| lk_vault::generated_body_digest(body) == *digest)
                 })
-                .map(|(heading, _)| heading.as_str())
-                .collect::<Vec<_>>();
+                .collect::<BTreeMap<_, _>>();
             if !matching.is_empty() {
-                content =
-                    lk_vault::record_generated_sections(&content, &matching).ok_or_else(|| {
-                        PipelineError::Render("concept template requires llm_inputs".into())
-                    })?;
+                let record = serde_json::to_string(&matching)
+                    .map_err(|error| PipelineError::Render(error.to_string()))?;
+                content = lk_vault::set_llm_input(
+                    &content,
+                    field::GENERATED_SECTIONS,
+                    &lk_core::concept::yaml_scalar(&record),
+                )
+                .ok_or_else(|| {
+                    PipelineError::Render("concept template requires llm_inputs".into())
+                })?;
             }
         }
 
@@ -1898,20 +1907,33 @@ mod tests {
             preserved_related: Some("An edited list.".into()),
             aliases: Vec::new(),
         };
-        let engine = TemplateEngine::build(None).unwrap();
-        let page = draft
-            .render(&engine, &VaultDirs::default(), Locale::En)
-            .unwrap();
-        let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
-        assert_eq!(
-            lk_vault::generated_sections(&parsed),
-            BTreeMap::from([(
-                "Synthesis".to_owned(),
-                lk_vault::generated_body_digest(synthesis)
-            )]),
-            "{}",
-            page.content
+        // A template that emits every input it receives cannot carry the stale entry either.
+        let directory = tempfile::tempdir().unwrap();
+        let template = include_str!("../../../templates/concept.md.jinja");
+        let emitting = template.replace(
+            "{%- if llm_inputs.synthesis %}",
+            "{%- for key, value in llm_inputs|items %}{%- if key != 'synthesis' and key != 'synthesis_done' %}\n  {{ key }}: {{ value | tojson }}{%- endif %}{%- endfor %}\n{%- if llm_inputs.synthesis %}",
         );
+        assert_ne!(emitting, template);
+        std::fs::write(directory.path().join("concept.md.jinja"), emitting).unwrap();
+        for engine in [
+            TemplateEngine::build(None).unwrap(),
+            TemplateEngine::build(Some(directory.path())).unwrap(),
+        ] {
+            let page = draft
+                .render(&engine, &VaultDirs::default(), Locale::En)
+                .unwrap();
+            let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
+            assert_eq!(
+                lk_vault::generated_sections(&parsed),
+                BTreeMap::from([(
+                    "Synthesis".to_owned(),
+                    lk_vault::generated_body_digest(synthesis)
+                )]),
+                "{}",
+                page.content
+            );
+        }
     }
 
     /// A synthesis input `backlinks-sync` already recorded is that sweep's promise of a

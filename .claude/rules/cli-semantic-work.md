@@ -56,8 +56,8 @@ paths:
   only where it would otherwise run into the current text around it, so a page only Lore
   rewrote composes to its recorded bytes. Concept synthesis publication records the
   synthesis and related sections it writes, and backlinks reconciliation the sources section
-  it rewrites; a concept rerender carries the record of each body it splices back while
-  that body still matches it. Nothing else records, section results included: a document render rebuilds its `llm_inputs`, so its
+  it rewrites; a concept rerender writes the record of exactly the bodies it splices back
+  that still match it, and its template never receives the record. Nothing else records, section results included: a document render rebuilds its `llm_inputs`, so its
   summary and related concepts are read as they are now, as is a body edited after Lore
   wrote it and every other section. A neighbor's resynthesis therefore does not replan the
   request, which would otherwise rarely finish while its neighbors keep changing, while an
