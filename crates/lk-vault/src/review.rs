@@ -40,11 +40,32 @@ pub struct KnowledgeReview {
     /// question cannot have been settled by new evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_citation_digest: Option<String>,
-    /// For a typed review a synthesis proposed, the digest of the other open reviews naming
-    /// its concept, by address and revision, when it was proposed. With the citation digest it
-    /// tells a later synthesis whether anything but this review changed since.
+    /// For a typed review a synthesis proposed, the digest of the open reviews naming its
+    /// concept that are not unedited synthesis publications, by address and revision, when it
+    /// was proposed. With the citation digest it tells a later synthesis whether anything but
+    /// synthesis publications changed since.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_review_digest: Option<String>,
+    /// For a typed review a synthesis proposed, its `publication_digest` as published. While the
+    /// page's current digest equals it, the review is exactly what automation published; an
+    /// edit makes it an ordinary input. A review without one is never treated as automation's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub publication_digest: Option<String>,
+}
+
+/// The digest of a review page's frontmatter (its own `review.publication_digest` aside) and
+/// body, which a synthesis-published review records to tell its publication from a later edit.
+pub fn publication_digest(page: &crate::VaultPage) -> String {
+    let mut fields = page.frontmatter.fields.clone();
+    if let Some(review) = fields
+        .get_mut("review")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        review.remove("publication_digest");
+    }
+    let bytes = serde_json::to_vec(&serde_json::json!({"fields": fields, "body": page.body}))
+        .expect("review page fields serialize");
+    blake3::hash(&bytes).to_hex()[..32].to_string()
 }
 
 impl<'de> Deserialize<'de> for KnowledgeReview {
@@ -64,6 +85,8 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             judged_citation_digest: Option<String>,
             #[serde(default)]
             judged_review_digest: Option<String>,
+            #[serde(default)]
+            publication_digest: Option<String>,
         }
         let mapping = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let fields: Fields = serde_json::from_value(serde_json::Value::Object(mapping))
@@ -76,6 +99,7 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             resolution: fields.resolution,
             judged_citation_digest: fields.judged_citation_digest,
             judged_review_digest: fields.judged_review_digest,
+            publication_digest: fields.publication_digest,
         })
     }
 }
@@ -222,6 +246,7 @@ impl KnowledgeReview {
         for (field, digest) in [
             ("judged_citation_digest", &self.judged_citation_digest),
             ("judged_review_digest", &self.judged_review_digest),
+            ("publication_digest", &self.publication_digest),
         ] {
             if let Some(digest) = digest
                 && (self.kind.is_none() || !lk_core::concept::is_source_revision(digest))

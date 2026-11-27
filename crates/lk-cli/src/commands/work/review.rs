@@ -4,23 +4,26 @@
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
 //!
 //! Only the causal loop is blocked. A synthesis finalizer that publishes a review makes its concept
-//! owed a resynthesis; that resynthesis, when the only changed inputs are reviews syntheses of this
-//! concept proposed (the citations and the open reviews no synthesis proposed are as they were when
-//! one of them was proposed), may not propose another review of any kind, or rephrased or
-//! alternating questions would open review after review. Any other synthesis may propose a review
-//! of a kind already open for its concept when the proposal declares, for each such open review,
-//! how its question differs (`distinct_from`); Rust checks that the list is complete. A proposal
-//! repeating a scoped review exactly (kind, title, judgment and evidence) is that review and
-//! publishes nothing.
+//! owed a resynthesis; that resynthesis, when the only changed inputs are unedited publications of
+//! syntheses of this concept (the citations and every other open review are as they were when one
+//! of them was published), may not propose another review of any kind, or rephrased or alternating
+//! questions would open review after review. A publication is unedited while its page still matches
+//! the `publication_digest` it was published with; an operator's edit makes it an ordinary input,
+//! as is a review recorded without that digest. Any other synthesis may propose a review of a kind
+//! already open for its concept when the proposal declares, for each such open review, how its
+//! question differs (`distinct_from`); Rust checks that the list is complete. A proposal repeating
+//! a scoped review exactly (kind, title, judgment and evidence) is that review and publishes
+//! nothing.
 //!
 //! A refused proposal never holds the synthesis: every needs-review reply carries the complete
 //! synthesis the finalizer would publish without the review, whose references name only existing
-//! reviews, and Rust publishes it and drops only the proposal. A review a synthesis publishes
-//! records the citation digest and the digest of the open reviews no synthesis proposed it was
-//! judged against (`judged_citation_digest`, `judged_review_digest`), with its concept as its
-//! subject: that is how a later synthesis recognizes the loop. The run bounds the rest: a target
-//! publishes at most one review per run, and a further admissible proposal waits unrecorded for a
-//! later run, whose request then scopes the reviews published.
+//! reviews, and Rust stages it and drops only the proposal. A review a synthesis publishes records
+//! the citation digest and the digest of the other inputs it was judged against, the open reviews
+//! that are not unedited publications (`judged_citation_digest`, `judged_review_digest`), and its
+//! own `publication_digest`, with its concept as its subject: that is how a later synthesis
+//! recognizes the loop. The run bounds the rest: a target publishes at most one review per run, and
+//! a further admissible proposal waits unrecorded for a later run, whose request then scopes the
+//! reviews published.
 
 use std::path::{Path, PathBuf};
 
@@ -166,14 +169,24 @@ pub(in crate::commands) fn admit(
     }
     let judged_review_digest =
         judged_review_digest(&open_naming(root, config, &task.target.vault_path)?);
-    let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
+    let mut metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
         "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash,
         "judged_review_digest":judged_review_digest});
-    let content = format!(
-        "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
-        serde_json::to_string(title).into_diagnostic()?,
-        proposal.body.trim_end(),
-    );
+    let render = |metadata: &Value| -> miette::Result<String> {
+        Ok(format!(
+            "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
+            serde_json::to_string(title).into_diagnostic()?,
+            proposal.body.trim_end(),
+        ))
+    };
+    // The digest is taken from the page as it will be read back, so an unedited publication
+    // matches it exactly.
+    let published = match lk_vault::parse_page(&render(&metadata)?) {
+        Ok(page) => page,
+        Err(error) => return Ok(Err(format!("the review cannot be published: {error}"))),
+    };
+    metadata["publication_digest"] = lk_vault::publication_digest(&published).into();
+    let content = render(&metadata)?;
     let planned = lk_vault::plan_curation(
         root,
         &config.vault.dirs,
@@ -197,9 +210,9 @@ pub(in crate::commands) fn admit(
 }
 
 /// The refusal of `proposal` under the review rule, if it breaks it: it is the causal loop (an
-/// open review a synthesis of this concept proposed against the same citations and the same
-/// open reviews no synthesis proposed), or it leaves an open review of its kind without a
-/// declared difference.
+/// unedited synthesis publication naming this concept, judged against the same citations and
+/// the same other inputs, the open reviews that are not unedited synthesis publications), or it
+/// leaves an open review of its kind without a declared difference.
 fn rule_refusal(
     root: &Path,
     config: &lk_core::config::Config,
@@ -209,11 +222,12 @@ fn rule_refusal(
     let open = open_naming(root, config, &task.target.vault_path)?;
     let judged = judged_review_digest(&open);
     if let Some(review) = open.iter().find(|review| {
-        review.judged_citation_digest.as_deref() == Some(task.cache_hash.as_str())
+        review.is_unedited_publication
+            && review.judged_citation_digest.as_deref() == Some(task.cache_hash.as_str())
             && review.judged_review_digest.as_deref() == Some(judged.as_str())
     }) {
         return Ok(Some(format!(
-            "this synthesis is owed only to reviews syntheses of this concept proposed, such as the open review {}, and no citation or other review changed since; reference them in the synthesis instead of proposing another review",
+            "this synthesis is owed only to reviews syntheses of this concept published, such as the open review {}, and no citation or other review changed since; reference them in the synthesis instead of proposing another review",
             review.path
         )));
     }
@@ -248,16 +262,20 @@ struct NamingReview {
     kind: Option<lk_vault::ReviewKind>,
     judged_citation_digest: Option<String>,
     judged_review_digest: Option<String>,
+    /// Whether the page is exactly what a synthesis published: it records a
+    /// `publication_digest` that its current content still matches. A review edited since, or
+    /// one recorded without that digest, is an ordinary input.
+    is_unedited_publication: bool,
 }
 
-/// The digest, by address and file revision, of the open reviews naming a concept that no
-/// synthesis proposed: the reviews a synthesis's proposal is judged against. Reviews syntheses
-/// proposed (they record `judged_citation_digest`) are left out, so a resynthesis they alone
-/// caused finds the digest its predecessor recorded, whatever their kinds.
+/// The digest, by address and file revision, of the open reviews naming a concept that are not
+/// unedited synthesis publications: the inputs a synthesis's proposal is judged against.
+/// Unedited publications are left out, so a resynthesis they alone caused finds the digest its
+/// predecessor recorded, whatever their kinds, while an edit to one of them changes it.
 fn judged_review_digest(open: &[NamingReview]) -> String {
     let mut entries = open
         .iter()
-        .filter(|review| review.judged_citation_digest.is_none())
+        .filter(|review| !review.is_unedited_publication)
         .map(|review| (review.path.as_str(), review.revision.as_str()))
         .collect::<Vec<_>>();
     entries.sort_unstable();
@@ -370,12 +388,17 @@ fn open_naming(
         let text =
             std::fs::read_to_string(lk_vault::page_path(root, Path::new(&path)).into_diagnostic()?)
                 .into_diagnostic()?;
+        let is_unedited_publication = review.publication_digest.as_deref().is_some_and(|digest| {
+            lk_vault::parse_page(&text)
+                .is_ok_and(|page| lk_vault::publication_digest(&page) == digest)
+        });
         open.push(NamingReview {
             revision: lk_core::concept::file_revision(&text),
             path,
             kind: review.kind,
             judged_citation_digest: review.judged_citation_digest,
             judged_review_digest: review.judged_review_digest,
+            is_unedited_publication,
         });
     }
     Ok(open)

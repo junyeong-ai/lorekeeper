@@ -1236,6 +1236,18 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             1,
             "no review of the other kind follows"
         );
+        // An operator's edit to the published review is an input automation did not cause: the
+        // resynthesis it brings may propose again.
+        let published = explorations.join("deployment-status-disagreement.md");
+        let raw = std::fs::read_to_string(&published).unwrap();
+        assert!(raw.contains("publication_digest"), "{raw}");
+        std::fs::write(
+            &published,
+            format!("{raw}\nThe operator narrowed this to the staging rollout.\n"),
+        )
+        .unwrap();
+        let report = fixture.run();
+        assert_eq!(reviews(&explorations), 2, "{report}");
         // After a target published its review in this run, a refused proposal still publishes
         // its synthesis rather than waiting for a later run.
         let fixture = Fixture::new("codex");

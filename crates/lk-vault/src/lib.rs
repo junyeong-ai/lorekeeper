@@ -97,7 +97,8 @@ pub use self::review::{
     find_rss_evidence_binding, inspect_evidence, is_archived_evidence, list_reviews,
     list_reviews_controlled, load_archived_evidence, load_archived_evidence_controlled,
     load_retained_rss_payload_controlled, plan_document_publication, plan_review_repointing,
-    publish_document, publish_document_expected, publish_document_expected_with_plan,
+    publication_digest, publish_document, publish_document_expected,
+    publish_document_expected_with_plan,
 };
 pub use self::rss_evidence::{
     RssCitationInput, RssEvidenceCapture, RssEvidencePreview, accumulate_rss_evidence,

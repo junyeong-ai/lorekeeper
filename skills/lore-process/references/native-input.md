@@ -135,8 +135,9 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   the complete synthesis value you would return without the review, referencing only reviews
   that exist. Rust publishes an admitted proposal as an open review of the concept and
   replans. It refuses a proposal whose `distinct_from` omits an open review of its kind, and
-  any review while the only inputs changed since a synthesis of this concept proposed an
-  open review are reviews such syntheses proposed: reference those reviews instead. A refused proposal publishes its `synthesis` and is dropped; it never holds the
+  any review while the only inputs changed since a synthesis of this concept published an
+  open review are reviews such syntheses published, unedited since: reference those reviews
+  instead. A refused proposal publishes its `synthesis` and is dropped; it never holds the
   task. A concept publishes at most one review per run.
 - Synthesis value: `{synthesis, related, review_refs, gap_claims}`. `review_refs` lists, by
   path, each open review in `context.purpose.parameters.open_reviews` whose question the

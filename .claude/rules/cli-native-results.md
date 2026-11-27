@@ -116,12 +116,16 @@ paths:
   through `subjects`, so the next finalization completes against it. `needs-review` is only
   for an issue no open review in scope records. Only the causal loop is blocked: a review a
   synthesis publishes makes its concept owed a resynthesis, and that resynthesis may not
-  propose another review of any kind while the only changed inputs are reviews syntheses of
-  the concept proposed, that is, while an open review naming the concept records
-  `judged_citation_digest` equal to the task's citation digest and `judged_review_digest`
-  equal to the digest of the open reviews naming the concept that record no
-  `judged_citation_digest` (by address and file revision). Alternating kinds therefore does
-  not reopen the loop, and a review recording no `judged_review_digest` never shows it. Any other synthesis may propose
+  propose another review of any kind while the only changed inputs are unedited synthesis
+  publications naming the concept. An unedited publication records a `publication_digest`
+  (`lk_vault::publication_digest`: its frontmatter, that digest aside, and body) that its
+  current page still matches; an operator's edit, or a review recorded without that digest,
+  makes it an ordinary input. The loop holds while an unedited publication naming the concept
+  records `judged_citation_digest` equal to the task's citation digest and
+  `judged_review_digest` equal to the digest of the open reviews naming the concept that are
+  not unedited publications (by address and file revision). Alternating kinds therefore does
+  not reopen the loop, an edit to a publication does, and a review without
+  `publication_digest` or `judged_review_digest` never shows it. Any other synthesis may propose
   a review of a kind already open for its concept when `distinct_from` declares, for each
   open review of that kind naming the concept (its verified owner, among every review in the
   vault's review inventory), how its question differs; Rust refuses an incomplete list. A
@@ -131,8 +135,9 @@ paths:
   whose absence the request guards. A target publishes at most one review per run, spent when
   it publishes: a further admissible proposal in that run publishes and records nothing and
   defers only that target, while one admission refuses for any reason publishes its synthesis. The published
-  review records its `kind`, `judged_citation_digest` and `judged_review_digest`, with its
-  concept as its subject, so automation's own reviews are recognizable.
+  review records its `kind`, `judged_citation_digest`, `judged_review_digest` and
+  `publication_digest`, with its concept as its subject, so automation's own unedited reviews
+  are recognizable.
 - A synthesis capture lists every open review whose subject owner is the concept in
   `open_reviews` (`work/open_review.rs`), once under its owner's address with its authored
   revision, each marked `citations_changed` when the request's citations differ from those
