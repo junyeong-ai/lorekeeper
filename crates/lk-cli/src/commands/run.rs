@@ -993,6 +993,10 @@ mod native {
         /// Subjects whose discovery adoption was refused in this run: each keeps its legacy
         /// derivation until the run ends, so a later replan does not adopt it.
         adoption_refused: std::collections::BTreeSet<String>,
+        /// The discovery adoptions left to this run: as many as its remaining calls could
+        /// screen when it first adopted (at least one), whatever replans follow; `None` until
+        /// then.
+        adoption_allowance: Option<usize>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         /// The audit subject selected for a single bounded step and the keys it was ordered
@@ -7620,8 +7624,9 @@ mod native {
         /// Adopts candidate screening, through the explicit adoption owner and its guards,
         /// for planned subjects that are due and whose discovery was recorded before
         /// screening, so they read the bounded roster this run instead of every match. Only
-        /// as many as the run's remaining calls can screen (at least one) are adopted, in
-        /// planned order, from one shared capture under one writer claim; cancellation and the
+        /// as many as the run's remaining calls could screen when it first adopted (at least
+        /// one) are adopted in the whole run, whatever replans follow, in planned order, from
+        /// one shared capture under one writer claim; cancellation and the
         /// run's duration stop it between commits, and each commit counts as it lands. The
         /// rest keep their legacy derivation and their place for a later run. A current
         /// subject keeps its legacy derivation, which its receipt's currency still verifies.
@@ -7657,6 +7662,8 @@ mod native {
             if self.result.is_halted() {
                 return None;
             }
+            let first = self.remaining_calls(budget).max(1);
+            let allowance = *self.adoption_allowance.get_or_insert(first);
             let requests = plan
                 .candidates
                 .iter()
@@ -7669,7 +7676,7 @@ mod native {
                         && !self.adoption_refused.contains(&candidate.path)
                         && probe.as_ref() != Some(&candidate.path)
                 })
-                .take(self.remaining_calls(budget).max(1))
+                .take(allowance)
                 .map(|candidate| lk_graph::audit::selection::AdoptionRequest {
                     path: candidate.path.clone(),
                     file_revision: candidate.file_revision.clone(),
@@ -7778,6 +7785,8 @@ mod native {
                         if adoption.changed {
                             adopted += 1;
                             self.result.audit_adoptions += 1;
+                            self.adoption_allowance =
+                                self.adoption_allowance.map(|left| left.saturating_sub(1));
                         }
                         continue;
                     }
@@ -8593,6 +8602,7 @@ mod native {
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             adoption_refused: std::collections::BTreeSet::new(),
+            adoption_allowance: None,
             audit_batch: None,
             queue_turn: None,
             audit_turn: None,

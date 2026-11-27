@@ -25,7 +25,9 @@ paths:
   whose discovery was recorded before screening, through lk-graph's adoption owner and its
   guards under the run's own writer claim, and plans again, so they screen and read the
   bounded roster in the same run. It adopts, in planned order, only as many as its remaining
-  calls can screen (at least one), from one shared capture of their inputs and bounded card
+  calls could screen when it first adopted (at least one), in the whole run: a later replan
+  spends what is left of that allowance, never a fresh one. Each checkpoint adopts from one
+  shared capture of their inputs and bounded card
   rosters (`selection::Adoptions`): each subject reads the guards of its complete legacy
   input just before its own journal and drops them after it, so no subject's unbounded
   context is held for another; it counts as it commits, and cancellation and the run's
