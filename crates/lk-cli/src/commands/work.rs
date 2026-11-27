@@ -6028,6 +6028,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_audit_work_paid_under_0_163_continues_after_the_upgrade() {
+        // Written by 0.163.1 itself: an audit Work planned under byte-filled parts, with
+        // one of its three inspections observed.
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/audit-work-0.163.1");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        for entry in walkdir::WalkDir::new(&fixture) {
+            let entry = entry.unwrap();
+            let target = root.join(entry.path().strip_prefix(&fixture).unwrap());
+            if entry.file_type().is_dir() {
+                std::fs::create_dir_all(target).unwrap();
+            } else {
+                std::fs::copy(entry.path(), target).unwrap();
+            }
+        }
+        let (config, revision) =
+            lk_core::config::Config::load_with_revision(&root.join("config.yaml")).unwrap();
+        let mut prepared = resources::audit(&root, &config, CONTEXT_SUBJECT).unwrap();
+        let work = expected(&root, &mut prepared, &config, &revision).unwrap();
+        assert_eq!(
+            work.plan.id,
+            "65acacd085adc584bf2e91fab97e6342d910050dd58d7ba47ce925cab0017e98"
+        );
+        assert_eq!(
+            work.plan.policy,
+            lk_core::semantic::LEGACY_INSPECTION_POLICY
+        );
+        assert_eq!(
+            work.progress(&root, &prepared.resources).unwrap().completed,
+            1
+        );
+        resources::refresh_controlled(
+            &root,
+            &config,
+            &revision,
+            &work.context,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn work_planned_before_page_alignment_continues_under_its_byte_filled_parts() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();

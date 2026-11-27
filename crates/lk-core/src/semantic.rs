@@ -1126,6 +1126,43 @@ mod tests {
     }
 
     #[test]
+    fn inputs_of_one_range_under_two_partition_policies_differ_in_the_policy_they_name() {
+        // A page too large for a part leads the resources, so both policies cut its first
+        // part identically; the page after it is where they part ways.
+        let resources = vec![
+            resource(
+                "wiki/documents/large.md",
+                &"A paragraph of retained evidence.\n\n".repeat(400),
+            ),
+            resource("wiki/concepts/small.md", "A short neighboring page.\n"),
+        ];
+        let limit = NonZeroUsize::new(4_000).unwrap();
+        let aligned =
+            SemanticPlan::build_inspection("subject", &resources, 262_144, 32_768, limit).unwrap();
+        let filled =
+            SemanticPlan::build_legacy_inspection("subject", &resources, 262_144, 32_768, limit)
+                .unwrap();
+        let shared = aligned
+            .parts
+            .iter()
+            .find(|part| filled.parts.iter().any(|other| other.id == part.id))
+            .expect("the leading page's first part is cut identically");
+        let mut inputs = [&aligned, &filled].map(|plan| {
+            serde_json::to_value(plan.part_input(&shared.id, &resources).unwrap()).unwrap()
+        });
+        assert_ne!(inputs[0]["policy"], inputs[1]["policy"]);
+        // Beside identifiers, the policy name is the only difference, and it is what the
+        // inspection reads: observation reuse therefore keeps the policy in its key.
+        for input in &mut inputs {
+            let fields = input.as_object_mut().unwrap();
+            for identifier in ["policy", "plan_id", "input_revision"] {
+                fields.remove(identifier);
+            }
+        }
+        assert_eq!(inputs[0], inputs[1]);
+    }
+
+    #[test]
     fn inspection_policy_bounds_reading_independently_of_utf8_bytes() {
         for (label, text) in [
             ("ascii", "a".repeat(240_000)),

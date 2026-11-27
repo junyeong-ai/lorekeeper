@@ -1,0 +1,10 @@
+vault:
+  root: .
+  locale: en
+identity: {name: Tester, email: tester@example.com}
+sources:
+  notes:
+    type: manual
+    params: {inbox_dir: inbox}
+execution:
+  work: {max_input_bytes: 8192, max_result_bytes: 2048}

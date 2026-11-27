@@ -20,3 +20,6 @@ mutants.out.old/
 
 # insta writes these on a mismatch; a snapshot is accepted by review, never by a commit
 *.snap.new
+
+# Fixture vaults keep the Work state a test needs to reproduce.
+!crates/lk-cli/tests/fixtures/*/.lorekeeper/
