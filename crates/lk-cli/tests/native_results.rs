@@ -488,6 +488,39 @@ fn a_recovered_profiles_hold_gets_a_turn_while_another_profile_keeps_receiving_w
     );
 }
 
+/// A recovery-due probe is planned first and alone: beside another synthesis of the same
+/// profile it is neither batched with it (whose reservation would disagree with the expected
+/// order) nor left behind it.
+#[test]
+fn a_probed_synthesis_runs_alone_before_a_same_profile_synthesis() {
+    let fixture = Fixture::new("codex");
+    fixture.route_synthesis();
+    let (held, _) = fixture.add("held", lk_queue::TaskKind::SynthesizeConcept, false);
+    std::fs::write(fixture.root().join("mode"), "host-exit-synthesizer").unwrap();
+    let first = fixture.run();
+    assert!(!fixture.done(&held), "{first}");
+    std::fs::write(fixture.root().join("mode"), "complete").unwrap();
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    std::fs::write(
+        &fixture.config,
+        config.replace("max_calls: 6", "max_calls: 1"),
+    )
+    .unwrap();
+    // This run gives its one call to ordinary work, so the next owes recovery its first turn.
+    fixture.add("fresh", lk_queue::TaskKind::ExtractConcepts, false);
+    let ordinary = fixture.run();
+    assert!(!fixture.done(&held), "{ordinary}");
+    std::fs::write(&fixture.config, config).unwrap();
+    let (other, _) = fixture.add("aaa-other", lk_queue::TaskKind::SynthesizeConcept, false);
+    let report = fixture.run();
+    assert_eq!(report["halted"], false, "{report}");
+    assert!(fixture.done(&held) && fixture.done(&other), "{report}");
+    assert_eq!(
+        report["semantic_calls"], 2,
+        "the probe is sent alone, then the other synthesis: {report}"
+    );
+}
+
 #[test]
 fn a_failing_profile_trips_alone_while_a_healthy_profile_keeps_its_work() {
     let fixture = Fixture::new("codex");

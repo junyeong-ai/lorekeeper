@@ -194,8 +194,11 @@ paths:
   also take turns beside ordinary work, so a recovered host is not starved by another
   profile's stream of new work: when a run of a drain gives its first turn to ordinary
   work while probe candidates wait, the ledger records that recovery is owed
-  (`recovery_due`), and the next run of that drain releases a probe first and sends its
-  target alone before other work; any release pays the debt. Each side therefore waits at
+  (`recovery_due`), and the next run of that drain releases a probe first, plans its
+  target first and alone (never batched with another target) and sends it before other
+  work; any release pays the debt. A released probe that planning leaves out, because its
+  target is no longer current work, waits on an unfinished dependency or falls outside
+  the drain's admission scope, is withdrawn and the next oldest released in the same run. Each side therefore waits at
   most one run, even at one call per run. While the
   probe's host has given no outcome in the run, waves send one call at a time; a probe an
   earlier run released and whose host has not answered since counts as this run's probe,

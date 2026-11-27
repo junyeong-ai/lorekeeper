@@ -446,6 +446,9 @@ mod native {
         Idle,
         /// The previous run of this drain gave its turn to ordinary work while probes waited.
         RecoveryTurn,
+        /// The hold released before cannot be planned now: its target is no longer current
+        /// work, or it waits on unfinished dependencies.
+        Unplannable,
     }
 
     /// The probe each drain is choosing. A queue drain and a knowledge audit reach different
@@ -1175,6 +1178,7 @@ mod native {
                     match why {
                         ProbeRelease::Idle => "no work was admissible",
                         ProbeRelease::RecoveryTurn => "the previous run gave its turn to other work while this hold waited, so recovery goes first",
+                        ProbeRelease::Unplannable => "the hold released before cannot be planned now",
                     },
                     serde_json::to_string(&hold.identity).expect("hold identity serializes"),
                     hold.host
@@ -1215,6 +1219,28 @@ mod native {
                 return None;
             }
             probe.target.clone()
+        }
+
+        /// Whether `scope`'s released probe, while its host has given no outcome in this run,
+        /// is missing from the work just planned: its target is no longer current, waits on an
+        /// unfinished dependency, or falls outside the drain's admission. Such a probe is
+        /// withdrawn for the next candidate rather than left waiting behind ordinary work.
+        fn is_probe_unplanned(
+            &mut self,
+            scope: crate::commands::work::host::ProbeScope,
+            planned: impl Fn(&str) -> bool,
+        ) -> bool {
+            let Some(probe) = self.host_probes.scope(scope).as_ref() else {
+                return false;
+            };
+            let Some(hold) = probe.released.as_ref() else {
+                return false;
+            };
+            !self.hosts_invoked.reached(hold.engine, hold.host.as_ref())
+                && probe
+                    .target
+                    .as_deref()
+                    .is_none_or(|target| !planned(target))
         }
 
         /// Decides, once per run and drain, who takes the first turn. When the previous run
@@ -5581,7 +5607,13 @@ mod native {
                 .remaining_bindings()
                 .cloned()
                 .collect::<Vec<_>>();
-            let mut order = Vec::new();
+            // A released probe is planned first and alone, ahead of continued and cursor-order
+            // work, so it is dispatched before them and never batched with another target.
+            let probe = self
+                .probe_target(crate::commands::work::host::ProbeScope::Queue)
+                .filter(|target| targets.contains_key(target));
+            let mut order = probe.iter().cloned().collect::<Vec<_>>();
+            let continuation_start = order.len();
             for binding in &admitted {
                 if targets.contains_key(&binding.target) {
                     order.push(binding.target.clone());
@@ -5589,7 +5621,7 @@ mod native {
                     self.queue_admitted.clear_binding(binding);
                 }
             }
-            let continuation_count = order.len();
+            let continuation_end = order.len();
             order.extend(scheduler::order(
                 session.root(),
                 scheduler::Stage::Queue,
@@ -5603,9 +5635,12 @@ mod native {
                     next += 1;
                     continue;
                 }
-                let continuing = next < continuation_count;
-                let end = if continuing {
-                    continuation_count
+                let probing = next < continuation_start;
+                let continuing = (continuation_start..continuation_end).contains(&next);
+                let end = if probing {
+                    continuation_start
+                } else if continuing {
+                    continuation_end
                 } else {
                     order.len()
                 };
@@ -5882,7 +5917,7 @@ mod native {
                 }
                 if !jobs.is_empty()
                     && (jobs.len() >= independent_limit
-                        || continuing && next == continuation_count
+                        || continuing && next == continuation_end
                         || jobs.values().any(|job| !job.is_read_only()))
                 {
                     break;
@@ -6003,6 +6038,17 @@ mod native {
                     continue;
                 }
                 let mut jobs = plan.jobs;
+                if self
+                    .is_probe_unplanned(crate::commands::work::host::ProbeScope::Queue, |target| {
+                        jobs.contains_key(target)
+                    })
+                    && self.release_host_probe(
+                        crate::commands::work::host::ProbeScope::Queue,
+                        ProbeRelease::Unplannable,
+                    )
+                {
+                    continue 'planning;
+                }
                 if jobs.is_empty() {
                     if !plan.keys.is_empty() && !self.call_budget_available() {
                         return false;
