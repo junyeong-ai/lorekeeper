@@ -82,10 +82,17 @@ and CLI discovery, not a second graph authority.
   under the configured wiki documents collection, including nested addresses.
   Concept evidence retains the shared backlink authority and existing input identity.
   A document's own page is its subject input, never a fabricated self-citation;
-  direct concept/document links are revision-pinned context, not inferred evidence
-  or a transitive audit. Scoped reviews retain explicit evidence for either kind.
+  direct concept/document links are context read at their current revision, not
+  inferred evidence or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
+- An assessment's input identity (`concept-audit-v4`, `document-audit-v3`) is what the
+  audit owns: the subject, its citations, its scoped reviews, the addresses it links
+  directly, its discovery queries and whether they are screened, and the read-scope
+  constants. Context page revisions, discovery matches and screening decisions stay
+  outside it, so their churn leaves a receipt current; the next assessment reads them
+  as they are. A receipt recorded under the previous policies, whose identity also bound
+  those, stays current while that identity, recomputed from the same reads, still matches.
 - An audit's read scope is bounded by fixed policy constants, not the execution profile.
   Each query's discovery roster holds its identity matches and the first
   `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's

@@ -31,8 +31,16 @@ impl<'a> From<&'a lk_core::config::GraphAuditConfig> for AuditCorpus<'a> {
 }
 
 const STATE: &str = ".lorekeeper/knowledge-audit.json";
-const CONCEPT_POLICY: &str = "concept-audit-v3";
-const DOCUMENT_POLICY: &str = "document-audit-v2";
+/// An assessment's input identity is what the audit owns: the subject, its citations and
+/// scoped reviews, which pages it links directly, its discovery queries and whether they are
+/// screened, and the read-scope bounds. The pages it reads for context and the discovery
+/// roster are not part of it, so their churn neither stales a receipt nor replans its Work.
+const CONCEPT_POLICY: &str = "concept-audit-v4";
+const DOCUMENT_POLICY: &str = "document-audit-v3";
+/// The policies whose identity also bound every context page revision and the discovery
+/// roster. A receipt recorded under one stays current while that identity still matches.
+const LEGACY_CONCEPT_POLICY: &str = "concept-audit-v3";
+const LEGACY_DOCUMENT_POLICY: &str = "document-audit-v2";
 
 pub mod selection;
 
@@ -2502,24 +2510,48 @@ fn inputs_from_evidence(
                 context_page_limit: AUDIT_CONTEXT_PAGES,
             }),
         };
+        let (policy, legacy_policy) = match kind {
+            AuditSubjectKind::Concept => (CONCEPT_POLICY, LEGACY_CONCEPT_POLICY),
+            AuditSubjectKind::Document => (DOCUMENT_POLICY, LEGACY_DOCUMENT_POLICY),
+        };
         let input_revision = file_revision(
             &serde_json::to_string(&(
-                match kind {
-                    AuditSubjectKind::Concept => CONCEPT_POLICY,
-                    AuditSubjectKind::Document => DOCUMENT_POLICY,
-                },
+                policy,
+                &revision,
+                &citations,
+                linked_pages
+                    .iter()
+                    .map(|page| page.path.as_str())
+                    .collect::<Vec<_>>(),
+                discovery
+                    .as_ref()
+                    .map(|discovery| (&discovery.queries, discovery.selection.is_some())),
+                &review_identity,
+                (AUDIT_CANDIDATES_PER_QUERY, AUDIT_CONTEXT_PAGES),
+            ))
+            .map_err(error)?,
+        );
+        let legacy_input_revision = file_revision(
+            &serde_json::to_string(&(
+                legacy_policy,
                 &revision,
                 &citations,
                 &related_pages,
                 &discovery,
-                review_identity,
+                &review_identity,
             ))
             .map_err(error)?,
         );
         let path = page_address(&page.path);
         let receipt = receipts.entries.get(&path);
         let reason = match receipt {
-            Some(receipt) if receipt_is_current(receipt, &input_revision, &scoped_reviews) => {
+            Some(receipt)
+                if receipt_is_current(
+                    receipt,
+                    [&input_revision, &legacy_input_revision],
+                    &scoped_reviews,
+                ) =>
+            {
                 AuditReason::Current
             }
             Some(_) => AuditReason::Changed,
@@ -2800,12 +2832,14 @@ fn select_candidates(
         .collect()
 }
 
+/// Whether `receipt` assessed these inputs: it records the current input identity or the
+/// legacy one computed from the same reads, and every scoped review it depends on is settled.
 fn receipt_is_current(
     receipt: &AuditAssessment,
-    input_revision: &str,
+    input_revisions: [&str; 2],
     reviews: &[AuditReviewDependency],
 ) -> bool {
-    receipt.input_revision == input_revision
+    input_revisions.contains(&receipt.input_revision.as_str())
         && reviews.iter().all(|review| review.state.is_current())
         && (receipt.disposition != AuditDisposition::FollowUp
             || reviews
@@ -4708,7 +4742,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reopens_only_changed_query_membership_and_keeps_matches_as_context() {
+    fn discovery_matches_are_read_as_context_and_leave_a_receipt_current() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
         let subject = "wiki/documents/a.md";
@@ -4791,22 +4825,16 @@ mod tests {
             "wiki/documents/new.md",
             "---\ntype: document\n---\nProduction order retention has another applicable claim.\n",
         );
-        assert_ne!(selected().input_revision, discovered.input_revision);
-        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        let matched = selected();
+        assert_eq!(matched.input_revision, discovered.input_revision);
+        assert_eq!(matched.reason, AuditReason::Current);
         assert!(
-            record(
-                &session,
-                &dirs,
-                *ALL,
-                &scan(root.path()),
-                AuditResults {
-                    assessments: vec![assessment(&discovered)]
-                },
-                u64::MAX
-            )
-            .is_err()
+            matched
+                .related_pages
+                .iter()
+                .any(|page| page.path == "wiki/documents/new.md"),
+            "a new match is read as context the next time the subject is audited"
         );
-        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         write(
             root.path(),
             subject,
@@ -5269,14 +5297,18 @@ mod tests {
             current.counts_by_kind[&AuditSubjectKind::Document].reviewed_current,
             1
         );
-        for changed in [path, "wiki/documents/other.md"] {
+        // The document is the audit's own input; a page it links is context.
+        for (changed, reason) in [
+            (path, AuditReason::Changed),
+            ("wiki/documents/other.md", AuditReason::Current),
+        ] {
             let before = std::fs::read_to_string(root.path().join(changed)).unwrap();
             write(
                 root.path(),
                 changed,
                 &format!("{before}Changed authored context.\n"),
             );
-            let stale = plan_selected(
+            let planned = plan_selected(
                 root.path(),
                 &dirs,
                 *ALL,
@@ -5286,21 +5318,26 @@ mod tests {
                 u64::MAX,
             )
             .unwrap();
-            assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
-            assert_ne!(stale.candidates[0].input_revision, candidate.input_revision);
-            assert!(
-                record(
-                    &session,
-                    &dirs,
-                    *ALL,
-                    &scan(root.path()),
-                    AuditResults {
-                        assessments: vec![assessment(candidate)]
-                    },
-                    u64::MAX
-                )
-                .is_err()
-            );
+            assert_eq!(planned.candidates[0].reason, reason, "{changed}");
+            if reason == AuditReason::Changed {
+                assert_ne!(
+                    planned.candidates[0].input_revision,
+                    candidate.input_revision
+                );
+                assert!(
+                    record(
+                        &session,
+                        &dirs,
+                        *ALL,
+                        &scan(root.path()),
+                        AuditResults {
+                            assessments: vec![assessment(candidate)]
+                        },
+                        u64::MAX
+                    )
+                    .is_err()
+                );
+            }
             write(root.path(), changed, &before);
         }
         let old = std::fs::read_to_string(root.path().join("wiki/documents/third.md")).unwrap();
@@ -5536,9 +5573,10 @@ mod tests {
         )
         .unwrap();
         let candidate = &selected.candidates[0];
+        // The identity a concept receipt recorded before document subjects existed carries.
         let previous_identity = file_revision(
             &serde_json::to_string(&(
-                CONCEPT_POLICY,
+                LEGACY_CONCEPT_POLICY,
                 source_revision(&lk_vault::parse_page(body).unwrap()),
                 &candidate.evidence,
                 &candidate.related_pages,
@@ -5547,19 +5585,19 @@ mod tests {
             ))
             .unwrap(),
         );
-        assert_eq!(candidate.input_revision, previous_identity);
-        let session = MutationSession::acquire(root.path()).unwrap();
-        record(
-            &session,
-            &dirs,
-            *ALL,
-            &scan(root.path()),
-            AuditResults {
-                assessments: vec![assessment(candidate)],
+        let mut receipts = Receipts::default();
+        receipts.entries.insert(
+            path.into(),
+            AuditAssessment {
+                input_revision: previous_identity,
+                ..assessment(candidate)
             },
-            u64::MAX,
-        )
-        .unwrap();
+        );
+        write(
+            root.path(),
+            STATE,
+            &serde_json::to_string(&receipts).unwrap(),
+        );
         let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, u64::MAX).unwrap();
         assert_eq!(current.reviewed_current, 1);
         assert_eq!(
@@ -6681,40 +6719,90 @@ mod tests {
                 .reviewed_current,
             1
         );
-        for (path, changed, original) in [
-            (
-                "wiki/documents/source.md",
-                source.replace("condition X", "condition Y"),
-                source,
-            ),
-            (
-                "wiki/concepts/b.md",
-                related.replace("an implementation", "a different implementation"),
-                related,
-            ),
-        ] {
-            write(root.path(), path, &changed);
-            let stale = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
-            assert_eq!(stale.changed, 1);
-            assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
-            assert_eq!(stale.candidates[0].path, "wiki/concepts/a.md");
-            let before = std::fs::read(root.path().join(STATE)).unwrap();
-            assert!(
-                record(
-                    &session,
-                    &dirs,
-                    *ALL,
-                    &scan(root.path()),
-                    AuditResults {
-                        assessments: vec![assessment(&first.candidates[0])]
-                    },
-                    262_144,
-                )
-                .is_err()
-            );
-            assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
-            write(root.path(), path, original);
-        }
+        // A citation is the audit's own input: an edit stales the receipt and refuses an
+        // assessment of the earlier reads.
+        write(
+            root.path(),
+            "wiki/documents/source.md",
+            &source.replace("condition X", "condition Y"),
+        );
+        let stale = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
+        assert_eq!(stale.changed, 1);
+        assert_eq!(stale.candidates[0].reason, AuditReason::Changed);
+        assert_eq!(stale.candidates[0].path, "wiki/concepts/a.md");
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        assert!(
+            record(
+                &session,
+                &dirs,
+                *ALL,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![assessment(&first.candidates[0])]
+                },
+                262_144,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
+        write(root.path(), "wiki/documents/source.md", source);
+        // A directly linked page is context: the audit reads it, and an edit to it leaves
+        // the receipt current.
+        write(
+            root.path(),
+            "wiki/concepts/b.md",
+            &related.replace("an implementation", "a different implementation"),
+        );
+        let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
+        assert_eq!((current.reviewed_current, current.changed), (1, 0));
+        assert_ne!(current.candidates[0].path, "wiki/concepts/a.md");
+    }
+
+    #[test]
+    fn a_receipt_of_the_previous_policy_stays_current_until_its_reads_change() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let source = "---\ntype: document\ntitle: Source\n---\n## Summary\nA uses B under condition X.\n\n## Related Concepts\n- [A](../concepts/a.md)\n";
+        let concept = "---\ntype: concept\ntitle: A\nupdated: 2026-01-01\nsource_count: 1\n---\n## Synthesis\nA uses B under X.\n\n## Sources\n- [Source](../documents/source.md)\n\n## Related\n- [B](b.md) — used by A under X.\n";
+        let related =
+            "---\ntype: concept\ntitle: B\n---\n## Synthesis\nB supplies an implementation.\n";
+        write(root.path(), "wiki/documents/source.md", source);
+        write(root.path(), "wiki/concepts/a.md", concept);
+        write(root.path(), "wiki/concepts/b.md", related);
+        // The assessment `concept-audit-v3` recorded for these exact reads, whose identity
+        // also bound the linked page's revision.
+        let mut receipts = Receipts::default();
+        receipts.entries.insert(
+            "wiki/concepts/a.md".into(),
+            AuditAssessment {
+                path: "wiki/concepts/a.md".into(),
+                file_revision: "d2f6610c4ce312f5dc6d34ee92eb27fb8df9917e189e079820b71d87890a8b91"
+                    .into(),
+                input_revision: "08bf95944d718cb4ff8b97f79da2482461e33ce576ed73798cc93aa8f9c118e2"
+                    .into(),
+                disposition: AuditDisposition::Reviewed,
+                reason: "Read the complete source and concept.".into(),
+                reviews: vec![],
+            },
+        );
+        write(
+            root.path(),
+            STATE,
+            &serde_json::to_string(&receipts).unwrap(),
+        );
+        let reason = |root: &Path| {
+            load_selected_inputs(root, &dirs, &scan(root), &["wiki/concepts/a.md".into()])
+                .unwrap()
+                .remove(0)
+                .reason
+        };
+        assert_eq!(reason(root.path()), AuditReason::Current);
+        write(
+            root.path(),
+            "wiki/concepts/b.md",
+            &related.replace("an implementation", "a different implementation"),
+        );
+        assert_eq!(reason(root.path()), AuditReason::Changed);
     }
 
     #[test]

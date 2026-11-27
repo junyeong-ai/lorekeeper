@@ -66,9 +66,10 @@ that the subject does not already cite or link are read in full, the rest shown 
 Fresh recipes require candidate screening before full audit reads. An unchanged legacy
 recipe retains its full-context contract, every match read without a cutoff; repeating
 it does not replace existing paid work or opt it into screening.
-Stored queries reopen an assessment when matching pages or their authored revisions
-change. A changed subject needs fresh query selection. Unrelated corpus changes do not
-alone invalidate an assessment. This records the searched scope, not exhaustive semantic
+Changing the stored queries reopens an assessment; pages joining, leaving or changing
+among the matches do not, because they are context the subject's next audit reads. A
+changed subject needs fresh query selection. Unrelated corpus changes do not alone
+invalidate an assessment. This records the searched scope, not exhaustive semantic
 consistency: differently phrased claims outside the selected queries can remain undiscovered.
 
 Discovery does not create citations or semantic graph links. Compare candidates under
@@ -252,8 +253,10 @@ contrary observations concrete. Open is a valid judgment; unreadable evidence or
 failed step must be reported, never recorded as a successful read.
 
 Receipts in `.lorekeeper/knowledge-audit.json` track the latest completed inputs and
-pending order, not truth or confidence. Changed subjects, evidence, related context,
-or scoped reviews and their evidence reopen work. Changed and first-time work rotate,
+pending order, not truth or confidence. What the audit owns reopens work: a changed
+subject, evidence, scoped reviews and their evidence, the set of pages the subject links,
+or its discovery queries. An edit to a linked or matched page is context and does not.
+A receipt recorded before this rule stays current until any page it read changes. Changed and first-time work rotate,
 each ordered by typed risk; unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
 
