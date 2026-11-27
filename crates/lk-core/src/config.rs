@@ -68,7 +68,8 @@ pub struct Config {
 
 impl Config {
     /// Whether jobs invoke semantic hosts at all: none run while `llm.provider` is `noop`.
-    /// Schedule generation and a scheduled run's host preflight both decide by this.
+    /// Schedule generation (its knowledge job and host claims), a scheduled run's host
+    /// preflight and a knowledge run's audit admission all decide by this.
     pub fn invokes_semantic_hosts(&self) -> bool {
         self.llm.provider == LlmProvider::Queue
     }

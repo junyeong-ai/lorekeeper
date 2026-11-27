@@ -7449,7 +7449,17 @@ mod native {
             if self.result.is_halted() || self.result.cancelled {
                 return;
             }
-            while self.audit().await {}
+            // The audit is semantic work: under `llm.provider: noop` it is not admitted, and
+            // the deterministic reconciliation and checks still run.
+            if self.config.invokes_semantic_hosts() {
+                while self.audit().await {}
+            } else {
+                self.record(
+                    "audit",
+                    StageState::Skipped,
+                    Some("semantic execution is disabled by llm.provider".into()),
+                );
+            }
             let yielded = self.result.yield_reason.is_some() || self.yield_to_waiter();
             if !yielded {
                 self.reconcile().await;

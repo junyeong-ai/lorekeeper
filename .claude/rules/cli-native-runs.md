@@ -269,6 +269,9 @@ paths:
 - Native consumers own selected semantic reads and guarded publication; the controller
   owns final global reconciliation/checks. Keep this boundary explicit in the host
   instruction and shared skills; standalone skills still perform their own final checks.
+- The audit is semantic work: under `llm.provider: noop` the schedule generates no
+  knowledge job, and a knowledge run skips its audit stage while still reconciling and
+  checking (`Config::invokes_semantic_hosts`).
 - Knowledge jobs give ready audit subjects a turn before global queue draining. Scope
   readiness to the actual subject/evidence/context/review pages, verified physical
   owners, typed unfinished work and staged results. Unknown task/result targets cannot

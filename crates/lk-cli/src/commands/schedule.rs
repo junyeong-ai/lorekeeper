@@ -291,8 +291,13 @@ fn checked_line(line: String) -> miette::Result<String> {
     Ok(line)
 }
 
-/// Scheduling slots stay stable when their executable changes.
+/// The knowledge job's slot, when one is scheduled and semantic hosts may run: its audit is
+/// semantic work, so `llm.provider: noop` generates no knowledge job. Scheduling slots stay
+/// stable when their executable changes.
 fn knowledge_schedule(config: &lk_core::config::Config) -> Option<&str> {
+    if !config.invokes_semantic_hosts() {
+        return None;
+    }
     config
         .execution
         .automation
@@ -970,6 +975,14 @@ mod tests {
             .unwrap();
         assert_eq!(audit.args, ["run", "knowledge", "--wait", "--unattended"]);
         assert!(matches!(&audit.schedule, When::Calendar(value) if value == "0 7 * * 0"));
+        config.llm.provider = lk_core::config::LlmProvider::Noop;
+        let jobs = build_jobs(&config, &[]);
+        assert!(
+            !jobs.iter().any(|job| job.name == "knowledge-audit"),
+            "noop cannot run an audit"
+        );
+        assert!(jobs.iter().any(|job| job.name == "ingest"));
+        config.llm.provider = lk_core::config::LlmProvider::Queue;
         config.graph.audit.schedule = None;
         assert!(
             !build_jobs(&config, &[])

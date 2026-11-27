@@ -436,6 +436,42 @@ fn a_scheduled_daily_run_without_semantic_hosts_checks_no_host() {
 }
 
 #[test]
+fn a_scheduled_knowledge_run_without_semantic_hosts_skips_its_audit_without_pausing() {
+    let fixture = Fixture::new("codex", 30, "exit 91");
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "execution:\n  default_profile: primary\n",
+        "llm: {provider: noop}\nexecution:\n  operations: {process: primary}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    configure(&fixture, Some(20), 60);
+    let directory = fixture.root().join("vault/wiki/concepts");
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("undiscovered.md"),
+        include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
+    )
+    .unwrap();
+    let report = run(&fixture, "knowledge", false);
+    assert_eq!(calls(&report), 0, "{report}");
+    let run = &report["runs"][0];
+    assert_eq!(run["halted"], false, "{report}");
+    let audit = run["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|stage| stage["name"] == "audit")
+        .unwrap_or_else(|| panic!("{report}"));
+    assert_eq!(audit["state"], "skipped", "{report}");
+    let usage = fixture
+        .root()
+        .join("vault/.lorekeeper/automation-usage.json");
+    assert!(
+        !usage.exists() || usage_paused_is_empty(&std::fs::read(&usage).unwrap()),
+        "{report}"
+    );
+}
+
+#[test]
 fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning() {
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
     configure(&fixture, Some(20), 60);
