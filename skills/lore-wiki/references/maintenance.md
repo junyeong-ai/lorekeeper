@@ -66,8 +66,10 @@ that the subject does not already cite or link are read in full, the rest shown 
 Fresh recipes require candidate screening before full audit reads. An unchanged legacy
 recipe retains its full-context contract, every match read without a cutoff; repeating
 it does not replace existing paid work or opt it into screening. A native knowledge run adopts
-screening for each due legacy subject it admits, and `wiki audit-discover --adopt-screening`
-adopts one explicitly; a current subject keeps its legacy recipe until it is due.
+screening for the due legacy subjects it admits, as many as its remaining calls can screen;
+the rest, and a subject its guards refuse (a current processing action, changed inputs), keep
+their legacy recipe for that run. `wiki audit-discover --adopt-screening` adopts one
+explicitly; a current subject keeps its legacy recipe until it is due.
 Changing the stored queries reopens an assessment; pages joining, leaving or changing
 among the matches do not, because they are context the subject's next audit reads. A
 changed subject needs fresh query selection. Unrelated corpus changes do not alone

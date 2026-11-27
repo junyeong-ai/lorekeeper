@@ -385,6 +385,59 @@ fn native_knowledge_adopts_screening_for_a_due_legacy_recipe_and_leaves_a_curren
 }
 
 #[test]
+fn a_run_adopts_only_the_legacy_subjects_its_remaining_calls_can_screen() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 3, "inspect", false, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("batch_size: 1", "batch_size: 3");
+        std::fs::write(&fixture.config, config).unwrap();
+        let peers = ["wiki/documents/legacy-1.md", "wiki/documents/legacy-2.md"];
+        for (index, peer) in peers.iter().enumerate() {
+            std::fs::write(
+                fixture.root().join("vault").join(peer),
+                format!("---\ntype: document\ntitle: Legacy {index}\n---\nA legacy note.\n"),
+            )
+            .unwrap();
+            discover(&fixture, peer, &QUERIES);
+        }
+        // All three recipes were recorded before screening existed, and all three are due.
+        let state = fixture
+            .root()
+            .join("vault/.lorekeeper/knowledge-audit.json");
+        let mut receipts: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        for path in peers.iter().chain([&SUBJECT]) {
+            receipts["discovery"][path]["selection"] = serde_json::Value::Null;
+        }
+        std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
+        assert_eq!(
+            json(&fixture, &["wiki", "audit-plan"])["candidates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["audit_adoptions"], 1,
+            "one remaining call screens one subject: {report}"
+        );
+        assert!(report["audit_adoption_duration_ms"].is_u64(), "{report}");
+        let receipts: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        let legacy = peers
+            .iter()
+            .chain([&SUBJECT])
+            .filter(|path| receipts["discovery"][**path]["selection"].is_null())
+            .count();
+        assert_eq!(legacy, 2, "the rest keep their legacy recipe: {receipts}");
+    }
+}
+
+#[test]
 fn a_candidate_edited_during_the_assessment_replans_the_subject_instead_of_halting() {
     for engine in ["codex", "claude-code"] {
         // The assessment's host edits a selected candidate once, which reopens screening.

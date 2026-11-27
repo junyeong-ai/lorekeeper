@@ -21,10 +21,16 @@ paths:
   subject whose candidates changed after it was read (a writer during another subject's
   packet) is read again once from a fresh scan when its packet is prepared; a second change
   in the run defers it. Drift never halts the loop.
-  Before screening, the run adopts candidate screening for each planned subject that is due
-  and whose discovery was recorded before screening, through lk-graph's adoption owner and
-  its guards under the run's own writer claim, and plans again, so the subject screens and
-  reads the bounded roster in the same run. A current subject is not touched. A refused
+  Before screening, the run adopts candidate screening for planned subjects that are due and
+  whose discovery was recorded before screening, through lk-graph's adoption owner and its
+  guards under the run's own writer claim, and plans again, so they screen and read the
+  bounded roster in the same run. It adopts, in planned order, only as many as its remaining
+  calls can screen (at least one), from one shared capture (`selection::Adoptions`): each
+  subject journals alone and counts as it commits, and cancellation and the run's duration
+  stop adoption between commits. The rest keep their legacy derivation and their place for a
+  later run, so a large legacy backlog never holds the writer claim across work the run
+  cannot screen. `audit_adoption_duration_ms` measures that work after the claim is acquired.
+  A current subject is not touched. A refused
   adoption (a current processing action, an assessment recorded since planning, inputs
   changed since planning or before its journal) keeps that subject's legacy derivation for
   the rest of the run, recorded as a skipped `audit discovery adoption` stage and never

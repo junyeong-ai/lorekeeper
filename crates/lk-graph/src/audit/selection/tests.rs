@@ -412,6 +412,31 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
         ledger
     );
 
+    // Adopting from a shared capture, the same edit is that subject's drift.
+    let (fixture, request) = build_legacy_adoption_fixture();
+    let mut adoptions = Adoptions::capture(
+        &fixture.root,
+        &fixture.dirs,
+        &fixture.pages(),
+        &[request],
+        &ReadControl::default(),
+    )
+    .unwrap();
+    let ledger = std::fs::read(fixture.root.join(crate::audit::STATE)).unwrap();
+    fixture.write(
+        "wiki/documents/candidate-000.md",
+        "---\ntype: document\ntitle: Changed\n---\nScreen protocol changed after capture.\n",
+    );
+    let session = MutationSession::acquire(&fixture.root).unwrap();
+    let (path, result) = adoptions.adopt_next(&session, |_| Ok(())).unwrap();
+    assert_eq!(path, SUBJECT);
+    assert!(matches!(result, Err(GraphError::AuditScreeningChanged)));
+    assert!(adoptions.adopt_next(&session, |_| Ok(())).is_none());
+    assert_eq!(
+        std::fs::read(fixture.root.join(crate::audit::STATE)).unwrap(),
+        ledger
+    );
+
     let (fixture, request) = build_legacy_adoption_fixture();
     let candidate = fixture.candidate();
     let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
