@@ -87,7 +87,7 @@ ledger.
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
-| `outcome` | `recorded`, `refined`, `staged`, `restaged`, `already-complete`, `rejected`, `failed`, `cancelled` or `yielded` |
+| `outcome` | `recorded`, `refined`, `staged`, `restaged`, `already-complete`, `rejected` (an unusable reply, not adopted), `inputs-changed` (inputs changed before the reply or preparation could be used; replanned), `needs-action` (a stated operator action retained as a receipt), `review-deferred` (a synthesis review proposal retained for a later run), `failed`, `cancelled`, `yielded` or `unsettled` (ended before deciding; a stage record names why) |
 
 ## Finalization admissions and input capacity
 

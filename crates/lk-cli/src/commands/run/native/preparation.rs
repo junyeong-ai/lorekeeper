@@ -88,7 +88,7 @@ impl Runner<'_> {
         match recorded {
             Ok(true) => {
                 metrics.outcome = if matches!(disposition, Disposition::NeedsAction { .. }) {
-                    WorkOutcome::Rejected
+                    WorkOutcome::NeedsAction
                 } else {
                     WorkOutcome::Failed
                 };
@@ -214,7 +214,7 @@ impl Runner<'_> {
         match recorded {
             Ok(true) => {
                 metrics.outcome = if matches!(disposition, Disposition::NeedsAction { .. }) {
-                    WorkOutcome::Rejected
+                    WorkOutcome::NeedsAction
                 } else {
                     WorkOutcome::Failed
                 };

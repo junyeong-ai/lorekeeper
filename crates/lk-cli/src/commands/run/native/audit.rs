@@ -550,6 +550,9 @@ impl Runner<'_> {
             }
             drop(queue_claim);
             self.result.work_telemetry.retained_progress.action_receipts += held;
+            if held > 0 {
+                metrics.outcome = WorkOutcome::NeedsAction;
+            }
             if !completed.is_empty() {
                 let results = lk_graph::audit::AuditResults {
                     assessments: completed

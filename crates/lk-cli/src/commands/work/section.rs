@@ -240,7 +240,8 @@ pub(in crate::commands) fn finish(
     let mut plan = lk_vault::MutationPlan::default();
     current.prepared.guard_pages(&mut plan);
     match response {
-        crate::commands::execution::finalization::SectionResponse::NeedsAction(reason) => {
+        crate::commands::execution::finalization::SectionResponse::NeedsAction(reason)
+        | crate::commands::execution::finalization::SectionResponse::InvalidBody(reason) => {
             let action = Action {
                 schema: SECTION.schema.into(),
                 task_id: section.result.task_id,

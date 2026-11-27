@@ -1290,9 +1290,12 @@ fn rejected_structured_finalizers_never_fall_back_or_mark_completion() {
                     "cancelled"
                 } else if matches!(mode, "exit" | "malformed" | "oversized") {
                     "failed"
+                } else if mode == "changed-target" {
+                    "inputs-changed"
                 } else {
                     "rejected"
-                }
+                },
+                "{engine}/{mode}: {report}"
             );
         }
     }

@@ -221,6 +221,11 @@ fn native_discovery_holds_failed_inputs_and_explicit_actions_without_pausing_ope
                 );
                 assert_eq!(first["halted"], false, "{first}");
                 assert_eq!(first["work_steps"][0]["role"], "discovery", "{first}");
+                assert_eq!(
+                    first["work_steps"][0]["outcome"],
+                    if action { "needs-action" } else { "failed" },
+                    "{first}"
+                );
                 assert_eq!(first["retained_progress"]["discovery_recipes"], 0);
                 assert_eq!(
                     first["retained_progress"]["action_receipts"],

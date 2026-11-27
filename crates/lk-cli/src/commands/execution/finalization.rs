@@ -130,7 +130,11 @@ pub(in crate::commands) fn supports(kind: TaskKind) -> bool {
 #[derive(Debug, PartialEq)]
 pub(in crate::commands) enum SectionResponse {
     Complete(String),
+    /// The finalizer stated an action it needs.
     NeedsAction(String),
+    /// The finalizer returned a complete body that is not a valid section body; it is held
+    /// like a stated action, as a rejected reply.
+    InvalidBody(String),
 }
 
 #[derive(Deserialize, Serialize)]
@@ -358,7 +362,7 @@ pub(in crate::commands) fn decode_value(value: Value) -> miette::Result<(Section
     let output = match (response.status.as_str(), response.body, response.reason) {
         ("complete", Some(body), None) => match lk_core::markdown::validate_section_body(&body) {
             Ok(()) => SectionResponse::Complete(body),
-            Err(error) => SectionResponse::NeedsAction(format!("invalid section body: {error}")),
+            Err(error) => SectionResponse::InvalidBody(format!("invalid section body: {error}")),
         },
         ("needs-action", None, Some(reason)) if !reason.trim().is_empty() => {
             SectionResponse::NeedsAction(reason)
@@ -552,7 +556,7 @@ mod tests {
                     valid,
                     "{engine:?}/{body:?}"
                 );
-                assert!(valid || matches!(response, SectionResponse::NeedsAction(_)));
+                assert!(valid || matches!(response, SectionResponse::InvalidBody(_)));
                 assert!(decode(engine, &raw, 1).is_err());
             }
         }

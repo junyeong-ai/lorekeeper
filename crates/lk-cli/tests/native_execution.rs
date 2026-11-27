@@ -3535,6 +3535,16 @@ fn small_extraction_hands_expanded_discovery_to_bounded_work_on_both_hosts() {
                         .any(|stage| stage["name"] == "native selected action"
                             && stage["state"] == "skipped")
                 );
+                assert!(
+                    result["work_steps"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(
+                            |step| step["role"] == "finalizer" && step["outcome"] == "needs-action"
+                        ),
+                    "a stated action is its own outcome, not a rejection: {result}"
+                );
             }
         }
     }

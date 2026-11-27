@@ -131,12 +131,23 @@ mod native {
     #[derive(Clone, Copy, Serialize)]
     #[serde(rename_all = "kebab-case")]
     enum WorkOutcome {
+        /// The step ended before deciding an outcome: a stage record names the failure or
+        /// replanning that ended it. Every decided result sets its own outcome.
+        Unsettled,
         Recorded,
         Refined,
         Staged,
         Restaged,
         AlreadyComplete,
+        /// The reply was unusable for its request and was not adopted.
         Rejected,
+        /// The step's inputs changed before its reply or preparation could be used; the work
+        /// is replanned against current inputs.
+        InputsChanged,
+        /// The reply or its preparation stated a needed operator action, retained as a receipt.
+        NeedsAction,
+        /// A synthesis review proposal was retained for a later run instead of published.
+        ReviewDeferred,
         Failed,
         Cancelled,
         Yielded,
@@ -206,7 +217,7 @@ mod native {
                 agent_duration_ms: None,
                 revalidation_record_duration_ms: None,
                 verification_duration_ms: None,
-                outcome: WorkOutcome::Rejected,
+                outcome: WorkOutcome::Unsettled,
             }
         }
     }
@@ -2712,6 +2723,7 @@ mod native {
                 Ok(outcome) => {
                     let (stage, reason) = match outcome {
                         InspectionRecordOutcome::Deferred(reason) => {
+                            metrics.outcome = WorkOutcome::NeedsAction;
                             ("bounded work action", reason)
                         }
                         InspectionRecordOutcome::Rejected(reason) => {
@@ -2736,6 +2748,7 @@ mod native {
                     ObservationStep::Deferred(reason)
                 }
                 Err(error) if is_work_input_changed(&error) => {
+                    metrics.outcome = WorkOutcome::InputsChanged;
                     ObservationStep::InputsChanged(error)
                 }
                 Err(error) => {
@@ -3843,6 +3856,7 @@ mod native {
                     WorkStep::Deferred(reason)
                 }
                 Ok(crate::commands::work::ResultFinish::NeedsAction(reason)) => {
+                    metrics.outcome = WorkOutcome::NeedsAction;
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.record(
                         "native finalization action",
@@ -3877,6 +3891,7 @@ mod native {
                     WorkStep::Replan
                 }
                 Ok(crate::commands::work::ResultFinish::ReviewDeferred(reason)) => {
+                    metrics.outcome = WorkOutcome::ReviewDeferred;
                     for target in &targets {
                         self.finalization_replans.defer(target, &reason);
                     }
@@ -3904,6 +3919,7 @@ mod native {
                     WorkStep::Replan
                 }
                 Err(error) if is_semantic_context_changed(&error) => {
+                    metrics.outcome = WorkOutcome::InputsChanged;
                     if metrics.stages == [ExecutionStage::Audit] {
                         self.record(
                             "bounded audit inputs changed",
@@ -4103,6 +4119,9 @@ mod native {
             let mut failed = false;
             let mut staged = false;
             let mut recovered = false;
+            let mut needs_action = false;
+            let mut review_deferred = false;
+            let mut rejected = false;
             for (input, reply) in inputs.iter().zip(replies) {
                 let target = input["task"]["target"]["vault_path"]
                     .as_str()
@@ -4144,12 +4163,14 @@ mod native {
                         reason,
                     )) => {
                         deferred = true;
+                        review_deferred = true;
                         self.finalization_replans.defer(&target, &reason);
                         self.record("synthesis review", StageState::Skipped, Some(reason));
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::NeedsAction(reason)) => {
                         self.result.work_telemetry.retained_progress.action_receipts += 1;
                         deferred = true;
+                        needs_action = true;
                         self.record("native selected action", StageState::Skipped, Some(reason));
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::Staged(
@@ -4170,6 +4191,7 @@ mod native {
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::ScopeChanged) => {
                         deferred = true;
+                        rejected = true;
                         self.record("expanded extraction work", StageState::Skipped, Some("selected scope changed; old semantic reply was not adopted; preparing fresh work".into()));
                         if !self
                             .finalization_replans
@@ -4180,6 +4202,7 @@ mod native {
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::Rejected(reason)) => {
                         deferred = true;
+                        rejected = true;
                         self.record(
                             "native selected rejection",
                             StageState::Skipped,
@@ -4193,11 +4216,21 @@ mod native {
                 }
             }
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
-            if staged {
-                metrics.outcome = WorkOutcome::Staged;
+            metrics.outcome = if staged {
+                WorkOutcome::Staged
             } else if recovered {
-                metrics.outcome = WorkOutcome::Recorded;
-            }
+                WorkOutcome::Recorded
+            } else if failed {
+                WorkOutcome::Failed
+            } else if needs_action {
+                WorkOutcome::NeedsAction
+            } else if review_deferred {
+                WorkOutcome::ReviewDeferred
+            } else if rejected {
+                WorkOutcome::Rejected
+            } else {
+                WorkOutcome::Unsettled
+            };
             self.record_work_step(metrics);
             if failed {
                 WorkStep::Failed
@@ -4236,6 +4269,7 @@ mod native {
             let section = match prepared {
                 Ok(crate::commands::work::section::Preparation::Ready(section)) => section,
                 Ok(crate::commands::work::section::Preparation::NeedsAction(reason)) => {
+                    metrics.outcome = WorkOutcome::NeedsAction;
                     self.record_work_step(metrics);
                     return WorkStep::Deferred(reason);
                 }
@@ -4349,6 +4383,14 @@ mod native {
                     };
                 }
             };
+            let held = if matches!(
+                response,
+                execution::finalization::SectionResponse::InvalidBody(_)
+            ) {
+                WorkOutcome::Rejected
+            } else {
+                WorkOutcome::NeedsAction
+            };
             let result = crate::commands::work::section::finish(
                 &session,
                 &self.config,
@@ -4359,6 +4401,7 @@ mod native {
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             match result {
                 Ok(Some(reason)) => {
+                    metrics.outcome = held;
                     self.result.work_telemetry.retained_progress.action_receipts += 1;
                     self.record(
                         "whole-section action",
@@ -4422,6 +4465,7 @@ mod native {
             let (response, bytes) = match execution::finalization::decode_value(value) {
                 Ok(decoded) => decoded,
                 Err(error) => {
+                    metrics.outcome = WorkOutcome::Rejected;
                     self.failure("bounded section finalization", error);
                     return WorkStep::Failed;
                 }
@@ -4458,13 +4502,26 @@ mod native {
                         reason.clone(),
                         self.supervisor.read_control(),
                     ),
-                    Some(reason),
+                    Some((reason, WorkOutcome::NeedsAction)),
+                ),
+                execution::finalization::SectionResponse::InvalidBody(reason) => (
+                    crate::commands::work::record_finalization_action(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        id,
+                        section,
+                        reason.clone(),
+                        self.supervisor.read_control(),
+                    ),
+                    Some((reason, WorkOutcome::Rejected)),
                 ),
             };
             metrics.revalidation_record_duration_ms = Some(started_at.elapsed().as_millis() as u64);
             match finished {
                 Ok(()) => match action {
-                    Some(reason) => {
+                    Some((reason, outcome)) => {
+                        metrics.outcome = outcome;
                         self.result.work_telemetry.retained_progress.action_receipts += 1;
                         self.record(
                             "bounded section action",
@@ -4484,6 +4541,7 @@ mod native {
                     }
                 },
                 Err(error) if is_semantic_context_changed(&error) => {
+                    metrics.outcome = WorkOutcome::InputsChanged;
                     self.finalization_inputs_changed("bounded section inputs changed", error)
                 }
                 Err(error) => {
@@ -4593,8 +4651,12 @@ mod native {
                         .preparation_duration_ms
                         .as_mut()
                         .expect("measured preparation") += started_at.elapsed().as_millis() as u64;
+                    let changed = is_semantic_context_changed(&error);
+                    if changed {
+                        metrics.outcome = WorkOutcome::InputsChanged;
+                    }
                     self.record_work_step(metrics);
-                    if is_semantic_context_changed(&error) {
+                    if changed {
                         return self.finalization_inputs_changed(
                             "bounded finalization inputs changed",
                             error,
@@ -4691,6 +4753,7 @@ mod native {
                     WorkStep::Deferred(reason)
                 }
                 crate::commands::work::FinalizationPreparation::NeedsAction(reason) => {
+                    metrics.outcome = WorkOutcome::NeedsAction;
                     self.record(
                         "bounded section action",
                         StageState::Skipped,
