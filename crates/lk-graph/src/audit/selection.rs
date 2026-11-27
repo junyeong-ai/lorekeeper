@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lk_core::concept::{Citation, file_revision};
+use lk_core::concept::file_revision;
 use lk_core::discovery::{DiscoveryQuery, ScreeningDecision};
 use lk_core::vault_path::address as page_address;
 use lk_vault::{MutationPlan, MutationSession, ReadControl};
@@ -362,8 +362,8 @@ fn candidate_input(
 pub(super) struct SelectionInputs<'a> {
     pub subject: &'a str,
     pub subject_revision: &'a str,
-    pub queries: &'a [DiscoveryQuery],
-    pub matches: &'a [Citation],
+    /// The screened roster: one row per owner, with every query it matched.
+    pub roster: &'a super::RankedRoster,
 }
 
 /// A decision's purpose is the subject's address and authored revision. Evidence, direct
@@ -381,8 +381,7 @@ pub(super) fn project(
     let SelectionInputs {
         subject,
         subject_revision,
-        queries,
-        matches,
+        roster,
     } = inputs;
     let purpose = revision(&(
         POLICY,
@@ -390,34 +389,16 @@ pub(super) fn project(
         subject,
         subject_revision,
     ))?;
-    let mut roster = BTreeMap::new();
-    for citation in matches {
-        read.check().map_err(GraphError::from)?;
-        let owner = page_address(
-            &lk_vault::resolve_page_owner(root, Path::new(&citation.path)).map_err(error)?,
-        );
-        let entry = roster.entry(owner.clone()).or_insert_with(|| {
-            (
-                citation.path.clone(),
-                citation.revision.clone(),
-                BTreeSet::new(),
-            )
-        });
-        entry.0 = lk_vault::DiscoveryCandidate::preferred_path(&owner, &entry.0, &citation.path)
-            .to_owned();
-        if entry.1 != citation.revision {
-            return Err(error("audit discovery owner has conflicting revisions"));
-        }
-        for query in queries {
-            if discovered.matches[query].contains(citation) {
-                entry.2.insert(query.clone());
-            }
-        }
-    }
     let rows = roster
+        .owners
+        .iter()
+        .map(|(owner, rostered)| (page_address(owner), rostered))
+        .collect::<BTreeMap<_, _>>()
         .into_iter()
-        .map(|(owner, (path, revision, queries))| {
-            let queries = queries.into_iter().collect::<Vec<_>>();
+        .map(|(owner, rostered)| {
+            read.check().map_err(GraphError::from)?;
+            let (path, revision) = (&rostered.citation.path, &rostered.citation.revision);
+            let queries = rostered.queries.iter().cloned().collect::<Vec<_>>();
             let query_revisions = queries
                 .iter()
                 .map(|query| discovered.query_revisions[query].clone())
@@ -426,8 +407,8 @@ pub(super) fn project(
                 input: candidate_input(
                     root,
                     &owner,
-                    &path,
-                    &revision,
+                    path,
+                    revision,
                     queries,
                     query_revisions,
                     reviews,

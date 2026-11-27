@@ -101,7 +101,9 @@ and CLI discovery, not a second graph authority.
   Each query's discovery roster holds its identity matches and the first
   `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's
   traversal with its own bound; card capture uses the same `Ranked` recipe); only that
-  roster is screened. The subject, its citations, its direct links and the first
+  roster is screened. `RankedRoster` forms it by verified owner as that recipe does: a
+  rostered owner keeps every query any of its spellings matched, and planning, packet
+  capture and screening publication read the same owner rows. The subject, its citations, its direct links and the first
   `AUDIT_CONTEXT_PAGES` selected owners in roster order that are not already a citation
   or direct link are read in full; other selected owners are `context_cards` (address and
   title), never read and never evidence. Discovery recorded before screening keeps its

@@ -100,6 +100,75 @@ fn discovery_recorded_before_screening_reads_every_match_unbounded() {
     assert_eq!(legacy.scope.screening, None);
 }
 
+#[cfg(unix)]
+#[test]
+fn an_owner_matched_through_two_spellings_is_one_candidate_of_every_query_it_matched() {
+    let fixture = Fixture::new(0);
+    // One query matches the owner's own address, the other only its alias's name.
+    fixture.write(
+        "wiki/documents/owner.md",
+        "---\ntype: document\n---\nScreen protocol has a declared scope.\n",
+    );
+    std::fs::create_dir_all(fixture.root.join("wiki/concepts")).unwrap();
+    std::os::unix::fs::symlink(
+        "../documents/owner.md",
+        fixture.root.join("wiki/concepts/zeta.md"),
+    )
+    .unwrap();
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    let plan = receipts.discovery.get_mut(SUBJECT).unwrap();
+    plan.queries.push(DiscoveryQuery {
+        query: "zeta".into(),
+        phrase: true,
+        spacing: false,
+    });
+    let queries = plan.queries.clone();
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+
+    let candidate = fixture.candidate();
+    let discovery = candidate.discovery.as_ref().unwrap();
+    assert_eq!(
+        discovery
+            .matches
+            .iter()
+            .map(|citation| citation.path.as_str())
+            .collect::<Vec<_>>(),
+        ["wiki/documents/owner.md"]
+    );
+    let row = &discovery.selection.as_ref().unwrap().rows[0];
+    assert_eq!(row.input.path, "wiki/documents/owner.md");
+    assert_eq!(
+        row.input.queries, queries,
+        "the alias's query is the owner's too"
+    );
+
+    // The packet's cards agree with the plan, so screening proceeds.
+    let packet = fixture.packet(20, false);
+    let request = packet.request.as_ref().unwrap();
+    assert_eq!(request.candidates.len(), 1);
+    assert_eq!(
+        request.candidates[0].candidate.path,
+        "wiki/documents/owner.md"
+    );
+    assert!(
+        fixture
+            .record(output(&packet, ScreeningDecision::Inspect))
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .candidate()
+            .discovery
+            .unwrap()
+            .selection
+            .unwrap()
+            .is_ready()
+    );
+}
+
 #[test]
 fn an_owner_the_audit_reads_as_a_direct_link_takes_no_context_place() {
     let fixture = Fixture::build(

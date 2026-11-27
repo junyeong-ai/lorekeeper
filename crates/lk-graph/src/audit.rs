@@ -2135,14 +2135,59 @@ const AUDIT_ROSTER: std::num::NonZeroUsize =
 /// owners are shown as metadata cards. Mandatory citations and direct links are always read.
 pub const AUDIT_CONTEXT_PAGES: usize = 4;
 
-/// Each query's roster: every identity match and the first `per_query` other pages in search
-/// order, one per verified owner and never the subject or a review of it in `published`. A
-/// synthesis passes the unedited synthesis publications naming its subject: those are read as
-/// the subject's reviews, and ranking them here would let a synthesis's own publication push
-/// an unchanged page out of the next synthesis's inputs. A page reached through several
-/// spellings is read through its own address when
-/// any query matched that spelling, otherwise through its preferred rostered one.
-/// `owners` caches owner resolution across the concepts of one load.
+/// A ranked discovery roster by verified owner, formed as `lk_vault`'s `Ranked` capture recipe
+/// forms its candidates, so that audit planning, packet capture and screening publication see
+/// each owner as the same row: in each query an owner ranks at its best-ranked spelling, and
+/// the query keeps every owner it names by identity and its first `per_query` others. A
+/// rostered owner carries every query any of its spellings matched, rostered there or not, and
+/// is read through its preferred spelling among all of them
+/// (`lk_vault::DiscoveryCandidate::preferred_path`: its own address when a query matched it).
+struct RankedRoster {
+    /// Each query's rostered owners in search order, with whether the query names the owner.
+    queries: Vec<(lk_vault::DiscoveryQuery, Vec<(PathBuf, bool)>)>,
+    owners: BTreeMap<PathBuf, RosteredOwner>,
+}
+
+struct RosteredOwner {
+    citation: Citation,
+    queries: BTreeSet<lk_vault::DiscoveryQuery>,
+}
+
+impl RankedRoster {
+    /// Each query's roster as ranked matches through each owner's preferred spelling.
+    fn ranked(&self) -> Vec<(lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>)> {
+        self.queries
+            .iter()
+            .map(|(query, roster)| {
+                let roster = roster
+                    .iter()
+                    .map(|(owner, identity)| lk_vault::RankedMatch {
+                        citation: self.owners[owner].citation.clone(),
+                        identity: *identity,
+                    })
+                    .collect();
+                (query.clone(), roster)
+            })
+            .collect()
+    }
+
+    /// The rostered owners' preferred spellings in roster order, each once.
+    fn ordered(&self) -> Vec<Citation> {
+        let mut seen = BTreeSet::new();
+        self.queries
+            .iter()
+            .flat_map(|(_, roster)| roster)
+            .filter(|(owner, _)| seen.insert(owner))
+            .map(|(owner, _)| self.owners[owner].citation.clone())
+            .collect()
+    }
+}
+
+/// The `RankedRoster` of `queries` over their complete `ranked` matches, without the subject's
+/// owner or a review of it in `published`. A synthesis passes the unedited synthesis
+/// publications naming its subject: those are read as the subject's reviews, and ranking them
+/// here would let a synthesis's own publication push an unchanged page out of the next
+/// synthesis's inputs. `owners` caches owner resolution across the subjects of one load.
 #[allow(clippy::too_many_arguments)]
 fn ranked_roster(
     root: &Path,
@@ -2153,74 +2198,77 @@ fn ranked_roster(
     per_query: usize,
     owners: &mut BTreeMap<String, PathBuf>,
     read: &lk_vault::ReadControl,
-) -> Result<Vec<(lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>)>, GraphError> {
-    let mut rosters = Vec::new();
+) -> Result<RankedRoster, GraphError> {
+    let mut matched = BTreeMap::<PathBuf, RosteredOwner>::new();
+    let mut orders = Vec::with_capacity(queries.len());
     for query in queries {
         let mut seen = BTreeSet::new();
-        let mut places = per_query;
-        let mut roster = Vec::new();
-        for matched in &ranked[query] {
+        let mut order = Vec::new();
+        for candidate in &ranked[query] {
             read.check().map_err(GraphError::from)?;
-            if !matched.identity && places == 0 {
-                continue;
-            }
-            let owner = match owners.get(&matched.citation.path) {
+            let owner = match owners.get(&candidate.citation.path) {
                 Some(owner) => owner.clone(),
                 None => {
                     let owner =
-                        lk_vault::resolve_page_owner(root, Path::new(&matched.citation.path))
+                        lk_vault::resolve_page_owner(root, Path::new(&candidate.citation.path))
                             .map_err(error)?;
-                    owners.insert(matched.citation.path.clone(), owner.clone());
+                    owners.insert(candidate.citation.path.clone(), owner.clone());
                     owner
                 }
             };
-            if owner == subject
-                || published.contains(&page_address(&owner))
-                || !seen.insert(owner.clone())
-            {
+            if owner == subject || published.contains(&page_address(&owner)) {
                 continue;
             }
-            if !matched.identity {
-                places -= 1;
+            let entry = matched
+                .entry(owner.clone())
+                .or_insert_with(|| RosteredOwner {
+                    citation: candidate.citation.clone(),
+                    queries: BTreeSet::new(),
+                });
+            if entry.citation.revision != candidate.citation.revision {
+                return Err(error("audit discovery owner has conflicting revisions"));
             }
-            roster.push((owner, matched));
+            if lk_vault::DiscoveryCandidate::preferred_path(
+                &page_address(&owner),
+                &candidate.citation.path,
+                &entry.citation.path,
+            ) == candidate.citation.path
+            {
+                entry.citation = candidate.citation.clone();
+            }
+            entry.queries.insert(query.clone());
+            // The first spelling in search order is the owner's best rank in this query.
+            if seen.insert(owner.clone()) {
+                order.push((owner, candidate.identity));
+            }
         }
-        rosters.push((query.clone(), roster));
+        orders.push((query.clone(), order));
     }
-    let direct = queries
-        .iter()
-        .flat_map(|query| &ranked[query])
-        .map(|matched| (matched.citation.path.as_str(), &matched.citation))
-        .collect::<BTreeMap<_, _>>();
-    let mut preferred = BTreeMap::<&PathBuf, &Citation>::new();
-    for (owner, matched) in rosters.iter().flat_map(|(_, roster)| roster) {
-        let citation = direct
-            .get(page_address(owner).as_str())
-            .copied()
-            .unwrap_or(&matched.citation);
-        let kept = preferred.entry(owner).or_insert(citation);
-        if lk_vault::DiscoveryCandidate::preferred_path(
-            &page_address(owner),
-            &citation.path,
-            &kept.path,
-        ) == citation.path
-        {
-            *kept = citation;
-        }
-    }
-    Ok(rosters
-        .iter()
-        .map(|(query, roster)| {
-            let roster = roster
-                .iter()
-                .map(|(owner, matched)| lk_vault::RankedMatch {
-                    citation: preferred[owner].clone(),
-                    identity: matched.identity,
+    let mut rostered = BTreeSet::new();
+    let queries = orders
+        .into_iter()
+        .map(|(query, order)| {
+            let mut places = per_query;
+            let roster = order
+                .into_iter()
+                .filter(|(_, identity)| {
+                    if *identity {
+                        return true;
+                    }
+                    let place = places > 0;
+                    places = places.saturating_sub(1);
+                    place
                 })
-                .collect();
-            (query.clone(), roster)
+                .collect::<Vec<_>>();
+            rostered.extend(roster.iter().map(|(owner, _)| owner.clone()));
+            (query, roster)
         })
-        .collect())
+        .collect();
+    matched.retain(|owner, _| rostered.contains(owner));
+    Ok(RankedRoster {
+        queries,
+        owners: matched,
+    })
 }
 
 /// Who reads the inputs. Screening state belongs to the audit; a synthesis shares the
@@ -2389,7 +2437,7 @@ fn inputs_from_evidence(
                 matches.dedup();
                 matches
             };
-            let (matches, ranked, ordered) = match (input_use, selection_plan) {
+            let (matches, ranked, roster) = match (input_use, selection_plan) {
                 // A synthesis reads the complete matches through its ranked roster.
                 (InputUse::Synthesis, _) => {
                     let roster = ranked_roster(
@@ -2402,10 +2450,10 @@ fn inputs_from_evidence(
                         &mut owners,
                         read,
                     )?;
-                    (complete(), Some(roster), Vec::new())
+                    (complete(), Some(roster.ranked()), None)
                 }
                 // Discovery recorded before screening keeps its exact full-context derivation.
-                (InputUse::Audit, None) => (complete(), None, Vec::new()),
+                (InputUse::Audit, None) => (complete(), None, None),
                 // A screened audit screens only its bounded roster, which already excludes the
                 // subject's owner, in roster order.
                 (InputUse::Audit, Some(_)) => {
@@ -2419,18 +2467,10 @@ fn inputs_from_evidence(
                         &mut owners,
                         read,
                     )?;
-                    let mut ordered = Vec::<Citation>::new();
-                    for (_, entries) in &roster {
-                        for matched in entries {
-                            if !ordered.contains(&matched.citation) {
-                                ordered.push(matched.citation.clone());
-                            }
-                        }
-                    }
-                    let mut matches = ordered.clone();
+                    let mut matches = roster.ordered();
                     matches.sort();
                     screened = Some(matches.len());
-                    (matches, None, ordered)
+                    (matches, None, Some(roster))
                 }
             };
             let selection = selection_plan
@@ -2440,8 +2480,7 @@ fn inputs_from_evidence(
                         selection::SelectionInputs {
                             subject: &page_address(&page.path),
                             subject_revision: &revision,
-                            queries: &plan.queries,
-                            matches: &matches,
+                            roster: roster.as_ref().expect("screened discovery has its roster"),
                         },
                         selection,
                         &discovered,
@@ -2472,6 +2511,10 @@ fn inputs_from_evidence(
                     .map(|citation| owner_of(&citation.path))
                     .collect::<Result<BTreeSet<_>, _>>()?;
                 let mut chosen = Vec::new();
+                let ordered = roster
+                    .as_ref()
+                    .expect("screened discovery has its roster")
+                    .ordered();
                 for citation in &ordered {
                     let owner = owner_of(&citation.path)?;
                     if !read_in_full.contains(&owner) && selected.contains(&page_address(&owner)) {
