@@ -4918,6 +4918,16 @@ fn progressive_large_source_observations_feed_guarded_admitted_work_before_publi
         lk_core::concept::file_revision(&before)
     );
     assert!(!source_directory.join("final.json").exists());
+    // The queue still retains the completed extraction: planning and reading its source Work
+    // select the task by the same rule.
+    let planned = execution_json(
+        &fixture,
+        &["work", "source-plan", "--task-id", &task.task_id],
+    );
+    let planned = planned["work_id"].as_str().unwrap();
+    let page = execution_json(&fixture, &["work", "source", planned, "--limit", "16"]);
+    assert_eq!(page["status"], "page", "{page}");
+    assert_eq!(page["guard"]["authority"], "retained-input");
     assert!(bounded_calls(&fixture).iter().any(|call| {
         call["action"] == "inspect"
             && call["addresses"].as_array().is_some_and(|addresses| {

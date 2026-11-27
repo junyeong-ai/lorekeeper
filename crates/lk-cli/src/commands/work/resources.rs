@@ -65,7 +65,7 @@ pub(super) fn load_planned_controlled(
         serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
     let candidates = match (guard.authority, &subject) {
         (SemanticAuthority::RetainedInput, Subject::Queue { task_id, .. }) => {
-            let task = super::super::queue::current_task_controlled(root, task_id, read)?;
+            let task = super::work_task_controlled(root, task_id, read)?;
             task.input
                 .get("text")
                 .and_then(Value::as_str)
@@ -711,12 +711,7 @@ pub(super) fn task_with_audit_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
     read.check().into_diagnostic()?;
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(root, task_id, read)?;
     let extraction = task.kind == lk_queue::TaskKind::ExtractConcepts;
     let queries = if extraction {
         super::discovery::current(root, &task)?.unwrap_or_default()
@@ -754,12 +749,7 @@ pub(super) fn task_with_discovery_controlled(
     queries: &[lk_core::discovery::DiscoveryQuery],
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(root, task_id, read)?;
     with_discovery_controlled(
         root,
         config,
@@ -829,12 +819,7 @@ pub(super) fn selection_inventory_controlled(
     read: &lk_vault::ReadControl,
 ) -> miette::Result<SelectionInventory> {
     read.check().into_diagnostic()?;
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(root, task_id, read)?;
     let mut reviews = lk_vault::ReviewInventory::load_controlled(root, &config.vault.dirs, read)
         .into_diagnostic()?;
     let (mut captures, _) = lk_vault::capture_discovery_batch_with_inventory(
@@ -886,12 +871,7 @@ pub(super) fn extraction_source_controlled(
     reviews: &mut lk_vault::ReviewInventory,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(root, task_id, read)?;
     read.check().into_diagnostic()?;
     let mut source = capture_task_with_audit_controlled(root, config, task, None, read)?;
     if source.context["purpose"]["task_kind"]
@@ -1123,12 +1103,7 @@ pub(super) fn task_for_publication_controlled(
     task_id: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Prepared> {
-    let task = super::super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(root, task_id, read)?;
     capture_task_with_audit_controlled(root, config, task, None, read)
 }
 

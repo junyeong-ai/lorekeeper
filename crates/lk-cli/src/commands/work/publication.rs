@@ -106,12 +106,7 @@ pub(in crate::commands) fn publication_scope_controlled(
 ) -> miette::Result<PublicationScope> {
     read.check().into_diagnostic()?;
     let root = root.canonicalize().into_diagnostic()?;
-    let task = super::super::queue::select_task_controlled(
-        &root,
-        task_id,
-        super::super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = super::work_task_controlled(&root, task_id, read)?;
     let supplied = discovery::validate_queries(queries)?;
     let extraction = task.kind == lk_queue::TaskKind::ExtractConcepts;
     let recorded = if extraction {

@@ -890,11 +890,7 @@ pub(super) fn task_context(
     discovery_file: Option<&Path>,
 ) -> miette::Result<Value> {
     let root = root.canonicalize().into_diagnostic()?;
-    let task = super::queue::select_task(
-        &root,
-        task_id,
-        super::queue::TaskSelection::CurrentOrDoneExtraction,
-    )?;
+    let task = work_task_controlled(&root, task_id, &lk_vault::ReadControl::default())?;
     let mut prepared = if task.kind == lk_queue::TaskKind::ExtractConcepts
         && is_progressive(config)?
     {
@@ -1122,11 +1118,7 @@ fn task_for_plan(
     task_id: &str,
     discovery: Option<&[lk_core::discovery::DiscoveryQuery]>,
 ) -> miette::Result<Prepared> {
-    let task = super::queue::select_task(
-        root,
-        task_id,
-        super::queue::TaskSelection::CurrentOrDoneExtraction,
-    )?;
+    let task = work_task_controlled(root, task_id, &lk_vault::ReadControl::default())?;
     if task.kind != lk_queue::TaskKind::ExtractConcepts || !is_progressive(config)? {
         return match discovery {
             Some(queries) => resources::task_with_discovery(root, config, task_id, queries),
@@ -1361,12 +1353,7 @@ fn current_screening_controlled(
     task_id: &str,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<ScreeningPreparation> {
-    let task = super::queue::select_task_controlled(
-        root,
-        task_id,
-        super::queue::TaskSelection::CurrentOrDoneExtraction,
-        read,
-    )?;
+    let task = work_task_controlled(root, task_id, read)?;
     let queries = discovery::current(root, &task)?.ok_or_else(|| {
         miette::miette!(
             "candidate screening requires current explicit discovery; record work discover first"
@@ -1469,11 +1456,7 @@ fn current_screening_recipes(
     task_ids
         .iter()
         .map(|task_id| {
-            let task = super::queue::select_task(
-                root,
-                task_id,
-                super::queue::TaskSelection::CurrentOrDoneExtraction,
-            )?;
+            let task = work_task_controlled(root, task_id, &lk_vault::ReadControl::default())?;
             let queries = discovery::current(root, &task)?.ok_or_else(|| {
                 miette::miette!("candidate screening requires current explicit discovery")
             })?;
@@ -1597,12 +1580,7 @@ pub(super) fn record_screenings(
             let started_at = std::time::Instant::now();
             let result = (|| {
                 read.check().into_diagnostic()?;
-                let task = super::queue::select_task_controlled(
-                    root,
-                    task_id,
-                    super::queue::TaskSelection::CurrentOrDoneExtraction,
-                    read,
-                )?;
+                let task = work_task_controlled(root, task_id, read)?;
                 let issued = |request: &Value| {
                     let request = selection::Request::from_value(request)?;
                     if request.task_id() != task.task_id || request.cache_hash() != task.cache_hash
@@ -2009,6 +1987,22 @@ pub(super) fn record_audit_controlled(
                 mutation,
             )
         },
+        read,
+    )
+}
+
+/// The queue task a Work is planned from and read against: a current task, or a completed
+/// extraction the queue still retains, whose result may be reapplied. Planning, every read of a
+/// planned resource and publication select their task by this one rule.
+pub(super) fn work_task_controlled(
+    root: &Path,
+    task_id: &str,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<lk_queue::QueueTask> {
+    super::queue::select_task_controlled(
+        root,
+        task_id,
+        super::queue::TaskSelection::CurrentOrDoneExtraction,
         read,
     )
 }
