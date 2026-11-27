@@ -90,35 +90,63 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
 #[cfg(unix)]
 const STDERR_GRACE: Duration = Duration::from_millis(500);
 
-/// The bounded end of a child's stderr.
+/// The bounded end of a child's stderr. A raw window much larger than the reported tail is
+/// kept, so credentials are masked over complete text before the report is cut to size.
 #[cfg(unix)]
 #[derive(Default)]
-struct StderrTail(std::collections::VecDeque<u8>);
+struct StderrTail {
+    window: std::collections::VecDeque<u8>,
+    /// Whether earlier output fell out of the window, leaving its start a fragment.
+    cut: bool,
+}
 
 #[cfg(unix)]
 impl StderrTail {
+    const WINDOW_BYTES: usize = 16 * 1024;
     const MAX_BYTES: usize = 2048;
 
     fn push(&mut self, bytes: &[u8]) {
-        self.0.extend(bytes);
-        let excess = self.0.len().saturating_sub(Self::MAX_BYTES);
-        self.0.drain(..excess);
+        self.window.extend(bytes);
+        let excess = self.window.len().saturating_sub(Self::WINDOW_BYTES);
+        self.cut |= excess > 0;
+        self.window.drain(..excess);
     }
 
-    /// The tail as one line: credentials the shared scanner names are masked (a host's error
-    /// output is a diagnostic, not a record), line breaks and tabs become spaces and other
-    /// control characters are dropped, so a report cannot be reshaped by host output.
+    /// The tail as one line of at most `MAX_BYTES`. Control characters are normalized first
+    /// (carriage returns end lines, tabs become spaces, others are dropped), so no removal
+    /// can join text into a credential after masking; credentials the shared scanner names
+    /// are then masked over the whole window, a cut-off start included; only then is the
+    /// text flattened and its last `MAX_BYTES` kept from a word boundary, so no fragment of
+    /// a word, masked or not, opens the report.
     fn render(&self) -> Option<String> {
-        let bytes = self.0.iter().copied().collect::<Vec<_>>();
-        let text = lk_core::markdown::mask_credentials(&String::from_utf8_lossy(&bytes))
+        let bytes = self.window.iter().copied().collect::<Vec<_>>();
+        let normalized = String::from_utf8_lossy(&bytes)
             .chars()
             .filter_map(|character| match character {
-                '\n' | '\r' | '\t' => Some(' '),
+                '\n' | '\r' => Some('\n'),
+                '\t' => Some(' '),
                 character if character.is_control() => None,
                 character => Some(character),
             })
             .collect::<String>();
-        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let masked = if self.cut {
+            lk_core::markdown::mask_credentials_after_cut(&normalized)
+        } else {
+            lk_core::markdown::mask_credentials(&normalized)
+        };
+        let text = masked.split_whitespace().collect::<Vec<_>>().join(" ");
+        let text = match text.len().checked_sub(Self::MAX_BYTES) {
+            Some(excess) if excess > 0 => {
+                let start = (excess..=text.len())
+                    .find(|at| text.is_char_boundary(*at))
+                    .expect("the end is a boundary");
+                text[start..]
+                    .split_once(' ')
+                    .map_or("", |(_, rest)| rest)
+                    .to_owned()
+            }
+            _ => text,
+        };
         (!text.is_empty()).then_some(text)
     }
 }
@@ -1365,6 +1393,47 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
             .await
             .unwrap();
         assert_eq!(result.stderr_tail, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_stderr_tail_masks_credentials_before_it_is_cut() {
+        let token = ["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"].concat();
+        let render = |chunks: &[&[u8]]| {
+            let mut tail = StderrTail::default();
+            for chunk in chunks {
+                tail.push(chunk);
+            }
+            tail.render()
+        };
+        let leaks = |tail: &Option<String>| {
+            tail.as_deref()
+                .is_some_and(|tail| tail.contains(&token[8..]) || tail.contains("QUJD"))
+        };
+        // The window starts inside a token: its suffix is not reported.
+        let blank = vec![b'\n'; StderrTail::WINDOW_BYTES - 20];
+        let cut_token = render(&[token.as_bytes(), &blank]);
+        assert!(!leaks(&cut_token), "{cut_token:?}");
+        // The window starts inside a key body whose header fell out of it.
+        let body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=\n".repeat(StderrTail::WINDOW_BYTES / 20);
+        let key = render(&[
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            body.as_bytes(),
+            b"-----END OPENSSH PRIVATE KEY-----\nkey rejected\n",
+        ]);
+        assert!(!leaks(&key), "{key:?}");
+        assert_eq!(key.as_deref(), Some("[private key block] key rejected"));
+        // A control character inside a token cannot hide it from masking.
+        let split = format!("auth {}\u{7}{} failed\n", &token[..6], &token[6..]);
+        let joined = render(&[split.as_bytes()]);
+        assert_eq!(joined.as_deref(), Some("auth [GitHub access token] failed"));
+        // Cutting the report to size never opens it with part of a word.
+        let filler = "word ".repeat(StderrTail::MAX_BYTES / 5);
+        let long = render(&[filler.as_bytes(), token.as_bytes(), b" tail\n"]);
+        let long = long.unwrap();
+        assert!(long.len() <= StderrTail::MAX_BYTES, "{}", long.len());
+        assert!(long.starts_with("word "), "{long}");
+        assert!(long.ends_with("[GitHub access token] tail"), "{long}");
     }
 
     #[cfg(unix)]

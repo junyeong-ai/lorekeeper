@@ -776,6 +776,34 @@ pub fn mask_credentials(text: &str) -> String {
     masked
 }
 
+/// `mask_credentials` for the end of a longer stream whose start was cut off. The text up to its
+/// first whitespace is a fragment of unknown start, possibly the end of a credential, and is
+/// dropped; a private key `-----END` line reached before any header closes a block whose header
+/// was cut off, so everything up to it is masked as that block.
+pub fn mask_credentials_after_cut(text: &str) -> String {
+    let Some(start) = text.find(char::is_whitespace) else {
+        return String::new();
+    };
+    let text = &text[start..];
+    let mut offset = 0;
+    for line in lines_with_endings(text) {
+        let content = line.trim_end_matches(['\r', '\n']);
+        if is_private_key_header(content) {
+            break;
+        }
+        offset += line.len();
+        if is_private_key_footer(content) {
+            return format!(
+                "[{}]{}{}",
+                CredentialForm::PrivateKeyBlock.description(),
+                &line[content.len()..],
+                mask_credentials(&text[offset..])
+            );
+        }
+    }
+    mask_credentials(text)
+}
+
 /// Walk one line left to right, taking the longest prefix that matches at each position and
 /// skipping past the credential it names, so a token is counted once and a nested form is not
 /// also read as the shorter one inside it.
@@ -894,6 +922,17 @@ fn is_private_key_header(line: &str) -> bool {
     let Some(label) = strip_markdown_quoting(line)
         .trim()
         .strip_prefix("-----BEGIN ")
+        .and_then(|rest| rest.strip_suffix("-----"))
+    else {
+        return false;
+    };
+    PRIVATE_KEY_LABELS.contains(&label)
+}
+
+fn is_private_key_footer(line: &str) -> bool {
+    let Some(label) = strip_markdown_quoting(line)
+        .trim()
+        .strip_prefix("-----END ")
         .and_then(|rest| rest.strip_suffix("-----"))
     else {
         return false;
@@ -1021,6 +1060,32 @@ mod tests {
         assert_eq!(
             mask_credentials(key),
             "before\n[private key block]\n\n\nafter"
+        );
+    }
+
+    #[test]
+    fn a_cut_stream_drops_its_leading_fragment_and_masks_a_key_whose_header_was_cut() {
+        use super::mask_credentials_after_cut;
+        // The cut fell inside a token: its suffix is the leading fragment and is dropped.
+        let token = shaped(&["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"]);
+        let suffix = &token[10..];
+        assert_eq!(
+            mask_credentials_after_cut(&format!("{suffix} rejected\nnext {token}\n")),
+            " rejected\nnext [GitHub access token]\n"
+        );
+        assert_eq!(mask_credentials_after_cut(suffix), "");
+        // The cut fell inside a key body: everything through its footer is the key.
+        let body = "xyzKEYBODY\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----\nafter\n";
+        assert_eq!(
+            mask_credentials_after_cut(body),
+            "[private key block]\nafter\n"
+        );
+        // A complete block later in the text is masked as usual.
+        let later =
+            "cut here\n-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n";
+        assert_eq!(
+            mask_credentials_after_cut(later),
+            " here\n[private key block]\n\n\n"
         );
     }
 
