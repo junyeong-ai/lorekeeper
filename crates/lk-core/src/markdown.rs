@@ -735,9 +735,45 @@ pub fn scan_credentials(text: &str) -> Vec<(usize, CredentialForm)> {
         if is_private_key_header(line) {
             found.push((line_no, CredentialForm::PrivateKeyBlock));
         }
-        found.extend(scan_line(line, rules).map(|form| (line_no, form)));
+        found.extend(scan_line(line, rules).map(|(_, form)| (line_no, form)));
     }
     found
+}
+
+/// `text` with every credential `scan_credentials` names replaced by its description, for a
+/// diagnostic that is reported rather than a page that is a record: a page is never rewritten,
+/// but a host's own error output carries no such authority. A private key block is masked
+/// from its header through its `-----END` line, or to the end of the text without one.
+pub fn mask_credentials(text: &str) -> String {
+    let rules = prefix_rules();
+    let mut masked = String::with_capacity(text.len());
+    let mut in_key = false;
+    for line in lines_with_endings(text) {
+        let content = line.trim_end_matches(['\r', '\n']);
+        let ending = &line[content.len()..];
+        if in_key || is_private_key_header(content) {
+            if !in_key {
+                masked.push_str(&format!(
+                    "[{}]",
+                    CredentialForm::PrivateKeyBlock.description()
+                ));
+            }
+            in_key = !strip_markdown_quoting(content)
+                .trim()
+                .starts_with("-----END ");
+            masked.push_str(ending);
+            continue;
+        }
+        let mut cursor = 0;
+        for (span, form) in scan_line(content, rules) {
+            masked.push_str(&content[cursor..span.start]);
+            masked.push_str(&format!("[{}]", form.description()));
+            cursor = span.end;
+        }
+        masked.push_str(&content[cursor..]);
+        masked.push_str(ending);
+    }
+    masked
 }
 
 /// Walk one line left to right, taking the longest prefix that matches at each position and
@@ -746,7 +782,7 @@ pub fn scan_credentials(text: &str) -> Vec<(usize, CredentialForm)> {
 fn scan_line<'a>(
     line: &'a str,
     prefixes: &'a PrefixRules,
-) -> impl Iterator<Item = CredentialForm> + 'a {
+) -> impl Iterator<Item = (std::ops::Range<usize>, CredentialForm)> + 'a {
     let mut cursor = 0;
     std::iter::from_fn(move || {
         while let Some(start) = prefixes
@@ -786,8 +822,9 @@ fn scan_line<'a>(
             });
             match matched.flatten() {
                 Some((form, span)) => {
+                    let start = cursor;
                     cursor += span;
-                    return Some(form);
+                    return Some((start..cursor, form));
                 }
                 None => {
                     cursor += rest.chars().next().map_or(1, char::len_utf8);
@@ -965,6 +1002,27 @@ pub fn parse_fence(line: &str) -> Option<(char, usize, &str)> {
 #[cfg(test)]
 mod tests {
     use super::{CredentialForm, scan_credentials};
+
+    #[test]
+    fn a_diagnostic_masks_the_credentials_the_scanner_names_and_keeps_the_rest() {
+        use super::mask_credentials;
+        let token = shaped(&["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"]);
+        let text = format!("auth failed for {token}; retry later\nError finding codex home\n");
+        let masked = mask_credentials(&text);
+        assert_eq!(
+            masked,
+            "auth failed for [GitHub access token]; retry later\nError finding codex home\n"
+        );
+        assert_eq!(
+            mask_credentials("rotate xoxb-please-rotate-it"),
+            "rotate xoxb-please-rotate-it"
+        );
+        let key = "before\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----\nafter";
+        assert_eq!(
+            mask_credentials(key),
+            "before\n[private key block]\n\n\nafter"
+        );
+    }
 
     #[test]
     fn serialization_preserves_nested_image_and_link_titles_without_creating_markup() {

@@ -43,7 +43,8 @@ engine, exit code and the JSON shape of captured stdout. `stdout_capture` is
 `complete`, `not-captured` or `unavailable`; only complete capture has a known byte
 count and JSON format. Stdout diagnostics expose fixed status tokens, types, UTF-8 byte
 lengths and member counts, never payloads or session data. `stderr_tail` is the host's
-own account: the last 2 KiB of its stderr on one line, control characters removed, such
+own account: the last 2 KiB of its stderr on one line, control characters removed and
+credentials `lore doctor` recognizes masked by their kind, such
 as `Error finding codex home`; a `host failure output` stage repeats it with the profile
 for each answerless failure. It stays in the run report, never in hold records or vault
 pages; attended runs still stream stderr unsanitized. A diagnostic never permits a retry, fallback or adoption: a

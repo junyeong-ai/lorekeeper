@@ -696,10 +696,13 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
 #[test]
 fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
     for scheduled in [true, false] {
+        let token = ["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"].concat();
         let fixture = Fixture::new(
             "codex",
             30,
-            "printf 'host-stderr-marker\\n' >&2\nprintf 'host-stdout-marker\\n'\nexit 7",
+            &format!(
+                "printf 'host-stderr-marker {token}\\n' >&2\nprintf 'host-stdout-marker\\n'\nexit 7"
+            ),
         );
         write_audit_concept(&fixture, "stable");
         configure(&fixture, Some(4), 60);
@@ -724,13 +727,29 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
         );
         if scheduled {
             // Only the bounded, sanitized stderr tail an answerless failure reports reaches
-            // the job's log; the host's streams are not forwarded.
+            // the job's log, with credentials masked; the host's streams are not forwarded.
+            let marked = diagnostics
+                .lines()
+                .filter(|line| line.contains("host-stderr-marker"))
+                .collect::<Vec<_>>();
             assert!(
-                diagnostics
-                    .lines()
-                    .filter(|line| line.contains("host-stderr-marker"))
+                marked
+                    .iter()
+                    .any(|line| line.contains("host failure output")),
+                "{diagnostics}"
+            );
+            assert!(
+                marked
+                    .iter()
                     .all(|line| line.contains("host failure output")
-                        || line.contains(r#""stderr_tail":"host-stderr-marker""#)),
+                        || line.contains(
+                            r#""stderr_tail":"host-stderr-marker [GitHub access token]""#
+                        )),
+                "{diagnostics}"
+            );
+            assert!(!diagnostics.contains(&token), "{diagnostics}");
+            assert!(
+                diagnostics.contains("[GitHub access token]"),
                 "{diagnostics}"
             );
         } else {

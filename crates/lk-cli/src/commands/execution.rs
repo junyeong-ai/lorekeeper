@@ -101,11 +101,12 @@ impl StderrTail {
         self.0.drain(..excess);
     }
 
-    /// The tail as one line: line breaks and tabs become spaces, other control characters
-    /// are dropped, so a report or hold reason cannot be reshaped by host output.
+    /// The tail as one line: credentials the shared scanner names are masked (a host's error
+    /// output is a diagnostic, not a record), line breaks and tabs become spaces and other
+    /// control characters are dropped, so a report cannot be reshaped by host output.
     fn render(&self) -> Option<String> {
         let bytes = self.0.iter().copied().collect::<Vec<_>>();
-        let text = String::from_utf8_lossy(&bytes)
+        let text = lk_core::markdown::mask_credentials(&String::from_utf8_lossy(&bytes))
             .chars()
             .filter_map(|character| match character {
                 '\n' | '\r' | '\t' => Some(' '),
