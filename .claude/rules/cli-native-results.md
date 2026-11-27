@@ -108,7 +108,7 @@ paths:
   a refusal, including a curation the vault refuses, never holds the synthesis, while I/O
   stays a fault: every `needs-review` reply carries `synthesis`, the complete synthesis value
   the finalizer would publish without the review (referencing only existing reviews), and on
-  refusal Rust publishes it and drops only the proposal. No refusal is stored or
+  refusal Rust stages it for guarded queue application and drops only the proposal. No refusal is stored or
   reconsidered; records of the superseded reconsideration (`action::REVIEW_REFUSAL`,
   `.lorekeeper/queue/review-refusals/`) hold nothing and are pruned with their tasks. A
   proposal citing an origin both as a page and by its RSS events keeps the events. An
@@ -134,7 +134,7 @@ paths:
   refused. A new review never takes an address that folds (case, NFC) onto a removed review
   whose absence the request guards. A target publishes at most one review per run, spent when
   it publishes: a further admissible proposal in that run publishes and records nothing and
-  defers only that target, while one admission refuses for any reason publishes its synthesis. The published
+  defers only that target, while one admission refuses for any reason has its synthesis staged for guarded queue application. The published
   review records its `kind`, `judged_citation_digest`, `judged_review_digest` and
   `publication_digest`, with its concept as its subject, so automation's own unedited reviews
   are recognizable.
