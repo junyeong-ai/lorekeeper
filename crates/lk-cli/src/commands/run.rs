@@ -7345,6 +7345,20 @@ mod native {
                     return false;
                 }
             };
+            // Admission focuses on a released probe's subject; one the current audit scope,
+            // filters or inputs do not admit is withdrawn, and admission runs again for the
+            // next candidate or, with none left, for ordinary subjects.
+            if self.is_probe_unplanned(crate::commands::work::host::ProbeScope::Audit, |target| {
+                plan.candidates
+                    .iter()
+                    .any(|candidate| candidate.path == target)
+            }) {
+                self.release_host_probe(
+                    crate::commands::work::host::ProbeScope::Audit,
+                    ProbeRelease::Unplannable,
+                );
+                return !self.result.is_halted();
+            }
             self.result.audit_progress = Some(AuditProgress {
                 before: plan.coverage(),
                 after: None,

@@ -493,6 +493,64 @@ fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects(
     );
 }
 
+#[test]
+fn an_audit_probe_outside_the_current_audit_scope_is_withdrawn() {
+    let behavior =
+        format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
+    let fixture = bounded_audit_fixture("codex", 1, &behavior);
+    configure(&fixture, Some(20), 60);
+    std::fs::write(fixture.root().join("fail"), "").unwrap();
+    let first = run(&fixture, "knowledge", false);
+    assert_eq!(calls(&first), 1, "{first}");
+    std::fs::remove_file(fixture.root().join("fail")).unwrap();
+    let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name() == "inspection-timeouts.json")
+        .unwrap()
+        .into_path();
+    let mut held: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let node = held["entries"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    held["entries"][&node]["failure"]["host"]["profile"] = "retired".into();
+    std::fs::write(&path, serde_json::to_vec(&held).unwrap()).unwrap();
+    // The held concept subject is still current, but the audit no longer admits concepts.
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    let scoped = config.replace("subjects: [concept, document]", "subjects: [document]");
+    assert_ne!(scoped, config, "the fixture configures graph settings");
+    std::fs::write(&fixture.config, scoped).unwrap();
+    let ledger = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/host-answers.json");
+    let probe = || {
+        std::fs::read(&ledger)
+            .ok()
+            .map(|raw| serde_json::from_slice::<serde_json::Value>(&raw).unwrap())
+            .and_then(|ledger| ledger.get("probe").cloned())
+    };
+    let mut released = false;
+    for _ in 0..2 {
+        let report = run(&fixture, "knowledge", false);
+        released |= report["runs"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "host probe");
+        assert_eq!(
+            probe(),
+            None,
+            "a probe the audit cannot admit does not stay released: {report}"
+        );
+    }
+    assert!(released, "the recovery turn released the hold");
+}
+
 fn configure(fixture: &Fixture, calls: Option<usize>, seconds: u64) {
     let calls = calls.map_or_else(|| "null".to_owned(), |calls| calls.to_string());
     let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
