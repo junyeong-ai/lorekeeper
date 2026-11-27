@@ -1368,6 +1368,24 @@ impl<'a> ReviewDependencyIndex<'a> {
         })
     }
 
+    /// The reviews naming the subject owned at `owner` that are unedited synthesis
+    /// publications (`lk_vault::ReviewReport::is_unedited_publication`).
+    fn unedited_publications(&self, owner: &str) -> BTreeSet<String> {
+        let naming = self.by_subject.get(owner).into_iter().flatten();
+        match &self.reports {
+            ReviewReports::Scoped { inventory, .. } => naming
+                .filter(|path| inventory.is_unedited_publication(path) == Some(true))
+                .cloned()
+                .collect(),
+            ReviewReports::Evaluated(reports) => reports
+                .values()
+                .filter(|report| report.is_unedited_publication())
+                .map(|report| report.path.clone())
+                .filter(|path| naming.clone().any(|named| named == path))
+                .collect(),
+        }
+    }
+
     fn dependency(
         &mut self,
         root: &Path,
@@ -2048,12 +2066,15 @@ pub const SYNTHESIS_CANDIDATES_PER_QUERY: usize = 50;
 
 /// Each query's roster for a synthesis: every identity match and the first
 /// `SYNTHESIS_CANDIDATES_PER_QUERY` other pages in search order, one per verified owner and never
-/// the subject. A page reached through several spellings is read through its own address when
+/// the subject or a review of it in `published`, the unedited synthesis publications naming it.
+/// Those are read as the subject's reviews; ranking them here would let a synthesis's own
+/// publication push an unchanged page out of the next synthesis's inputs. A page reached through several spellings is read through its own address when
 /// any query matched that spelling, otherwise through its preferred rostered one.
 /// `owners` caches owner resolution across the concepts of one load.
 fn synthesis_roster(
     root: &Path,
     subject: &Path,
+    published: &BTreeSet<String>,
     queries: &[lk_vault::DiscoveryQuery],
     ranked: &BTreeMap<lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>>,
     owners: &mut BTreeMap<String, PathBuf>,
@@ -2079,7 +2100,10 @@ fn synthesis_roster(
                     owner
                 }
             };
-            if owner == subject || !seen.insert(owner.clone()) {
+            if owner == subject
+                || published.contains(&page_address(&owner))
+                || !seen.insert(owner.clone())
+            {
                 continue;
             }
             if !matched.identity {
@@ -2299,14 +2323,18 @@ fn inputs_from_evidence(
             matches.sort();
             matches.dedup();
             let ranked = match &discovered.ranked {
-                Some(ranked) => Some(synthesis_roster(
-                    root,
-                    &lk_vault::resolve_page_owner(root, &page.path).map_err(error)?,
-                    &plan.queries,
-                    ranked,
-                    &mut owners,
-                    read,
-                )?),
+                Some(ranked) => {
+                    let subject = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
+                    Some(synthesis_roster(
+                        root,
+                        &subject,
+                        &review_index.unedited_publications(&page_address(&subject)),
+                        &plan.queries,
+                        ranked,
+                        &mut owners,
+                        read,
+                    )?)
+                }
                 None => None,
             };
             let selection = selection_plan

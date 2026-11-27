@@ -712,6 +712,8 @@ pub struct ReviewReport {
     pub errors: Vec<String>,
     #[serde(skip)]
     scope: ReviewScope,
+    #[serde(skip)]
+    is_unedited_publication: bool,
 }
 
 impl ReviewReport {
@@ -719,6 +721,13 @@ impl ReviewReport {
     /// Other invalid fields do not erase scope or establish a valid assessment.
     pub fn subjects(&self) -> &[String] {
         &self.scope.subjects
+    }
+
+    /// Whether the page is exactly what a synthesis published: it records a
+    /// `publication_digest` its current content still matches. An edit, or a review recorded
+    /// without that digest, makes it an ordinary review.
+    pub fn is_unedited_publication(&self) -> bool {
+        self.is_unedited_publication
     }
 
     fn classify(&self) -> ReviewEffectiveState {
@@ -1052,6 +1061,7 @@ struct ReviewMetadata {
     errors: Vec<String>,
     scope: ReviewScope,
     linked: Vec<PathBuf>,
+    is_unedited_publication: bool,
 }
 
 /// One evidence page's state as review evaluation compares it, read once per capture.
@@ -1133,6 +1143,15 @@ impl ReviewInventory {
         self.entries.get(path).map(|entry| match entry {
             ReviewEntry::Metadata(metadata) => metadata.scope.subjects.as_slice(),
             ReviewEntry::Evaluated(report) => report.subjects(),
+        })
+    }
+
+    /// Whether the review at `path` is an unedited synthesis publication
+    /// (`ReviewReport::is_unedited_publication`).
+    pub fn is_unedited_publication(&self, path: &str) -> Option<bool> {
+        self.entries.get(path).map(|entry| match entry {
+            ReviewEntry::Metadata(metadata) => metadata.is_unedited_publication,
+            ReviewEntry::Evaluated(report) => report.is_unedited_publication,
         })
     }
 
@@ -1288,6 +1307,7 @@ fn load_review_metadata(
         errors: Vec::new(),
         scope: ReviewScope::default(),
         linked: Vec::new(),
+        is_unedited_publication: false,
     };
     let page = match crate::page_path(root, path)
         .map_err(VaultError::from)
@@ -1320,6 +1340,8 @@ fn load_review_metadata(
             metadata
                 .errors
                 .extend(review.validation_errors(path, &page));
+            metadata.is_unedited_publication =
+                review.publication_digest.as_deref() == Some(publication_digest(&page).as_str());
             metadata.review = Some(review);
         }
     }
@@ -1346,6 +1368,7 @@ fn evaluate_review(
         missing_evidence: Vec::new(),
         errors: metadata.errors.clone(),
         scope: metadata.scope.clone(),
+        is_unedited_publication: metadata.is_unedited_publication,
     };
     if let Some(review) = &metadata.review {
         for citation in &review.evidence {

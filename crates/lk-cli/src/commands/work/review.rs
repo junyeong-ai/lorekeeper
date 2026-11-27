@@ -392,9 +392,12 @@ fn open_naming(
         .collect::<Vec<_>>();
     let mut open = Vec::new();
     for path in naming {
-        let Some(review) = inventory
-            .load_report(&path)
-            .and_then(|report| report.review)
+        let Some(report) = inventory.load_report(&path) else {
+            continue;
+        };
+        let is_unedited_publication = report.is_unedited_publication();
+        let Some(review) = report
+            .review
             .filter(|review| review.status == lk_vault::ReviewStatus::Open)
         else {
             continue;
@@ -402,10 +405,6 @@ fn open_naming(
         let text =
             std::fs::read_to_string(lk_vault::page_path(root, Path::new(&path)).into_diagnostic()?)
                 .into_diagnostic()?;
-        let is_unedited_publication = review.publication_digest.as_deref().is_some_and(|digest| {
-            lk_vault::parse_page(&text)
-                .is_ok_and(|page| lk_vault::publication_digest(&page) == digest)
-        });
         open.push(NamingReview {
             revision: lk_core::concept::file_revision(&text),
             path,

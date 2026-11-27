@@ -2310,6 +2310,92 @@ mod tests {
     }
 
     #[test]
+    fn a_review_a_synthesis_published_takes_no_place_in_the_next_synthesis_roster() {
+        let (directory, config, tasks, candidates) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let task = &tasks[0];
+        let path = task.target.vault_path.as_str();
+        let limit = lk_graph::audit::SYNTHESIS_CANDIDATES_PER_QUERY;
+        let discovered = (0..limit)
+            .map(|index| format!("wiki/documents/match-{index:03}.md"))
+            .collect::<Vec<_>>();
+        for (index, address) in discovered.iter().enumerate() {
+            write(
+                &root,
+                address,
+                &format!(
+                    "---\ntype: document\ntitle: Match {index}\n---\nScreen candidate {index}.\n"
+                ),
+            );
+        }
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let raw = std::fs::read_to_string(root.join(path)).unwrap();
+        lk_graph::audit::record_discovery(
+            &lk_vault::MutationSession::acquire(&root).unwrap(),
+            &config.vault.dirs,
+            &pages,
+            lk_graph::audit::AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(&raw),
+                queries: vec![lk_core::discovery::DiscoveryQuery {
+                    query: "screen candidate".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let read_matches = |prepared: &Prepared| {
+            discovered
+                .iter()
+                .filter(|address| {
+                    prepared
+                        .resources
+                        .iter()
+                        .any(|resource| &resource.address == *address)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read_matches(&task_with_audit(&root, &config, &task.task_id, None).unwrap()),
+            discovered
+        );
+
+        // The review's title matches the query, so it ranks ahead of every page in the roster.
+        let review = "wiki/explorations/published.md";
+        let metadata = json!({"status":"open","kind":"evidence-gap","subjects":[path],
+            "evidence":[{"path":"daily/source.md","revision":candidates[0].evidence[0].revision}],
+            "resolution":null});
+        let render = |metadata: &serde_json::Value, extra: &str| {
+            format!(
+                "---\ntype: exploration\ntitle: Screen candidate gap\nreview: {metadata}\n---\nAn open question.{extra}\n"
+            )
+        };
+        let mut published = metadata.clone();
+        published["publication_digest"] =
+            lk_vault::publication_digest(&lk_vault::parse_page(&render(&metadata, "")).unwrap())
+                .into();
+        write(&root, review, &render(&published, ""));
+        let prepared = task_with_audit(&root, &config, &task.task_id, None).unwrap();
+        assert_eq!(read_matches(&prepared), discovered);
+        assert!(
+            prepared
+                .resources
+                .iter()
+                .any(|resource| resource.address == review),
+            "the publication is still read as the concept's review"
+        );
+
+        // Edited, it is an ordinary input and ranks like any other page.
+        write(&root, review, &render(&published, " Edited."));
+        assert_eq!(
+            read_matches(&task_with_audit(&root, &config, &task.task_id, None).unwrap()),
+            discovered[..limit - 1]
+        );
+    }
+
+    #[test]
     fn synthesis_reads_a_fixed_ranked_roster_and_only_its_own_audit_records() {
         let (directory, config, tasks, _) = synthesis_batch_fixture();
         let root = directory.path().canonicalize().unwrap();

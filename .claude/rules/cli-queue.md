@@ -182,7 +182,9 @@ paths:
   `max_query_candidates`, so the roster does not depend on the execution profile; byte
   limits and the other configuration still shape the request and its Work. A page matched
   through several spellings is read through its own address when a query matched it.
-  It never waits for audit screening decisions. Its context-only pages come from the
+  An unedited synthesis publication naming the concept takes no roster place: it is read
+  as the concept's review, and ranking it would let it evict an unchanged page from the
+  inputs the review loop guard compares. It never waits for audit screening decisions. Its context-only pages come from the
   request's context snapshot (cli-semantic-work.md).
 - A synthesis request answers the citation set it was made for. Drafting, preparation
   and publication refuse it (`citations-changed`) once the concept's graph citations
