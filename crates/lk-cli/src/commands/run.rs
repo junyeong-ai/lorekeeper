@@ -1238,6 +1238,44 @@ mod native {
             }
         }
 
+        /// Retires `scope`'s released probe once its request settled, by whichever profile
+        /// answered it: its hold is no longer pending, so it neither goes first nor holds waves
+        /// to one call. Returns whether a released probe remains.
+        fn retire_settled_probe(&mut self, scope: crate::commands::work::host::ProbeScope) -> bool {
+            use crate::commands::work::host;
+            let Some(released) = self
+                .host_probes
+                .scope(scope)
+                .as_ref()
+                .and_then(|probe| probe.released.clone())
+            else {
+                return false;
+            };
+            let root = self.root.clone();
+            let pending = match host::pending_holds(&root) {
+                Ok(holds) => holds.into_iter().any(|hold| {
+                    hold.identity == released.identity
+                        && hold.host.as_ref().map(|host| host.at)
+                            == released.host.as_ref().map(|host| host.at)
+                }),
+                Err(error) => {
+                    self.failure("host probe", error);
+                    return false;
+                }
+            };
+            if pending {
+                return true;
+            }
+            if let Some(probe) = self.host_probes.scope(scope) {
+                probe.released = None;
+                probe.target = None;
+            }
+            if let Err(error) = host::record_probe(&root, None) {
+                self.failure("host probe", error);
+            }
+            false
+        }
+
         /// The target of `scope`'s released probe while its host has given no outcome in this
         /// run: the drain sends it before other work.
         fn probe_target(
@@ -1261,6 +1299,9 @@ mod native {
             scope: crate::commands::work::host::ProbeScope,
             planned: impl Fn(&str) -> bool,
         ) -> bool {
+            if !self.retire_settled_probe(scope) {
+                return false;
+            }
             let Some(probe) = self.host_probes.scope(scope).as_ref() else {
                 return false;
             };

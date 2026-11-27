@@ -526,8 +526,16 @@ fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects(
         let report = run(&fixture, "knowledge", false);
         assert_eq!(calls(&report), 1, "{report}");
     }
+    // The probe answered through the current profile while the retired one never did: the
+    // settled request is not inherited as a probe again.
+    let ledger = fixture
+        .root()
+        .join("vault/.lorekeeper/queue/host-answers.json");
     write_audit_concept(&fixture, "after");
     run(&fixture, "knowledge", false);
+    let answers: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&ledger).unwrap()).unwrap();
+    assert!(answers.get("probe").is_none(), "{answers}");
     assert!(
         bounded_calls(&fixture)
             .iter()

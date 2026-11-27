@@ -214,7 +214,10 @@ paths:
   sending it, while its hold still stands released: the same request, failed at the same
   time (neither settled nor renewed since), whose host has not answered since. It becomes
   its drain's released probe, so it goes first or is withdrawn like one released now;
-  otherwise the ledger's probe is retired when the run takes its lease. A probe that
+  otherwise the ledger's probe is retired when the run takes its lease. A request settles
+  when its result is recorded, whichever profile answered it: a settled node's retained
+  attempt is no longer a pending hold, and a drain retires a released probe whose hold is no
+  longer pending. A probe that
   fails without an answer renews its failure time and stays pending, so an outage costs at
   most one unanswered call per host per run and exhausts nothing. The renewed failure counts
   its consecutive failed probes (`HostEnd.probe_failures`), and the hold is a probe

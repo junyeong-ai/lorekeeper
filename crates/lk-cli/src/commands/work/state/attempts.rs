@@ -447,6 +447,11 @@ pub(in crate::commands) fn pending_holds(root: &Path) -> miette::Result<Vec<Pend
             _ => continue,
         };
         for (node_id, engine, host) in pending {
+            // A node whose observation is recorded settled its request, whichever host
+            // answered it; its retained attempt releases nothing.
+            if read_optional(root, &super::output_path(work_id, &node_id)?)?.is_some() {
+                continue;
+            }
             holds.push(PendingHold {
                 identity: HoldIdentity::Inspection {
                     work_id: work_id.into(),
