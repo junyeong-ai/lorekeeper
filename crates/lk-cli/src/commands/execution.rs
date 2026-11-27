@@ -105,6 +105,9 @@ struct StderrTail {
     window: std::collections::VecDeque<u8>,
     /// Raw bytes of the line still being written.
     pending: Vec<u8>,
+    /// Whether the rest of the current line is dropped because its start was: a fragment
+    /// after the cut could be the suffix of a credential whose prefix fell before it.
+    discarding: bool,
     credentials: lk_core::markdown::CredentialStream,
 }
 
@@ -113,7 +116,14 @@ impl StderrTail {
     const WINDOW_BYTES: usize = 16 * 1024;
     const MAX_BYTES: usize = 2048;
 
-    fn push(&mut self, bytes: &[u8]) {
+    fn push(&mut self, mut bytes: &[u8]) {
+        if self.discarding {
+            let Some(end) = bytes.iter().position(|byte| matches!(byte, b'\n' | b'\r')) else {
+                return;
+            };
+            self.discarding = false;
+            bytes = &bytes[end + 1..];
+        }
         self.pending.extend_from_slice(bytes);
         while let Some(end) = self
             .pending
@@ -124,7 +134,8 @@ impl StderrTail {
             self.keep(&line[..end]);
         }
         // A line longer than the window is kept up to its last whitespace, since a credential
-        // never spans one; an unbroken run that long is dropped rather than cut inside a word.
+        // never spans one; an unbroken run that long is dropped through its line's end rather
+        // than cut inside a word.
         if self.pending.len() > Self::WINDOW_BYTES {
             match self
                 .pending
@@ -137,6 +148,7 @@ impl StderrTail {
                 }
                 None => {
                     self.pending.clear();
+                    self.discarding = true;
                     self.keep(b"[unbroken output omitted]");
                 }
             }
@@ -1564,6 +1576,21 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         ]);
         assert!(!leaks(&unfinished), "{unfinished:?}");
         assert_eq!(unfinished.as_deref(), Some("[private key block]"));
+        // A minified line that overflows inside a token drops the token's suffix with the
+        // rest of the line, however the reads are split.
+        let minified = [
+            b"{\"x\":\"".as_slice(),
+            &vec![b'a'; StderrTail::WINDOW_BYTES - 7],
+            b"gh",
+        ]
+        .concat();
+        let rest = format!("{}\",\"y\":1}}\nnext line\n", &token[2..]);
+        let straddled = render(&[&minified, rest.as_bytes()]);
+        assert!(!leaks(&straddled), "{straddled:?}");
+        assert_eq!(
+            straddled.as_deref(),
+            Some("[unbroken output omitted] next line")
+        );
         // A control character inside a token cannot hide it from masking.
         let split = format!("auth {}\u{7}{} failed\n", &token[..6], &token[6..]);
         let joined = render(&[split.as_bytes()]);
