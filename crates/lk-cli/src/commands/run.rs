@@ -7863,19 +7863,32 @@ mod native {
                         .read_control()
                         .check()
                         .map_err(lk_graph::GraphError::from)?;
-                    let hold = crate::commands::work::audit_processing_hold_controlled(
+                    let reason = match crate::commands::work::audit_processing_hold_controlled(
                         &self.root,
                         &self.config,
                         &self.config_revision,
                         candidate,
                         self.supervisor.read_control(),
-                    )
-                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    ) {
+                        Ok(hold) => {
+                            hold.map(crate::commands::work::AuditProcessingHold::into_reason)
+                        }
+                        // A page a writer edited after admission derived the subject: it waits
+                        // for a later run.
+                        Err(error)
+                            if error
+                                .downcast_ref::<crate::commands::work::SourceChanged>()
+                                .is_some() =>
+                        {
+                            Some(format!("its inputs changed during admission: {error}"))
+                        }
+                        Err(error) => return Err(lk_graph::GraphError::Io(error.to_string())),
+                    };
                     self.supervisor
                         .read_control()
                         .check()
                         .map_err(lk_graph::GraphError::from)?;
-                    let Some(hold) = hold else {
+                    let Some(reason) = reason else {
                         return Ok(true);
                     };
                     processing_deferred_paths.insert(candidate.path.clone());
@@ -7885,7 +7898,7 @@ mod native {
                             path: candidate.path.clone(),
                             file_revision: candidate.file_revision.clone(),
                             input_revision: candidate.input_revision.clone(),
-                            reasons: vec![hold.into_reason()],
+                            reasons: vec![reason],
                         });
                     }
                     Ok(false)

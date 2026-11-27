@@ -331,7 +331,10 @@ paths:
   it orders only equal risk priorities.
   During automatic admission, check exact current Work holds only along the available
   planned prefix needed to fill the configured batch. Preserve held order and paid
-  bytes; all-held is deferred, while corrupt or unreadable state is fatal. No Work-ID
+  bytes; all-held is deferred, while corrupt or unreadable state is fatal. A subject whose
+  pages a writer edited after admission derived it is typed drift (`work::SourceChanged`,
+  also for the screening packet the check prepares) and is deferred for the run; every
+  caller of the processing-hold check maps it so (admission defers, adoption refuses). No Work-ID
   shortcut, persistent hold index or capture reuse across a host/wait boundary. Recheck
   readiness under those claims before recording, and verify selected receipts after
   final reconciliation even when unrelated backlog leaves the overall job incomplete.

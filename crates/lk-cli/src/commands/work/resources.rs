@@ -454,6 +454,12 @@ impl std::fmt::Display for SourceChanged {
     }
 }
 
+impl SourceChanged {
+    pub(in crate::commands) fn new(detail: impl Into<String>) -> Self {
+        Self(detail.into())
+    }
+}
+
 impl std::error::Error for SourceChanged {}
 impl miette::Diagnostic for SourceChanged {}
 
@@ -2533,6 +2539,60 @@ mod tests {
             &lk_vault::ReadControl::default(),
         ) else {
             panic!("an edited subject captures nothing current");
+        };
+        assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
+    }
+
+    #[test]
+    fn a_candidate_edited_before_the_processing_check_is_typed_source_drift() {
+        let (directory, config, _, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let path = "wiki/concepts/a.md";
+        let candidate_page = "wiki/documents/match-000.md";
+        write(
+            &root,
+            candidate_page,
+            "---\ntype: document\ntitle: Match 0\n---\nScreen candidate 0.\n",
+        );
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let raw = std::fs::read_to_string(root.join(path)).unwrap();
+        lk_graph::audit::record_discovery(
+            &lk_vault::MutationSession::acquire(&root).unwrap(),
+            &config.vault.dirs,
+            &pages,
+            lk_graph::audit::AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(&raw),
+                queries: vec![lk_core::discovery::DiscoveryQuery {
+                    query: "screen candidate".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap();
+        let read = lk_vault::ReadControl::default();
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let candidate = lk_graph::audit::load_selected_inputs_controlled(
+            &root,
+            &config.vault.dirs,
+            &pages,
+            &[path.to_owned()],
+            &read,
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+        // Its candidate is unscreened, so the check prepares the packet it would send.
+        write(
+            &root,
+            candidate_page,
+            "---\ntype: document\ntitle: Match 0\n---\nScreen candidate 0, corrected.\n",
+        );
+        let Err(error) = crate::commands::work::audit_processing_hold_controlled(
+            &root, &config, "test", &candidate, &read,
+        ) else {
+            panic!("an edited candidate prepares no current packet");
         };
         assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
     }

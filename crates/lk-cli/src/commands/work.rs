@@ -2768,6 +2768,14 @@ pub(super) fn audit_processing_hold_controlled(
                 Err(error @ lk_graph::GraphError::AuditScreeningCapacity { .. }) => {
                     return Ok(Some(AuditProcessingHold::Capacity(error.to_string())));
                 }
+                // A page edited since the candidate was derived: drift its callers can wait out.
+                Err(
+                    error @ (lk_graph::GraphError::AuditScreeningChanged
+                    | lk_graph::GraphError::AuditInputChanged(_)
+                    | lk_graph::GraphError::AuditSubjectRemoved(_)),
+                ) => {
+                    return Err(miette::Report::new(SourceChanged::new(error.to_string())));
+                }
                 Err(error) => return Err(miette::miette!("{error}")),
             };
             if let Some(admission) = packet.admission {

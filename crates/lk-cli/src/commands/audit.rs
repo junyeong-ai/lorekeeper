@@ -69,8 +69,14 @@ pub(super) fn adopt_discovery(
                 candidate,
                 &read,
             )
-            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?
-            {
+            .map_err(|error| {
+                // A page edited since the subject was derived is its adoption's drift.
+                if error.downcast_ref::<super::work::SourceChanged>().is_some() {
+                    lk_graph::GraphError::AuditScreeningChanged
+                } else {
+                    lk_graph::GraphError::Io(error.to_string())
+                }
+            })? {
                 Some(AuditProcessingHold::Action(reason)) => {
                     Err(lk_graph::GraphError::Io(format!(
                         "resolve the current processing action before discovery adoption: {reason}"
