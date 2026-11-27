@@ -453,6 +453,8 @@ impl Runner<'_> {
             let mut actions = lk_vault::MutationPlan::default();
             let mut held = 0;
             let mut completed = Vec::new();
+            // Whether a judgment answered inputs that changed while its host ran.
+            let mut stale = false;
             for (((subject, indices), candidate), judgment) in
                 subjects.iter().zip(&slots).zip(fresh).zip(judgments)
             {
@@ -471,6 +473,7 @@ impl Runner<'_> {
                     }
                 };
                 if !subject.same_input(&fresh) {
+                    stale = true;
                     for index in indices {
                         if !self.audit_replans.try_spend(&bindings[*index]) {
                             self.deferred("audit inputs unstable", &batch[*index].path);
@@ -550,6 +553,9 @@ impl Runner<'_> {
             }
             drop(queue_claim);
             self.result.work_telemetry.retained_progress.action_receipts += held;
+            if stale {
+                metrics.outcome = WorkOutcome::InputsChanged;
+            }
             if held > 0 {
                 metrics.outcome = WorkOutcome::NeedsAction;
             }

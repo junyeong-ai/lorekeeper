@@ -1557,7 +1557,9 @@ pub(super) enum ScreeningResponse {
 pub(super) enum ScreeningRecordOutcome {
     /// The number of candidate decisions this reply recorded.
     Recorded(usize),
-    Deferred(String),
+    /// The reply did not cover its candidates or gave unusable reasons; it was not adopted and
+    /// is held as the packet's semantic rejection.
+    Rejected(String),
     InvocationFailed(String),
 }
 
@@ -1614,7 +1616,7 @@ pub(super) fn record_screenings(
                         let reason = rejection.to_string();
                         let plan = selection::plan_rejection(root, &issued(&request)?, rejection)?;
                         session.apply(plan).into_diagnostic()?;
-                        Ok(ScreeningRecordOutcome::Deferred(reason))
+                        Ok(ScreeningRecordOutcome::Rejected(reason))
                     }
                 }
             })();

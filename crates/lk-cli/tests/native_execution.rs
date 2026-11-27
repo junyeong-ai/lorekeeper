@@ -8465,7 +8465,8 @@ fn screening_writer_wait_discards_prepared_requests_and_recaptures_before_invoca
             .as_array()
             .unwrap()
             .iter()
-            .any(|step| step["outcome"] == "rejected" && step["agent_duration_ms"].is_null())
+            .any(|step| step["outcome"] == "unsent" && step["agent_duration_ms"].is_null()),
+        "a request the writer wait discarded was never sent: {report}"
     );
     for entry in std::fs::read_dir(fixture.root()).unwrap() {
         let entry = entry.unwrap();

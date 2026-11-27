@@ -87,7 +87,7 @@ ledger.
 | `agent_duration_ms` | Supervised invocation attempt wall time, including a failed or cancelled attempt; never server inference time |
 | `revalidation_record_duration_ms` | Fresh input validation and recording together |
 | `verification_duration_ms` | Finalizer completion and sealed-result verification |
-| `outcome` | `recorded`, `refined`, `staged`, `restaged`, `already-complete`, `rejected` (an unusable reply, not adopted), `inputs-changed` (inputs changed before the reply or preparation could be used; replanned), `needs-action` (a stated operator action retained as a receipt), `review-deferred` (a synthesis review proposal retained for a later run), `failed`, `cancelled`, `yielded` or `unsettled` (ended before deciding; a stage record names why) |
+| `outcome` | `recorded`, `refined`, `staged`, `restaged`, `already-complete`, `rejected` (an unusable reply, not adopted), `unsent` (prepared but never sent: an unavailable host, spent calls, or a halt or writer wait that discarded the capture; the work is unchanged), `inputs-changed` (inputs changed before the reply or preparation could be used; the reply is discarded and the work replanned, in the next run when the run's configuration changed), `needs-action` (a stated operator action retained as a receipt), `review-deferred` (a synthesis whose review proposal this run could not publish, its target's one review per run spent; nothing is kept and a later run drafts both again), `failed`, `cancelled`, `yielded` or `unsettled` (ended before deciding; a stage record names why) |
 
 ## Finalization admissions and input capacity
 

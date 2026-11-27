@@ -141,12 +141,19 @@ mod native {
         AlreadyComplete,
         /// The reply was unusable for its request and was not adopted.
         Rejected,
-        /// The step's inputs changed before its reply or preparation could be used; the work
-        /// is replanned against current inputs.
+        /// The request was prepared but never sent: its host was unavailable, the run's calls
+        /// were spent, or a halt or writer wait discarded its capture, as a stage record names.
+        /// Its work is unchanged and still pending.
+        Unsent,
+        /// The step's inputs changed before its reply or preparation could be used, and the
+        /// reply was discarded: the work is replanned against current inputs, in the next run
+        /// when the run's own configuration changed, which stops it.
         InputsChanged,
         /// The reply or its preparation stated a needed operator action, retained as a receipt.
         NeedsAction,
-        /// A synthesis review proposal was retained for a later run instead of published.
+        /// The synthesis carried a review proposal this run could not publish, its target's one
+        /// review per run being spent, so the target was deferred. Nothing of the reply is kept:
+        /// a later run drafts the synthesis, and its proposal, again.
         ReviewDeferred,
         Failed,
         Cancelled,
@@ -2421,6 +2428,7 @@ mod native {
             }
             if let Err(error) = self.prepare_agent(metrics).await {
                 if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                    metrics.outcome = WorkOutcome::Unsent;
                     return Some(ObservationReply::HostUnavailable(unavailable.to_string()));
                 }
                 if self.result.cancelled {
@@ -3262,7 +3270,7 @@ mod native {
                         self.inspection_deferred
                             .insert(turn.work_id.clone(), reason.clone());
                         self.deferred("host unavailable", format!("{subject}: {reason}"));
-                        turn.metrics.outcome = WorkOutcome::Rejected;
+                        turn.metrics.outcome = WorkOutcome::Unsent;
                         self.record_work_step(turn.metrics);
                         continue;
                     }
@@ -3418,7 +3426,7 @@ mod native {
                     turn.metrics.outcome = if cancelled {
                         WorkOutcome::Cancelled
                     } else {
-                        WorkOutcome::Rejected
+                        WorkOutcome::InputsChanged
                     };
                     self.record_work_step(turn.metrics);
                     continue;
@@ -3725,6 +3733,7 @@ mod native {
             metrics.channel = HostChannel::Result;
             if let Err(error) = self.prepare_agent(metrics).await {
                 if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
+                    metrics.outcome = WorkOutcome::Unsent;
                     return Some(ResultReply::HostUnavailable(unavailable.to_string()));
                 }
                 self.agent_preflight_failure("native result host", error);
@@ -5214,7 +5223,7 @@ mod native {
             }
             if self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
             {
-                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Unsent);
                 return false;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
@@ -5244,7 +5253,7 @@ mod native {
                         self.deferred("host unavailable", format!("{target}: {reason}"));
                         self.record_uninvoked_queue_reads(
                             vec![(target, turn)],
-                            WorkOutcome::Rejected,
+                            WorkOutcome::Unsent,
                         );
                         unavailable_hosts = true;
                         continue;
@@ -5293,7 +5302,7 @@ mod native {
                 return true;
             }
             if !self.admits_calls(requests.len()) {
-                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                self.record_uninvoked_queue_reads(turns, WorkOutcome::Unsent);
                 return false;
             }
             let remaining_calls = self.remaining_calls(budget);
@@ -5305,13 +5314,13 @@ mod native {
                 };
                 if waited {
                     self.refresh_queue_inputs();
-                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Unsent);
                     return true;
                 }
                 // The calls are reserved before the cursor passes their targets, so a wave
                 // the budget refuses keeps its place.
                 if !self.reserve_calls(requests.len()) {
-                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Unsent);
                     return false;
                 }
                 let bindings = turns
@@ -5502,7 +5511,7 @@ mod native {
                     step.outcome = if cancelled {
                         WorkOutcome::Cancelled
                     } else {
-                        WorkOutcome::Rejected
+                        WorkOutcome::InputsChanged
                     };
                     None
                 } else {
@@ -5660,7 +5669,7 @@ mod native {
                                     self.queue_admitted.clear();
                                     self.deferred("candidate invocation held", reason);
                                 }
-                                Ok(crate::commands::work::ScreeningRecordOutcome::Deferred(
+                                Ok(crate::commands::work::ScreeningRecordOutcome::Rejected(
                                     reason,
                                 )) => {
                                     self.result.work_telemetry.retained_progress.action_receipts +=
@@ -7404,7 +7413,7 @@ mod native {
                         Some(pages)
                     }
                     Err(lk_graph::GraphError::AuditScreeningChanged) => {
-                        metrics.outcome = WorkOutcome::Rejected;
+                        metrics.outcome = WorkOutcome::InputsChanged;
                         self.defer_audit_screening(
                             &candidate,
                             "assigned candidate inputs changed; discard the old judgment".into(),

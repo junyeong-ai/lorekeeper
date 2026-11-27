@@ -110,7 +110,7 @@ impl Runner<'_> {
                 true
             }
             Ok(false) => {
-                metrics.outcome = WorkOutcome::Rejected;
+                metrics.outcome = WorkOutcome::InputsChanged;
                 self.deferred(
                     "audit screening changed",
                     "the returned failure no longer names an unrecorded current packet",
@@ -331,7 +331,7 @@ impl Runner<'_> {
         match subject.is_current(session.root(), self.supervisor.read_control()) {
             Ok(true) => {}
             Ok(false) => {
-                metrics.outcome = WorkOutcome::Rejected;
+                metrics.outcome = WorkOutcome::InputsChanged;
                 self.record_work_step(metrics);
                 self.queue_replan = QueueReplan::Invalidate;
                 return true;
