@@ -2543,6 +2543,7 @@ mod tests {
         assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_candidate_edited_before_the_processing_check_is_typed_source_drift() {
         let (directory, config, _, _) = synthesis_batch_fixture();
