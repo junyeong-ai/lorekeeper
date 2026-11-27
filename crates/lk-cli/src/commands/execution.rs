@@ -95,14 +95,17 @@ const KILL_REAP_DEADLINE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
 const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
-/// The bounded end of a child's stderr. A raw window much larger than the reported tail is
-/// kept, so credentials are masked over complete text before the report is cut to size.
+/// The bounded end of a child's stderr. Each line is normalized and masked as it arrives, with
+/// private key block state carried across lines, so the retained window only ever holds
+/// sanitized text, however the stream is cut.
 #[cfg(unix)]
 #[derive(Default)]
 struct StderrTail {
+    /// Sanitized lines, each ending in a newline, at most `WINDOW_BYTES`.
     window: std::collections::VecDeque<u8>,
-    /// Whether earlier output fell out of the window, leaving its start a fragment.
-    cut: bool,
+    /// Raw bytes of the line still being written.
+    pending: Vec<u8>,
+    credentials: lk_core::markdown::CredentialStream,
 }
 
 #[cfg(unix)]
@@ -111,35 +114,57 @@ impl StderrTail {
     const MAX_BYTES: usize = 2048;
 
     fn push(&mut self, bytes: &[u8]) {
-        self.window.extend(bytes);
+        self.pending.extend_from_slice(bytes);
+        while let Some(end) = self
+            .pending
+            .iter()
+            .position(|byte| matches!(byte, b'\n' | b'\r'))
+        {
+            let line = self.pending.drain(..=end).collect::<Vec<_>>();
+            self.keep(&line[..end]);
+        }
+        // A line longer than the window is kept up to its last whitespace, since a credential
+        // never spans one; an unbroken run that long is dropped rather than cut inside a word.
+        if self.pending.len() > Self::WINDOW_BYTES {
+            match self
+                .pending
+                .iter()
+                .rposition(|byte| matches!(byte, b' ' | b'\t'))
+            {
+                Some(space) => {
+                    let line = self.pending.drain(..=space).collect::<Vec<_>>();
+                    self.keep(&line[..space]);
+                }
+                None => {
+                    self.pending.clear();
+                    self.keep(b"[unbroken output omitted]");
+                }
+            }
+        }
+    }
+
+    fn keep(&mut self, line: &[u8]) {
+        let masked = self.credentials.mask_line(&normalize(line));
+        self.window.extend(masked.as_bytes());
+        self.window.push_back(b'\n');
         let excess = self.window.len().saturating_sub(Self::WINDOW_BYTES);
-        self.cut |= excess > 0;
         self.window.drain(..excess);
     }
 
-    /// The tail as one line of at most `MAX_BYTES`. Control characters are normalized first
-    /// (carriage returns end lines, tabs become spaces, others are dropped), so no removal
-    /// can join text into a credential after masking; credentials the shared scanner names
-    /// are then masked over the whole window, a cut-off start included; only then is the
-    /// text flattened and its last `MAX_BYTES` kept from a word boundary, so no fragment of
-    /// a word, masked or not, opens the report.
+    /// The tail as one line of at most `MAX_BYTES`, kept from a word boundary. The unfinished
+    /// last line is masked like the rest, and omitted inside a private key block.
     fn render(&self) -> Option<String> {
-        let bytes = self.window.iter().copied().collect::<Vec<_>>();
-        let normalized = String::from_utf8_lossy(&bytes)
-            .chars()
-            .filter_map(|character| match character {
-                '\n' | '\r' => Some('\n'),
-                '\t' => Some(' '),
-                character if character.is_control() => None,
-                character => Some(character),
-            })
-            .collect::<String>();
-        let masked = if self.cut {
-            lk_core::markdown::mask_credentials_after_cut(&normalized)
-        } else {
-            lk_core::markdown::mask_credentials(&normalized)
-        };
-        let text = masked.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut text =
+            String::from_utf8_lossy(&self.window.iter().copied().collect::<Vec<_>>()).into_owned();
+        if !self.pending.is_empty() && !self.credentials.is_in_key() {
+            text.push_str(
+                &self
+                    .credentials
+                    .clone()
+                    .mask_line(&normalize(&self.pending)),
+            );
+        }
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let text = match text.len().checked_sub(Self::MAX_BYTES) {
             Some(excess) if excess > 0 => {
                 let start = (excess..=text.len())
@@ -154,6 +179,20 @@ impl StderrTail {
         };
         (!text.is_empty()).then_some(text)
     }
+}
+
+/// One raw stderr line as text with tabs as spaces and other control characters dropped, so
+/// no removal after masking can join text into a credential.
+#[cfg(unix)]
+fn normalize(line: &[u8]) -> String {
+    String::from_utf8_lossy(line)
+        .chars()
+        .filter_map(|character| match character {
+            '\t' => Some(' '),
+            character if character.is_control() => None,
+            character => Some(character),
+        })
+        .collect()
 }
 
 /// Where a supervised child's own diagnostics go: its stderr and any stdout not captured.
@@ -1516,6 +1555,15 @@ Path(os.environ['TEST_ROOT'],'received.json').write_text(json.dumps(request,ensu
         ]);
         assert!(!leaks(&key), "{key:?}");
         assert_eq!(key.as_deref(), Some("[private key block] key rejected"));
+        // A host that stops inside a key body larger than the window leaves only the
+        // block's description, never its body.
+        let unfinished = render(&[
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n",
+            body.as_bytes(),
+            b"QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=",
+        ]);
+        assert!(!leaks(&unfinished), "{unfinished:?}");
+        assert_eq!(unfinished.as_deref(), Some("[private key block]"));
         // A control character inside a token cannot hide it from masking.
         let split = format!("auth {}\u{7}{} failed\n", &token[..6], &token[6..]);
         let joined = render(&[split.as_bytes()]);
