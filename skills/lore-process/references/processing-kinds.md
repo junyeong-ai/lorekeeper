@@ -22,7 +22,9 @@ If `input.focus` is present, it is the source's natural-language relevance
 criterion. Treat everything outside that focus as off-topic and exclude it:
 for `summarize`, cover only matching content; for `extract-concepts`, extract
 concepts ONLY from items matching the focus and skip off-topic items entirely
-(create no concepts for them). This is how a broad source (e.g. a news
+(create no concepts for them); for `refine-events`, keep an off-focus event's
+`### heading` and `🔗` link and state in one sentence that it is outside the source's
+focus, which completes that event without summarizing it. This is how a broad source (e.g. a news
 aggregator that also surfaces human-interest or politics) contributes focused
 knowledge without polluting the graph. No `focus` → no filtering.
 
@@ -87,7 +89,9 @@ Rewrite the raw event bodies under `target.anchor` (e.g. `## Key Events` or
 `## Key Messages`, localized per AGENTS.md) into refined knowledge in
 `input.locale` language.
 
-For EACH `### event heading` in the section:
+For EACH `### event heading` in the section that matches `input.focus` (every heading
+when there is no focus; an off-focus event takes the one-sentence body the relevance focus
+rule gives it):
 
 1. Replace the raw body with a knowledge summary, usually 2-5 sentences.
 2. Cover what it is, why it matters, and key details/decisions. Preserve definitions, methods,
@@ -163,7 +167,8 @@ page authored-revision contract. Mixed page/event citations require both kinds o
    a concept page is what the vault observed, not what is generally true.
 
    An unsupported previous claim may be mistaken or may have lost its citation.
-   Remove it from factual synthesis without declaring it false. Keep routine
+   Remove it from factual synthesis without declaring it false; that completes the
+   synthesis, never needs-action. Keep routine
    removals in the processing report, not as recurring editorial notes in the
    concept. If losing a cause, remedy or decision would materially change how
    someone uses the knowledge, return an evidence-gap review proposal under the
