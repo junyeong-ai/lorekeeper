@@ -2402,9 +2402,6 @@ mod native {
                 }
                 return None;
             }
-            if !self.reserve_calls(1) {
-                return None;
-            }
             let started_at = Instant::now();
             let outcome = self
                 .supervisor
@@ -2878,8 +2875,8 @@ mod native {
 
         /// Whether `count` calls would be admitted now: the configuration, call limit,
         /// duration, cancellation and automation allowance checks `reserve_calls` makes,
-        /// without recording a reservation. A turn's cursor is reserved only once this passes,
-        /// so a turn the budget or duration refuses keeps its place.
+        /// without recording a reservation: a cheap check before waiting for the scheduling
+        /// claim. The calls are reserved under that claim before any cursor is written.
         fn admits_calls(&mut self, count: usize) -> bool {
             if !self.configuration_is_current() || !self.call_limit_available() {
                 return false;
@@ -2953,8 +2950,10 @@ mod native {
             );
         }
 
-        /// Reserves the pending single turn, a queue turn or an audit subject, once its call
-        /// would be admitted; the reserved call follows.
+        /// Reserves the pending single turn's call and then its place, a queue turn or an audit
+        /// subject. The call is reserved under the scheduling claim, after any wait for it, and
+        /// the cursor is written only once the call was reserved, so a turn the budget,
+        /// duration or cancellation refuses keeps its place.
         async fn reserve_turn(&mut self) -> bool {
             if !self.admits_calls(1) {
                 return false;
@@ -2963,6 +2962,9 @@ mod native {
                 let Some((session, _)) = self.mutation_session("audit scheduling").await else {
                     return false;
                 };
+                if !self.reserve_calls(1) {
+                    return false;
+                }
                 if let Err(error) = scheduler::reserve_in_session(
                     &session,
                     scheduler::Stage::Audit,
@@ -2974,7 +2976,7 @@ mod native {
                 return true;
             }
             let Some(turn) = self.queue_turn.take() else {
-                return true;
+                return self.reserve_calls(1);
             };
             self.reserved_targets = turn.targets.clone();
             let Some((session, waited)) = self.mutation_session("queue scheduling").await else {
@@ -2982,6 +2984,9 @@ mod native {
             };
             if waited {
                 self.refresh_queue_inputs();
+                return false;
+            }
+            if !self.reserve_calls(1) {
                 return false;
             }
             let continuation = turn.binding.as_ref().is_some_and(|binding| {
@@ -3252,6 +3257,12 @@ mod native {
                         }
                     }
                 }
+                // The calls are reserved before the cursor passes their subjects, so a wave
+                // refused after waiting for the claim keeps its place.
+                if !self.reserve_calls(requests.len()) {
+                    self.record_uninvoked_observations(turns);
+                    return Some(false);
+                }
                 if let Err(error) = scheduler::reserve_in_session(
                     &session,
                     scheduler::Stage::Audit,
@@ -3260,10 +3271,6 @@ mod native {
                 ) {
                     return Some(self.failure("bounded work scheduling", error));
                 }
-            }
-            if !self.reserve_calls(requests.len()) {
-                self.record_uninvoked_observations(turns);
-                return Some(false);
             }
             let attempts = self
                 .supervisor
@@ -3662,9 +3669,6 @@ mod native {
             self.configure_child(&mut agent.command);
             agent.command.current_dir(&self.root);
             if !self.reserve_turn().await {
-                return None;
-            }
-            if !self.reserve_calls(1) {
                 return None;
             }
             let started = Instant::now();
@@ -5145,6 +5149,7 @@ mod native {
                 self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                 return false;
             }
+            let remaining_calls = self.remaining_calls(budget);
             {
                 let Some((session, waited)) = self.mutation_session("queue scheduling").await
                 else {
@@ -5155,6 +5160,12 @@ mod native {
                     self.refresh_queue_inputs();
                     self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
                     return true;
+                }
+                // The calls are reserved before the cursor passes their targets, so a wave
+                // the budget refuses keeps its place.
+                if !self.reserve_calls(requests.len()) {
+                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
+                    return false;
                 }
                 let bindings = turns
                     .iter()
@@ -5214,14 +5225,10 @@ mod native {
                     "evidence_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Evidence(_))).count(),
                     "screening_requests":turns.iter().filter(|(_,turn)|matches!(turn,QueueReadTurn::Screening(_))).count(),
                     "max_parallel":budget.max_parallel,
-                    "remaining_calls":self.remaining_calls(budget),
+                    "remaining_calls":remaining_calls,
                     "elapsed_job_ms":self.started_at.elapsed().as_millis(),
                 })
             );
-            if !self.reserve_calls(requests.len()) {
-                self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
-                return false;
-            }
             let attempts = self
                 .supervisor
                 .run_requests(requests, self.host_output)
