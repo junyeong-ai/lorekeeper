@@ -289,17 +289,12 @@ fn adoption_keeps_direct_context_and_scoped_reviews_mandatory() {
 
 #[test]
 fn adoption_rejects_stale_inputs_and_never_recovers_preview_journals() {
-    for changed in ["subject", "journal"] {
+    for changed in ["subject", "candidate", "journal"] {
         let (fixture, request) = build_legacy_adoption_fixture();
         match changed {
-            "subject" => fixture.write(
-                SUBJECT,
-                "---\ntype: document\ntitle: Changed\n---\nNew subject.\n",
-            ),
-            "journal" => fixture.write(
-                ".lorekeeper/mutation/pending.json",
-                "Unrecovered journal.\n",
-            ),
+            "subject" => fixture.write(SUBJECT, "---\ntype: document\ntitle: Changed\n---\nNew subject.\n"),
+            "candidate" => fixture.write("wiki/documents/candidate-000.md", "---\ntype: document\ntitle: Changed\n---\nScreen protocol with changed conditions.\n"),
+            "journal" => fixture.write(".lorekeeper/mutation/pending.json", "Unrecovered journal.\n"),
             _ => unreachable!(),
         }
         let before = fixture.snapshot();
@@ -317,22 +312,6 @@ fn adoption_rejects_stale_inputs_and_never_recovers_preview_journals() {
         );
         assert_eq!(fixture.snapshot(), before, "{changed}");
     }
-    // A matched candidate is context, which screening reads afresh: its change leaves the
-    // request's input identity current.
-    let (fixture, request) = build_legacy_adoption_fixture();
-    fixture.write(
-        "wiki/documents/candidate-000.md",
-        "---\ntype: document\ntitle: Changed\n---\nScreen protocol with changed conditions.\n",
-    );
-    preview_adoption(
-        &fixture.root,
-        &fixture.dirs,
-        &fixture.pages(),
-        request,
-        |_| Ok(()),
-        &ReadControl::default(),
-    )
-    .unwrap();
 }
 
 #[test]

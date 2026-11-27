@@ -86,13 +86,17 @@ and CLI discovery, not a second graph authority.
   inferred evidence or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
-- An assessment's input identity (`concept-audit-v4`, `document-audit-v3`) is what the
-  audit owns: the subject, its citations, its scoped reviews, the addresses it links
-  directly, its discovery queries and whether they are screened, and the read-scope
-  constants. Context page revisions, discovery matches and screening decisions stay
-  outside it, so their churn leaves a receipt current; the next assessment reads them
-  as they are. A receipt recorded under the previous policies, whose identity also bound
-  those, stays current while that identity, recomputed from the same reads, still matches.
+- An assessment has two identities. Its read identity (`input_revision`,
+  `concept-audit-v3`/`document-audit-v2`) binds every page it reads at its revision,
+  context included, and the discovery state; recording, manual or native, refuses when it
+  changed, so a verdict is never stored for a scope other than the one it read. Its
+  currency key (`currency_revision`, `concept-audit-currency-v1`/`document-audit-currency-v1`)
+  binds what the audit owns: the subject, its citations, its scoped reviews, each direct
+  link with the verified owner it resolves to, its discovery queries and whether they are
+  screened, and the read-scope constants. The receipt store keeps the key per subject
+  (`currency`); a receipt is current while the key matches, so an edit to a linked or
+  matched page leaves it current while a retargeted alias makes it due. A receipt without
+  a recorded key (recorded before keys were kept) is current while its read identity is.
 - An audit's read scope is bounded by fixed policy constants, not the execution profile.
   Each query's discovery roster holds its identity matches and the first
   `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's

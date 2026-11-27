@@ -5960,6 +5960,74 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_audit_whose_linked_page_changed_replans_and_reuses_its_unchanged_inspections() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = context_audit_fixture(&root);
+        let session = MutationSession::acquire(&root).unwrap();
+        let mut prepared = resources::audit(&root, &config, CONTEXT_SUBJECT).unwrap();
+        let work = persist_prepared(&session, &config, &revision, &mut prepared).unwrap();
+        assert!(work.plan.parts.len() > 1);
+        loop {
+            let (_, request) = work.prepare_inspection(&root, &prepared.resources).unwrap();
+            let Some(request) = request.filter(|request| request["kind"] == "inspect") else {
+                break;
+            };
+            let output = WorkOutput {
+                work_id: work.plan.id.clone(),
+                node_id: request["node_id"].as_str().unwrap().into(),
+                input_revision: request["input_revision"].as_str().unwrap().into(),
+                summary: "The assigned evidence was read.".into(),
+                findings: vec![],
+                source_questions: vec![],
+                unresolved: vec![],
+                resolutions: vec![],
+            };
+            work.record(&session, output, &prepared.resources).unwrap();
+        }
+        assert_eq!(
+            work.progress(&root, &prepared.resources).unwrap().completed,
+            work.plan.parts.len()
+        );
+        write(
+            &root,
+            CONTEXT_RELATED,
+            &CONTEXT_RELATED_RAW.replace("A related claim.", "A corrected related claim."),
+        );
+        // The Work read the linked page as it was: it no longer publishes.
+        let error = resources::refresh_controlled(
+            &root,
+            &config,
+            &revision,
+            &work.context,
+            &lk_vault::ReadControl::default(),
+        )
+        .err()
+        .unwrap();
+        assert!(matches!(
+            error.downcast_ref::<crate::commands::queue::application::PublicationRejection>(),
+            Some(rejection)
+                if rejection.kind == crate::commands::queue::application::RejectionKind::SemanticContextChanged
+        ));
+        // Replanned, only the inspections holding the changed page are read again.
+        let mut replanned = resources::audit(&root, &config, CONTEXT_SUBJECT).unwrap();
+        let new = persist_prepared(&session, &config, &revision, &mut replanned).unwrap();
+        assert_ne!(new.plan.id, work.plan.id);
+        let moved = new
+            .plan
+            .parts
+            .iter()
+            .filter(|part| !work.plan.parts.iter().any(|prior| prior.id == part.id))
+            .count();
+        assert!(moved > 0 && moved < new.plan.parts.len());
+        assert_eq!(
+            new.progress(&root, &replanned.resources).unwrap().completed,
+            new.plan.parts.len() - moved
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn work_planned_before_page_alignment_continues_under_its_byte_filled_parts() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();

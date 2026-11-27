@@ -1530,19 +1530,6 @@ pub(super) fn refresh_controlled(
                     "audit subject inputs changed; replan and reread its current scope",
                 ));
             }
-            // Screening is context outside the input identity: a candidate that changed or
-            // joined the roster reopens it, and the Work replans once it is screened again.
-            if candidate
-                .discovery
-                .as_ref()
-                .and_then(|discovery| discovery.selection.as_ref())
-                .is_some_and(|progress| !progress.is_ready())
-            {
-                return Err(super::publication_rejection(
-                    super::RejectionKind::SemanticContextChanged,
-                    "audit discovery screening reopened since this Work was planned; replan once its candidates are screened",
-                ));
-            }
             audit_candidate_controlled(root, config, &candidate, read)?
         }
     };

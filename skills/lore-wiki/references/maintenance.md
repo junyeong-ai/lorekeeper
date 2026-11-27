@@ -245,6 +245,12 @@ Submit JSON via `lore wiki audit-record --file RESULTS.json`:
 }
 ```
 
+`input_revision` is the candidate's read identity: it binds every page the assessment
+read (subject, evidence, related context) and the discovery state, so recording refuses
+if any of them changed after you read it; reread the changed pages and use the new
+fingerprints. The candidate's `currency_revision` only decides when the subject is due
+again and is not submitted.
+
 Use `reviewed` after checking supported scope and completing repairs, or `follow-up`
 for a documented unresolved finding. Follow-up requires a current durable open review
 listing the selected concept or document in `review.subjects`; being supporting
@@ -254,9 +260,10 @@ failed step must be reported, never recorded as a successful read.
 
 Receipts in `.lorekeeper/knowledge-audit.json` track the latest completed inputs and
 pending order, not truth or confidence. What the audit owns reopens work: a changed
-subject, evidence, scoped reviews and their evidence, the set of pages the subject links,
-or its discovery queries. An edit to a linked or matched page is context and does not.
-A receipt recorded before this rule stays current until any page it read changes. Changed and first-time work rotate,
+subject, evidence, scoped reviews and their evidence, the pages the subject links (and
+the page each link resolves to), or its discovery queries. An edit to a linked or matched
+page is context and does not. A receipt recorded before this rule stays current until any
+page it read changes. Changed and first-time work rotate,
 each ordered by typed risk; unchanged inputs are skipped without an age-based reread. Unchanged open findings
 remain discoverable through their reviews without being rewritten every week.
 

@@ -31,16 +31,16 @@ impl<'a> From<&'a lk_core::config::GraphAuditConfig> for AuditCorpus<'a> {
 }
 
 const STATE: &str = ".lorekeeper/knowledge-audit.json";
-/// An assessment's input identity is what the audit owns: the subject, its citations and
-/// scoped reviews, which pages it links directly, its discovery queries and whether they are
-/// screened, and the read-scope bounds. The pages it reads for context and the discovery
-/// roster are not part of it, so their churn neither stales a receipt nor replans its Work.
-const CONCEPT_POLICY: &str = "concept-audit-v4";
-const DOCUMENT_POLICY: &str = "document-audit-v3";
-/// The policies whose identity also bound every context page revision and the discovery
-/// roster. A receipt recorded under one stays current while that identity still matches.
-const LEGACY_CONCEPT_POLICY: &str = "concept-audit-v3";
-const LEGACY_DOCUMENT_POLICY: &str = "document-audit-v2";
+/// An assessment's read identity (`input_revision`): every page it reads at its revision,
+/// context included, and its discovery state. Recording requires it unchanged, so a verdict
+/// is never stored for a scope other than the one it read.
+const CONCEPT_POLICY: &str = "concept-audit-v3";
+const DOCUMENT_POLICY: &str = "document-audit-v2";
+/// An assessment's currency key (`currency_revision`): what the audit owns, which decides
+/// when its subject is due again. Context page revisions, discovery matches and screening
+/// decisions are not part of it, so their churn leaves a receipt current.
+const CONCEPT_CURRENCY_POLICY: &str = "concept-audit-currency-v1";
+const DOCUMENT_CURRENCY_POLICY: &str = "document-audit-currency-v1";
 
 pub mod selection;
 
@@ -157,6 +157,11 @@ struct Receipts {
     /// receipt recorded before scopes were kept has none.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     scopes: BTreeMap<String, AuditScope>,
+    /// The currency key each recorded assessment was due under, by subject address. A
+    /// receipt recorded before currency was kept has none and stays current while its exact
+    /// read identity does.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    currency: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -741,6 +746,9 @@ pub struct AuditCandidate {
     pub title: String,
     pub file_revision: String,
     pub input_revision: String,
+    /// What decides when the subject is due again: the owned inputs and the owner each
+    /// direct link resolves to, without context page revisions or discovery state.
+    pub currency_revision: String,
     pub knowledge_status: KnowledgeStatus,
     pub evidence: Vec<Citation>,
     /// Context pages: direct links, plus for an audit the first `AUDIT_CONTEXT_PAGES` discovery
@@ -2510,35 +2518,50 @@ fn inputs_from_evidence(
                 context_page_limit: AUDIT_CONTEXT_PAGES,
             }),
         };
-        let (policy, legacy_policy) = match kind {
-            AuditSubjectKind::Concept => (CONCEPT_POLICY, LEGACY_CONCEPT_POLICY),
-            AuditSubjectKind::Document => (DOCUMENT_POLICY, LEGACY_DOCUMENT_POLICY),
+        let (policy, currency_policy) = match kind {
+            AuditSubjectKind::Concept => (CONCEPT_POLICY, CONCEPT_CURRENCY_POLICY),
+            AuditSubjectKind::Document => (DOCUMENT_POLICY, DOCUMENT_CURRENCY_POLICY),
         };
         let input_revision = file_revision(
             &serde_json::to_string(&(
                 policy,
                 &revision,
                 &citations,
-                linked_pages
-                    .iter()
-                    .map(|page| page.path.as_str())
-                    .collect::<Vec<_>>(),
+                &related_pages,
+                &discovery,
+                &review_identity,
+            ))
+            .map_err(error)?,
+        );
+        // Each direct link by its address and the verified owner it resolves to, so a link
+        // that starts resolving elsewhere (a retargeted alias) is due again, while an edit to
+        // the page it resolves to is not.
+        let linked_owners = linked_pages
+            .iter()
+            .map(|page| {
+                let owner = match owners.get(&page.path) {
+                    Some(owner) => owner.clone(),
+                    None => {
+                        let owner = lk_vault::resolve_page_owner(root, Path::new(&page.path))
+                            .map_err(error)?;
+                        owners.insert(page.path.clone(), owner.clone());
+                        owner
+                    }
+                };
+                Ok((page.path.clone(), page_address(&owner)))
+            })
+            .collect::<Result<Vec<_>, GraphError>>()?;
+        let currency_revision = file_revision(
+            &serde_json::to_string(&(
+                currency_policy,
+                &revision,
+                &citations,
+                linked_owners,
                 discovery
                     .as_ref()
                     .map(|discovery| (&discovery.queries, discovery.selection.is_some())),
                 &review_identity,
                 (AUDIT_CANDIDATES_PER_QUERY, AUDIT_CONTEXT_PAGES),
-            ))
-            .map_err(error)?,
-        );
-        let legacy_input_revision = file_revision(
-            &serde_json::to_string(&(
-                legacy_policy,
-                &revision,
-                &citations,
-                &related_pages,
-                &discovery,
-                &review_identity,
             ))
             .map_err(error)?,
         );
@@ -2548,7 +2571,9 @@ fn inputs_from_evidence(
             Some(receipt)
                 if receipt_is_current(
                     receipt,
-                    [&input_revision, &legacy_input_revision],
+                    receipts.currency.get(&path).map(String::as_str),
+                    &currency_revision,
+                    &input_revision,
                     &scoped_reviews,
                 ) =>
             {
@@ -2578,6 +2603,7 @@ fn inputs_from_evidence(
             title: page.title.clone(),
             file_revision: file_revision(&raw),
             input_revision,
+            currency_revision,
             knowledge_status: parsed.frontmatter.knowledge_status().map_err(error)?,
             evidence: citations,
             related_pages,
@@ -2699,6 +2725,8 @@ fn load_synthesis_receipts(
         _selection_assessments: Option<serde::de::IgnoredAny>,
         #[serde(default, rename = "scopes")]
         _scopes: Option<serde::de::IgnoredAny>,
+        #[serde(default, rename = "currency")]
+        _currency: Option<serde::de::IgnoredAny>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -2832,14 +2860,21 @@ fn select_candidates(
         .collect()
 }
 
-/// Whether `receipt` assessed these inputs: it records the current input identity or the
-/// legacy one computed from the same reads, and every scoped review it depends on is settled.
+/// Whether `receipt` still answers its subject: it was recorded under the current currency
+/// key (`recorded_currency`), or, recorded before currency was kept, for these exact reads;
+/// and every scoped review it depends on is settled.
 fn receipt_is_current(
     receipt: &AuditAssessment,
-    input_revisions: [&str; 2],
+    recorded_currency: Option<&str>,
+    currency_revision: &str,
+    input_revision: &str,
     reviews: &[AuditReviewDependency],
 ) -> bool {
-    input_revisions.contains(&receipt.input_revision.as_str())
+    let due_under = match recorded_currency {
+        Some(recorded) => recorded == currency_revision,
+        None => receipt.input_revision == input_revision,
+    };
+    due_under
         && reviews.iter().all(|review| review.state.is_current())
         && (receipt.disposition != AuditDisposition::FollowUp
             || reviews
@@ -3699,6 +3734,9 @@ pub fn record_with_guard_controlled(
         receipts
             .scopes
             .insert(assessment.path.clone(), candidate.scope.clone());
+        receipts
+            .currency
+            .insert(assessment.path.clone(), candidate.currency_revision.clone());
         receipts.entries.insert(assessment.path.clone(), assessment);
     }
     if whole_inputs.len() == selected.len() {
@@ -3714,6 +3752,7 @@ pub fn record_with_guard_controlled(
         .selection_assessments
         .retain(|path, _| exists(path));
     receipts.scopes.retain(|path, _| exists(path));
+    receipts.currency.retain(|path, _| exists(path));
     receipts.pending.retain(|path| !recorded.contains(path));
     let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
     plan.publish_expected(root, STATE, before, after)
@@ -4826,7 +4865,7 @@ mod tests {
             "---\ntype: document\n---\nProduction order retention has another applicable claim.\n",
         );
         let matched = selected();
-        assert_eq!(matched.input_revision, discovered.input_revision);
+        assert_eq!(matched.currency_revision, discovered.currency_revision);
         assert_eq!(matched.reason, AuditReason::Current);
         assert!(
             matched
@@ -4835,6 +4874,23 @@ mod tests {
                 .any(|page| page.path == "wiki/documents/new.md"),
             "a new match is read as context the next time the subject is audited"
         );
+        assert_ne!(matched.input_revision, discovered.input_revision);
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        assert!(
+            record(
+                &session,
+                &dirs,
+                *ALL,
+                &scan(root.path()),
+                AuditResults {
+                    assessments: vec![assessment(&discovered)]
+                },
+                u64::MAX
+            )
+            .is_err(),
+            "an assessment that did not read the new match does not record"
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         write(
             root.path(),
             subject,
@@ -5124,6 +5180,51 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_direct_link_that_resolves_to_another_owner_makes_the_receipt_due() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let subject = "wiki/documents/subject.md";
+        let page = "---\ntype: document\n---\nOne deployment region.\n";
+        write(
+            root.path(),
+            subject,
+            "---\ntype: document\n---\nThe scoped claim. [Spec](spec.md).\n",
+        );
+        // Two owners with identical bytes, so retargeting changes only which page the link
+        // resolves to.
+        write(root.path(), "wiki/documents/first.md", page);
+        write(root.path(), "wiki/documents/second.md", page);
+        let alias = root.path().join("wiki/documents/spec.md");
+        std::os::unix::fs::symlink("first.md", &alias).unwrap();
+        let candidate = || {
+            load_selected_inputs(root.path(), &dirs, &scan(root.path()), &[subject.into()])
+                .unwrap()
+                .remove(0)
+        };
+        let first = candidate();
+        assert_eq!(first.linked_pages[0].path, "wiki/documents/spec.md");
+        record(
+            &MutationSession::acquire(root.path()).unwrap(),
+            &dirs,
+            *ALL,
+            &scan(root.path()),
+            AuditResults {
+                assessments: vec![assessment(&first)],
+            },
+            u64::MAX,
+        )
+        .unwrap();
+        assert_eq!(candidate().reason, AuditReason::Current);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("second.md", &alias).unwrap();
+        let retargeted = candidate();
+        assert_eq!(retargeted.input_revision, first.input_revision);
+        assert_ne!(retargeted.currency_revision, first.currency_revision);
+        assert_eq!(retargeted.reason, AuditReason::Changed);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn symlink_ordinary_evidence_and_context_use_guarded_owner_bytes() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
@@ -5319,25 +5420,25 @@ mod tests {
             )
             .unwrap();
             assert_eq!(planned.candidates[0].reason, reason, "{changed}");
-            if reason == AuditReason::Changed {
-                assert_ne!(
-                    planned.candidates[0].input_revision,
-                    candidate.input_revision
-                );
-                assert!(
-                    record(
-                        &session,
-                        &dirs,
-                        *ALL,
-                        &scan(root.path()),
-                        AuditResults {
-                            assessments: vec![assessment(candidate)]
-                        },
-                        u64::MAX
-                    )
-                    .is_err()
-                );
-            }
+            // Either way the earlier reads are no longer the page as it is.
+            assert_ne!(
+                planned.candidates[0].input_revision,
+                candidate.input_revision
+            );
+            assert!(
+                record(
+                    &session,
+                    &dirs,
+                    *ALL,
+                    &scan(root.path()),
+                    AuditResults {
+                        assessments: vec![assessment(candidate)]
+                    },
+                    u64::MAX
+                )
+                .is_err(),
+                "{changed}"
+            );
             write(root.path(), changed, &before);
         }
         let old = std::fs::read_to_string(root.path().join("wiki/documents/third.md")).unwrap();
@@ -5573,10 +5674,9 @@ mod tests {
         )
         .unwrap();
         let candidate = &selected.candidates[0];
-        // The identity a concept receipt recorded before document subjects existed carries.
         let previous_identity = file_revision(
             &serde_json::to_string(&(
-                LEGACY_CONCEPT_POLICY,
+                CONCEPT_POLICY,
                 source_revision(&lk_vault::parse_page(body).unwrap()),
                 &candidate.evidence,
                 &candidate.related_pages,
@@ -5585,19 +5685,19 @@ mod tests {
             ))
             .unwrap(),
         );
-        let mut receipts = Receipts::default();
-        receipts.entries.insert(
-            path.into(),
-            AuditAssessment {
-                input_revision: previous_identity,
-                ..assessment(candidate)
+        assert_eq!(candidate.input_revision, previous_identity);
+        let session = MutationSession::acquire(root.path()).unwrap();
+        record(
+            &session,
+            &dirs,
+            *ALL,
+            &scan(root.path()),
+            AuditResults {
+                assessments: vec![assessment(candidate)],
             },
-        );
-        write(
-            root.path(),
-            STATE,
-            &serde_json::to_string(&receipts).unwrap(),
-        );
+            u64::MAX,
+        )
+        .unwrap();
         let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 2, u64::MAX).unwrap();
         assert_eq!(current.reviewed_current, 1);
         assert_eq!(
@@ -6746,8 +6846,9 @@ mod tests {
         );
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         write(root.path(), "wiki/documents/source.md", source);
-        // A directly linked page is context: the audit reads it, and an edit to it leaves
-        // the receipt current.
+        // A directly linked page is context: an edit to it leaves the receipt current, yet
+        // an assessment of the earlier reads no longer records, since it did not read the
+        // page as it is now.
         write(
             root.path(),
             "wiki/concepts/b.md",
@@ -6756,10 +6857,27 @@ mod tests {
         let current = plan(root.path(), &dirs, *ALL, &scan(root.path()), 1, 262_144).unwrap();
         assert_eq!((current.reviewed_current, current.changed), (1, 0));
         assert_ne!(current.candidates[0].path, "wiki/concepts/a.md");
+        let before = std::fs::read(root.path().join(STATE)).unwrap();
+        let refused = record(
+            &session,
+            &dirs,
+            *ALL,
+            &scan(root.path()),
+            AuditResults {
+                assessments: vec![assessment(&first.candidates[0])],
+            },
+            262_144,
+        )
+        .unwrap_err();
+        assert!(
+            refused.to_string().contains("audit inputs changed"),
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
     }
 
     #[test]
-    fn a_receipt_of_the_previous_policy_stays_current_until_its_reads_change() {
+    fn a_receipt_recorded_before_currency_was_kept_stays_current_until_its_reads_change() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
         let source = "---\ntype: document\ntitle: Source\n---\n## Summary\nA uses B under condition X.\n\n## Related Concepts\n- [A](../concepts/a.md)\n";
@@ -6769,8 +6887,8 @@ mod tests {
         write(root.path(), "wiki/documents/source.md", source);
         write(root.path(), "wiki/concepts/a.md", concept);
         write(root.path(), "wiki/concepts/b.md", related);
-        // The assessment `concept-audit-v3` recorded for these exact reads, whose identity
-        // also bound the linked page's revision.
+        // An assessment recorded for these exact reads before receipts kept a currency key;
+        // its read identity, which binds the linked page's revision, as 0.163 computed it.
         let mut receipts = Receipts::default();
         receipts.entries.insert(
             "wiki/concepts/a.md".into(),

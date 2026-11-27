@@ -185,8 +185,9 @@ paths:
 - Prepare ready native nodes and their progress from one captured evaluation. Refresh
   the Work's own scope after the host returns before recording. Audit and full-context
   extraction Work read their discovery context, so an added match replans them (a
-  screened audit once its screening reopens); an audit's receipt stays current, because
-  context is outside its input identity (crates/lk-graph/AGENTS.md);
+  screened audit once its screening reopens) and refuse a result of the earlier reads,
+  while an audit's receipt stays current, because context is outside its currency key
+  (crates/lk-graph/AGENTS.md); the replanned Work reuses every unchanged inspection;
   screened extraction evidence reads only its source and selected owners, so candidate
   churn does not. Never retain a candidate capture across host execution.
 - Queue preparation checks the next exact evidence request's current processing action
