@@ -353,10 +353,20 @@ fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() 
             "{report}"
         );
         assert!(usage(&fixture)["paused"].as_object().unwrap().is_empty());
-        let reserved = usage(&fixture)["reserved_calls"].clone();
+        // With nothing else admissible, the next run sends only the timed-out node released
+        // as a probe, although its sibling node of the same subject is still held.
+        let reserved = usage(&fixture)["reserved_calls"].as_u64().unwrap();
         let held = run(&fixture, "knowledge", false);
-        assert_eq!(calls(&held), 0, "{held}");
-        assert_eq!(usage(&fixture)["reserved_calls"], reserved);
+        assert_eq!(calls(&held), 1, "{held}");
+        assert!(
+            held["runs"][0]["stages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|stage| stage["name"] == "host probe"),
+            "{held}"
+        );
+        assert_eq!(usage(&fixture)["reserved_calls"], reserved + 1);
     }
 }
 
