@@ -717,8 +717,24 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
         };
         assert!(invoked >= 1, "{report}");
         let diagnostics = String::from_utf8_lossy(&output.stderr);
-        for marker in ["host-stderr-marker", "host-stdout-marker"] {
-            assert_eq!(diagnostics.contains(marker), !scheduled, "{diagnostics}");
+        assert_eq!(
+            diagnostics.contains("host-stdout-marker"),
+            !scheduled,
+            "{diagnostics}"
+        );
+        if scheduled {
+            // Only the bounded, sanitized stderr tail an answerless failure reports reaches
+            // the job's log; the host's streams are not forwarded.
+            assert!(
+                diagnostics
+                    .lines()
+                    .filter(|line| line.contains("host-stderr-marker"))
+                    .all(|line| line.contains("host failure output")
+                        || line.contains(r#""stderr_tail":"host-stderr-marker""#)),
+                "{diagnostics}"
+            );
+        } else {
+            assert!(diagnostics.contains("host-stderr-marker"), "{diagnostics}");
         }
         for stage_output in ["Prepared navigation snapshot", "graph lint: completed"] {
             assert!(diagnostics.contains(stage_output), "{diagnostics}");
