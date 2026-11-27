@@ -987,13 +987,16 @@ pub(super) fn lore_command(
 #[cfg(unix)]
 pub(super) fn preflight_hosts(
     execution: &lk_core::execution::ExecutionConfig,
+    stages: &[lk_core::execution::ExecutionStage],
 ) -> miette::Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    let names = execution
-        .selected_profile()
-        .into_iter()
-        .chain(execution.stages.values().map(String::as_str))
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut names = std::collections::BTreeSet::new();
+    for stage in stages {
+        let (name, _) = execution
+            .resolve_stage_profile(*stage)
+            .map_err(|error| miette::miette!("{error}"))?;
+        names.insert(name);
+    }
     for name in names {
         let profile = execution
             .profiles

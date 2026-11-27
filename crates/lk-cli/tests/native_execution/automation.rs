@@ -361,6 +361,38 @@ fn a_parallel_inspection_timeout_does_not_pause_or_discard_independent_audits() 
 }
 
 #[test]
+fn a_scheduled_run_checks_only_the_hosts_its_stages_use() {
+    let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+    super::stage_profiles::route_profiles(
+        &fixture,
+        "codex",
+        &[("audit", "auditor")],
+        &[("auditor", "codex")],
+    );
+    configure(&fixture, Some(20), 60);
+    std::fs::remove_file(fixture.root().join("auditor executable")).unwrap();
+    let host_environment = |report: &serde_json::Value| {
+        report["runs"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stage| stage["name"] == "host environment")
+            .map(|stage| stage["detail"].as_str().unwrap().to_owned())
+    };
+    let process = run(&fixture, "process", false);
+    assert_eq!(
+        host_environment(&process),
+        None,
+        "process never audits: {process}"
+    );
+    let knowledge = run(&fixture, "knowledge", false);
+    assert!(
+        host_environment(&knowledge).is_some_and(|detail| detail.contains("profile auditor")),
+        "{knowledge}"
+    );
+}
+
+#[test]
 fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning() {
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
     configure(&fixture, Some(20), 60);
