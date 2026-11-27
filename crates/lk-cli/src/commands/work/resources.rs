@@ -1851,7 +1851,11 @@ mod tests {
         for path in [selected, &review_paths[1], &evidence_paths[1]] {
             let raw = std::fs::read_to_string(root.join(path)).unwrap();
             // An authored section: the owner's own sections are read through its snapshot.
-            write(&root, path, &format!("{raw}\n## Notes\nExternally edited.\n"));
+            write(
+                &root,
+                path,
+                &format!("{raw}\n## Notes\nExternally edited.\n"),
+            );
             assert_ne!(
                 admit(&[selected]).unwrap().revision("config").unwrap(),
                 revision
