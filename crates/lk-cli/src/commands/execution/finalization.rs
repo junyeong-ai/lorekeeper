@@ -399,8 +399,9 @@ pub(in crate::commands) fn decode_value(
 /// order. Each event it lists in `off_focus` is written here from its heading, the locale's
 /// off-focus sentence and its 🔗 source links (the template's `🔗 {original_link}` links), in
 /// place of what the reply wrote under it; every other event must keep each of those links'
-/// destinations. A reply breaking either is an invalid body, held as a rejected reply. A
-/// request without events takes its body as returned and declares no off-focus event.
+/// destinations. A reply breaking either, or declaring an event off-focus on a source without
+/// a focus, is an invalid body, held as a rejected reply. A request without events takes its
+/// body as returned and declares no off-focus event.
 fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse {
     let Some(events) = request["events"].as_array() else {
         return if off_focus.is_empty() {
@@ -428,6 +429,14 @@ fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse
         .iter()
         .copied()
         .collect::<std::collections::BTreeSet<_>>();
+    let focused = request["work"]["context"]["purpose"]["parameters"]["focus"]
+        .as_str()
+        .is_some_and(|focus| !focus.trim().is_empty());
+    if !declared.is_empty() && !focused {
+        return SectionResponse::InvalidBody(
+            "off_focus requires the source's focus; without one every event is refined".into(),
+        );
+    }
     if declared.len() != off_focus.len() || declared.iter().any(|index| *index >= events.len()) {
         return SectionResponse::InvalidBody(
             "off_focus must name distinct events by their index".into(),
@@ -661,7 +670,7 @@ mod tests {
     #[test]
     fn rust_writes_off_focus_events_and_a_refinement_keeps_every_source_link() {
         let request = json!({
-            "work":{"context":{"purpose":{"parameters":{"locale":"en"}}}},
+            "work":{"context":{"purpose":{"parameters":{"locale":"en", "focus":"Infrastructure"}}}},
             "events":[
                 {"heading":"### Kept","inline_links":["[🔗 Source](https://a.invalid)","[Comments](https://c.invalid)"]},
                 {"heading":"### Elsewhere","inline_links":["[🔗 Source](https://b.invalid)"]},
@@ -711,6 +720,23 @@ mod tests {
                 "{body:?} {off_focus}"
             );
         }
+        let mut unfocused = request.clone();
+        unfocused["work"]["context"]["purpose"]["parameters"]
+            .as_object_mut()
+            .unwrap()
+            .remove("focus");
+        assert!(
+            matches!(
+                decode_value(
+                    json!({"status":"complete","body":refined,"reason":null,"off_focus":[1]}),
+                    &unfocused,
+                )
+                .unwrap()
+                .0,
+                SectionResponse::InvalidBody(_)
+            ),
+            "a source without a focus has no off-focus event"
+        );
         assert!(matches!(
             decode_value(
                 json!({"status":"complete","body":"Body.","reason":null,"off_focus":[0]}),
