@@ -359,7 +359,11 @@ impl HostAnswers {
     }
 
     /// Whether `identity`, failed at `failed_at`, is the vault's released probe.
-    fn is_probe(&self, identity: &HoldIdentity, failed_at: Option<Timestamp>) -> bool {
+    pub(in crate::commands) fn is_probe(
+        &self,
+        identity: &HoldIdentity,
+        failed_at: Option<Timestamp>,
+    ) -> bool {
         self.probe.as_ref().is_some_and(|probe| {
             probe.identity == *identity && probe.host.as_ref().map(|host| host.at) == failed_at
         })

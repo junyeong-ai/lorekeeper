@@ -202,7 +202,10 @@ paths:
   target first and alone (never batched with another target) and sends it before other
   work; any release pays the debt. A released probe that planning leaves out, because its
   target is no longer current work, waits on an unfinished dependency or falls outside
-  the drain's admission scope, is withdrawn and the next oldest released in the same run. Each side therefore waits at
+  the drain's admission scope, is withdrawn and the next oldest released in the same run.
+  A probe is sent exactly: when its hold is one of a Work's ready nodes, admission and
+  request preparation take that node alone, so held siblings neither block the Work nor are
+  sent beside it; they release by the ordinary answered-after-failure rule. Each side therefore waits at
   most one run, even at one call per run. While the
   probe's host has given no outcome in the run, waves send one call at a time; a probe an
   earlier run released and whose host has not answered since counts as this run's probe,

@@ -1550,7 +1550,10 @@ impl Work {
                 Some(refinements) => limit.min(refinements.available_slots(self)?),
                 None => limit,
             };
-            for id in progress.ready.iter().take(limit) {
+            let timeouts = attempts::InspectionAttempts::load(root, self, &evaluated.nodes)?;
+            let answers = crate::commands::work::host::HostAnswers::load(root)?;
+            let ready = attempts::probe_first(&progress.ready, timeouts.as_ref(), &answers);
+            for id in ready.iter().take(limit) {
                 let node = evaluated
                     .nodes
                     .iter()

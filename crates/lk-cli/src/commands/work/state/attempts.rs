@@ -285,6 +285,24 @@ impl InspectionAttempts {
         self.entries.contains_key(id)
     }
 
+    /// The node whose unanswered failure is the vault's released probe, if this Work holds it.
+    pub(super) fn released_probe(&self, answers: &HostAnswers) -> Option<&str> {
+        self.entries.iter().find_map(|(id, entry)| match entry {
+            Attempt::Failed { failure, .. }
+                if answers.is_probe(
+                    &HoldIdentity::Inspection {
+                        work_id: self.work_id.clone(),
+                        node_id: id.clone(),
+                    },
+                    failure.host().map(|host| host.at),
+                ) =>
+            {
+                Some(id.as_str())
+            }
+            _ => None,
+        })
+    }
+
     pub(super) fn reason(
         &self,
         request: &Value,
@@ -338,6 +356,20 @@ impl InspectionAttempts {
             _ => None,
         })
     }
+}
+
+/// The ready nodes a Work may send now: only its released probe when that is one of them, so
+/// the probe is sent exactly, and its siblings' holds, which await that probe's answer, neither
+/// hold the Work back nor are sent beside it.
+pub(super) fn probe_first<'a>(
+    ready: &'a [String],
+    attempts: Option<&InspectionAttempts>,
+    answers: &HostAnswers,
+) -> &'a [String] {
+    attempts
+        .and_then(|attempts| attempts.released_probe(answers))
+        .and_then(|probe| ready.iter().position(|id| id == probe))
+        .map_or(ready, |at| std::slice::from_ref(&ready[at]))
 }
 
 /// Every pending unanswered inspection hold, for choosing a probe.

@@ -290,8 +290,9 @@ impl Work {
         let progress = evaluated.progress()?;
         let timeouts = super::attempts::InspectionAttempts::load(root, self, &evaluated.nodes)?;
         let answers = crate::commands::work::host::HostAnswers::load(root)?;
-        for id in &progress.ready {
-            if progress.ready.first() != Some(id)
+        let ready = super::attempts::probe_first(&progress.ready, timeouts.as_ref(), &answers);
+        for id in ready {
+            if ready.first() != Some(id)
                 && !actions
                     .as_ref()
                     .is_some_and(|actions| actions.actions.contains_key(id))

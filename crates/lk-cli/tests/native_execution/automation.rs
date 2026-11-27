@@ -494,6 +494,54 @@ fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects(
 }
 
 #[test]
+fn a_probe_reaches_its_node_while_a_sibling_of_the_same_subject_is_held() {
+    let behavior =
+        format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
+    let fixture = bounded_audit_fixture("codex", 64, &behavior);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace("max_calls: 64}", "max_calls: 64, max_parallel: 2}");
+    std::fs::write(&fixture.config, config).unwrap();
+    configure(&fixture, Some(20), 60);
+    std::fs::write(fixture.root().join("fail"), "").unwrap();
+    run(&fixture, "knowledge", false);
+    std::fs::remove_file(fixture.root().join("fail")).unwrap();
+    // Both nodes of one subject failed in one wave. Their host is a profile ordinary work no
+    // longer uses, so only a probe releases either.
+    let path = walkdir::WalkDir::new(fixture.root().join("vault/.lorekeeper/work"))
+        .into_iter()
+        .map(Result::unwrap)
+        .find(|entry| entry.file_name() == "inspection-timeouts.json")
+        .unwrap()
+        .into_path();
+    let mut held: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let nodes = held["entries"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(nodes.len() >= 2, "{held}");
+    for node in &nodes {
+        held["entries"][node]["failure"]["host"]["profile"] = "retired".into();
+    }
+    std::fs::write(&path, serde_json::to_vec(&held).unwrap()).unwrap();
+    let work = held["work_id"].as_str().unwrap().to_owned();
+    let before = bounded_calls(&fixture).len();
+    for _ in 0..2 {
+        run(&fixture, "knowledge", false);
+    }
+    assert!(
+        bounded_calls(&fixture)[before..].iter().any(|row| {
+            row["work_id"] == work.as_str()
+                && nodes.iter().any(|node| row["node_id"] == node.as_str())
+        }),
+        "the released node is sent although its sibling is still held"
+    );
+}
+
+#[test]
 fn an_audit_probe_outside_the_current_audit_scope_is_withdrawn() {
     let behavior =
         format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");
