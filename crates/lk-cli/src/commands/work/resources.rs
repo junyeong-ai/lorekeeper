@@ -1437,6 +1437,12 @@ fn capture_audit_scope_controlled(
             "review_dependencies":candidate.reviews.iter().map(|review| &review.path).collect::<Vec<_>>()},
         "authority": "The selected page is the audit subject. Concept citations are evidence; a document is its own subject without a self-citation. Related pages are context, not automatically support. Reviews and historical archives are assessments/history, not independent corroboration. Join source-declared scope, time and attribution before judging contradictions; unknown context stays unknown.",
     });
+    if !candidate.context_cards.is_empty() {
+        context["context_cards"] = json!({
+            "authority": "These pages matched the discovery queries beyond the pages read in full. Only their address and title are shown: they were not read, support nothing and settle nothing.",
+            "pages": candidate.context_cards,
+        });
+    }
     if let Some(reference) = selection {
         context["purpose"]["audit_selection"] =
             serde_json::to_value(reference).into_diagnostic()?;

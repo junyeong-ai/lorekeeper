@@ -62,6 +62,82 @@ fn fresh_discovery_selects_candidates_while_exact_legacy_recipes_keep_their_iden
     );
 }
 
+#[test]
+fn an_audit_screens_only_its_bounded_roster_of_each_query() {
+    let fixture = Fixture::new(crate::audit::AUDIT_CANDIDATES_PER_QUERY + 5);
+    let candidate = fixture.candidate();
+    let discovery = candidate.discovery.as_ref().unwrap();
+    assert_eq!(
+        discovery.matches.len(),
+        crate::audit::AUDIT_CANDIDATES_PER_QUERY,
+        "matches beyond the per-query roster are neither screened nor read"
+    );
+    assert_eq!(
+        discovery.selection.as_ref().unwrap().unknown,
+        crate::audit::AUDIT_CANDIDATES_PER_QUERY
+    );
+    assert_eq!(
+        candidate.scope.screening.as_ref().unwrap().candidates,
+        crate::audit::AUDIT_CANDIDATES_PER_QUERY
+    );
+}
+
+#[test]
+fn discovery_recorded_before_screening_reads_every_match_unbounded() {
+    let count = crate::audit::AUDIT_CANDIDATES_PER_QUERY + 2;
+    let fixture = Fixture::new(count);
+    let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
+    receipts.discovery.get_mut(SUBJECT).unwrap().selection = None;
+    fixture.write(
+        crate::audit::STATE,
+        &serde_json::to_string(&receipts).unwrap(),
+    );
+    let legacy = fixture.candidate();
+    assert_eq!(legacy.discovery.as_ref().unwrap().matches.len(), count);
+    assert_eq!(legacy.related_pages.len(), count);
+    assert!(legacy.context_cards.is_empty());
+    assert_eq!(legacy.scope.context_pages, count);
+    assert_eq!(legacy.scope.screening, None);
+}
+
+#[test]
+fn an_owner_the_audit_reads_as_a_direct_link_takes_no_context_place() {
+    let fixture = Fixture::build(
+        crate::audit::AUDIT_CONTEXT_PAGES + 2,
+        "---\ntype: document\ntitle: Subject\n---\nAudit the deployment proposal against [the first candidate](candidate-000.md).\n",
+    );
+    let packet = fixture.packet(20, false);
+    assert_eq!(
+        packet.progress.unknown,
+        crate::audit::AUDIT_CONTEXT_PAGES + 2
+    );
+    assert!(
+        fixture
+            .record(output(&packet, ScreeningDecision::Inspect))
+            .unwrap()
+    );
+    let candidate = fixture.candidate();
+    assert_eq!(
+        candidate
+            .linked_pages
+            .iter()
+            .map(|page| page.path.as_str())
+            .collect::<Vec<_>>(),
+        ["wiki/documents/candidate-000.md"]
+    );
+    assert_eq!(
+        (candidate.scope.context_pages, candidate.scope.context_cards),
+        (crate::audit::AUDIT_CONTEXT_PAGES, 1),
+        "the linked owner is read once, and every context place reads another owner"
+    );
+    assert!(
+        candidate
+            .context_cards
+            .iter()
+            .all(|card| card.path != "wiki/documents/candidate-000.md" && !card.title.is_empty())
+    );
+}
+
 fn build_legacy_adoption_fixture() -> (Fixture, AdoptionRequest) {
     let fixture = Fixture::new(2);
     let (_, mut receipts) = crate::audit::load(&fixture.root).unwrap();
@@ -642,6 +718,13 @@ struct Fixture {
 }
 impl Fixture {
     fn new(count: usize) -> Self {
+        Self::build(
+            count,
+            "---\ntype: document\ntitle: Subject\n---\nAudit the deployment proposal.\n",
+        )
+    }
+    /// `count` screenable candidates and a subject of `subject` bytes whose discovery is current.
+    fn build(count: usize, subject: &str) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().canonicalize().unwrap();
         let fixture = Self {
@@ -649,10 +732,7 @@ impl Fixture {
             root,
             dirs: Default::default(),
         };
-        fixture.write(
-            SUBJECT,
-            "---\ntype: document\ntitle: Subject\n---\nAudit the deployment proposal.\n",
-        );
+        fixture.write(SUBJECT, subject);
         for index in 0..count {
             fixture.write(&format!("wiki/documents/candidate-{index:03}.md"),
                 &format!("---\ntype: document\ntitle: Candidate {index}\n---\nScreen protocol {index} has a declared scope.\n"));
@@ -807,8 +887,22 @@ fn candidate_decisions_resume_without_repeating_unchanged_inputs() {
     assert_eq!(current.discovery.as_ref().unwrap().matches.len(), 7);
     assert_eq!(
         current.related_pages.len(),
-        5,
-        "unselected discovery bodies are outside the full read scope"
+        crate::audit::AUDIT_CONTEXT_PAGES,
+        "unselected discovery bodies are outside the full read scope, and of the five selected \
+         owners only the first `AUDIT_CONTEXT_PAGES` are read in full"
+    );
+    assert_eq!(
+        current.context_cards.len(),
+        1,
+        "the fifth selected owner is a card"
+    );
+    assert_eq!(
+        (
+            current.scope.context_pages,
+            current.scope.context_cards,
+            current.scope.screening.as_ref().unwrap().candidates
+        ),
+        (crate::audit::AUDIT_CONTEXT_PAGES, 1, 7)
     );
     for (path, raw) in prior {
         assert_eq!(std::fs::read(fixture.root.join(path)).unwrap(), raw);

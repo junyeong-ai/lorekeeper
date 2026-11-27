@@ -72,7 +72,9 @@ if [ "$screen_status" -ne 100 ]; then exit "$screen_status"; fi
 "#;
 
 const SUBJECT: &str = "wiki/concepts/a-subject.md";
-const QUERY: &str = "candidate-window";
+/// The subject's discovery queries. Candidates are spread over them so that each query's
+/// roster, bounded by `lk_graph::audit::AUDIT_CANDIDATES_PER_QUERY`, holds all of its own.
+const QUERIES: [&str; 3] = ["candidate-window", "candidate-door", "candidate-gate"];
 
 fn json(fixture: &Fixture, args: &[&str]) -> serde_json::Value {
     let output = fixture.command().args(args).output().unwrap();
@@ -84,7 +86,7 @@ fn json(fixture: &Fixture, args: &[&str]) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-fn discover(fixture: &Fixture, subject: &str, query: &str) {
+fn discover(fixture: &Fixture, subject: &str, queries: &[&str]) {
     let output = fixture
         .command()
         .args(["graph", "backlinks-sync"])
@@ -101,7 +103,7 @@ fn discover(fixture: &Fixture, subject: &str, query: &str) {
         &file,
         serde_json::to_vec(&serde_json::json!({
             "path":subject,"file_revision":lk_core::concept::file_revision(&raw),
-            "queries":[{"query":query,"phrase":true,"spacing":false}],
+            "queries":queries.iter().map(|query| serde_json::json!({"query":query,"phrase":true,"spacing":false})).collect::<Vec<_>>(),
         }))
         .unwrap(),
     )
@@ -148,9 +150,9 @@ fn fixture(
     .unwrap();
     for index in 0..candidates {
         std::fs::write(vault.join(format!("wiki/documents/candidate-{index:02}.md")),
-            format!("---\ntype: document\ntitle: Candidate {index:02}\n---\nThe {QUERY} scope covers candidate {index:02}.\n")).unwrap();
+            format!("---\ntype: document\ntitle: Candidate {index:02}\n---\nThe {} scope covers candidate {index:02}.\n", QUERIES[index % QUERIES.len()])).unwrap();
     }
-    discover(&fixture, SUBJECT, QUERY);
+    discover(&fixture, SUBJECT, &QUERIES);
     fixture
 }
 
@@ -284,7 +286,7 @@ fn native_audit_screening_capacity_spends_no_screening_calls_and_preserves_ready
             .replace("batch_size: 2", "batch_size: 1");
         std::fs::write(&fixture.config, config).unwrap();
         let peer = "wiki/documents/candidate-00.md";
-        discover(&fixture, peer, "unmatched independent fixture");
+        discover(&fixture, peer, &["unmatched independent fixture"]);
         screen_fixture_candidates(&fixture, peer);
         assert_eq!(
             json(&fixture, &["wiki", "audit-plan"])["candidates"][0]["path"],
@@ -315,10 +317,10 @@ fn native_audit_screening_indivisible_capacity_without_batch_cap_advances_ready_
             "Bounded subject scope ".repeat(256),
         );
         std::fs::write(fixture.root().join("vault").join(SUBJECT), &subject).unwrap();
-        discover(&fixture, SUBJECT, QUERY);
+        discover(&fixture, SUBJECT, &QUERIES);
         let subject = std::fs::read_to_string(fixture.root().join("vault").join(SUBJECT)).unwrap();
         let peer = "wiki/documents/candidate-00.md";
-        discover(&fixture, peer, "unmatched independent fixture");
+        discover(&fixture, peer, &["unmatched independent fixture"]);
         screen_fixture_candidates(&fixture, peer);
         assert_eq!(
             json(&fixture, &["wiki", "audit-plan"])["candidates"][0]["path"],

@@ -86,6 +86,18 @@ and CLI discovery, not a second graph authority.
   or a transitive audit. Scoped reviews retain explicit evidence for either kind.
   Receipts describe completed reads, never factual confidence or original/provider
   evidence that was not actually read. Aggregate and per-kind counts retain this scope.
+- An audit's read scope is bounded by fixed policy constants, not the execution profile.
+  Each query's discovery roster holds its identity matches and the first
+  `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's
+  traversal with its own bound; card capture uses the same `Ranked` recipe); only that
+  roster is screened. The subject, its citations, its direct links and the first
+  `AUDIT_CONTEXT_PAGES` selected owners in roster order that are not already a citation
+  or direct link are read in full; other selected owners are `context_cards` (address and
+  title), never read and never evidence. Discovery recorded before screening keeps its
+  exact unbounded full-context derivation. `AuditCandidate.scope` states these counts and,
+  for screened discovery only, its `screening` bounds; recording stores it per subject in
+  the receipt store's `scopes`. Searching
+  uncited pages for contradictions or missing citations is outside this receipt.
 - `graph.audit.subjects` names the kinds automatic plans, pending order and corpus
   coverage include; concepts by default. Coverage is `reviewed_current` of `total`
   over those kinds. Other kinds are counted in `excluded_by_kind` without deriving

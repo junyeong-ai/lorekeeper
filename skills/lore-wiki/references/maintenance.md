@@ -58,11 +58,14 @@ Stage JSON under `.lorekeeper/drafts/`, then run `lore wiki audit-discover --fil
 }
 ```
 
-Use 1..16 explicit nonblank queries. Discovery captures every matching knowledge
-page, including retired pages, without a top-result cutoff. `wiki audit-plan --path
-SUBJECT` reports the complete match inventory. Fresh recipes require candidate screening
-before full audit reads. An unchanged legacy recipe retains its full-context contract;
-repeating it does not replace existing paid work or opt it into screening.
+Use 1..16 explicit nonblank queries. Discovery matches knowledge pages, including retired
+pages. A screened recipe rosters, per query, every identity match and the first 10 other
+pages in search order; only those are screened, and of the selected pages the first 4
+that the subject does not already cite or link are read in full, the rest shown as
+`context_cards`. `wiki audit-plan --path SUBJECT` reports that roster and its `scope`.
+Fresh recipes require candidate screening before full audit reads. An unchanged legacy
+recipe retains its full-context contract, every match read without a cutoff; repeating
+it does not replace existing paid work or opt it into screening.
 Stored queries reopen an assessment when matching pages or their authored revisions
 change. A changed subject needs fresh query selection. Unrelated corpus changes do not
 alone invalidate an assessment. This records the searched scope, not exhaustive semantic
@@ -174,6 +177,9 @@ The final audit reads every admitted body; screening creates no citation or comp
    status, scope and attribution. The document is the subject, not evidence for
    itself: an empty `evidence` list is expected. Read its explicit `related_pages`
    as context, never as automatically supporting evidence or proof of causation.
+   `context_cards` name further applicable discovery pages beyond the bounded read
+   scope by address and title only; they are not read and support nothing. The
+   candidate's `scope` states what an assessment of it checks.
    Context links do not authorize a transitive audit or establish that provider
    originals, preserved attachments or external destinations were read.
    Read the candidate's `reviews` too: each dependency exposes the current review,

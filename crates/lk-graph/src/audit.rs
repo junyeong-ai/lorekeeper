@@ -145,6 +145,10 @@ struct Receipts {
     last_merges: Option<WorkflowMerges>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selection_assessments: BTreeMap<String, selection::StateReference>,
+    /// The scope each recorded assessment checked (`AuditScope`), by subject address. A
+    /// receipt recorded before scopes were kept has none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    scopes: BTreeMap<String, AuditScope>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -731,15 +735,54 @@ pub struct AuditCandidate {
     pub input_revision: String,
     pub knowledge_status: KnowledgeStatus,
     pub evidence: Vec<Citation>,
-    /// Context pages: direct links, plus for an audit the discovery matches its screening
-    /// selected (every match when its discovery has no selection).
+    /// Context pages: direct links, plus for an audit the first `AUDIT_CONTEXT_PAGES` discovery
+    /// matches its screening selected that are not already cited or linked (every match when
+    /// its discovery has no selection).
     pub related_pages: Vec<Citation>,
     /// The direct-link part of `related_pages`, without any discovery match.
     pub linked_pages: Vec<Citation>,
+    /// Selected discovery owners beyond `AUDIT_CONTEXT_PAGES`, shown by address and title only:
+    /// previews, never read in full and never evidence.
+    pub context_cards: Vec<AuditContextCard>,
+    /// What an assessment of this candidate checked, recorded with its receipt.
+    pub scope: AuditScope,
     pub reviews: Vec<AuditReviewDependency>,
     pub discovery: Option<AuditDiscovery>,
     pub reason: AuditReason,
     pub priority: AuditPriority,
+}
+
+/// A discovery owner an audit shows without reading it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditContextCard {
+    pub path: String,
+    pub title: String,
+}
+
+/// The scope an audit assessment checks: the subject, its citations, its direct links and its
+/// discovery context in full, and further selected discovery owners as cards. Uncited pages
+/// that might contradict the subject outside this scope are not part of the assessment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditScope {
+    pub citations: usize,
+    pub linked_pages: usize,
+    pub context_pages: usize,
+    pub context_cards: usize,
+    /// The bounds screened discovery read under. Discovery recorded before screening reads
+    /// every match as context and a subject without discovery reads none, so neither has one.
+    pub screening: Option<AuditScreeningScope>,
+}
+
+/// Screened discovery: `candidates` screened under `candidates_per_query`, of which the first
+/// `context_page_limit` selected owners are read in full.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditScreeningScope {
+    pub candidates: usize,
+    pub candidates_per_query: usize,
+    pub context_page_limit: usize,
 }
 
 /// A subject's standing against its latest assessment receipt.
@@ -2064,26 +2107,41 @@ fn subject_kinds(pages: &[ScannedPage], dirs: &VaultDirs) -> BTreeMap<PathBuf, A
 /// semantic policy, so every run and profile reconstructs the same read scope for a result.
 pub const SYNTHESIS_CANDIDATES_PER_QUERY: usize = 50;
 
-/// Each query's roster for a synthesis: every identity match and the first
-/// `SYNTHESIS_CANDIDATES_PER_QUERY` other pages in search order, one per verified owner and never
-/// the subject or a review of it in `published`, the unedited synthesis publications naming it.
-/// Those are read as the subject's reviews; ranking them here would let a synthesis's own
-/// publication push an unchanged page out of the next synthesis's inputs. A page reached through several spellings is read through its own address when
+/// Discovery matches an audit screens per query besides its identity matches, in search order.
+/// A fixed policy like `SYNTHESIS_CANDIDATES_PER_QUERY`, so the screened inventory and the
+/// receipt's stated scope do not depend on the execution profile.
+pub const AUDIT_CANDIDATES_PER_QUERY: usize = 10;
+/// `AUDIT_CANDIDATES_PER_QUERY` as the card capture's ranked roster.
+const AUDIT_ROSTER: std::num::NonZeroUsize =
+    std::num::NonZeroUsize::new(AUDIT_CANDIDATES_PER_QUERY).unwrap();
+
+/// Screened discovery owners an audit reads in full, in roster order; the other selected
+/// owners are shown as metadata cards. Mandatory citations and direct links are always read.
+pub const AUDIT_CONTEXT_PAGES: usize = 4;
+
+/// Each query's roster: every identity match and the first `per_query` other pages in search
+/// order, one per verified owner and never the subject or a review of it in `published`. A
+/// synthesis passes the unedited synthesis publications naming its subject: those are read as
+/// the subject's reviews, and ranking them here would let a synthesis's own publication push
+/// an unchanged page out of the next synthesis's inputs. A page reached through several
+/// spellings is read through its own address when
 /// any query matched that spelling, otherwise through its preferred rostered one.
 /// `owners` caches owner resolution across the concepts of one load.
-fn synthesis_roster(
+#[allow(clippy::too_many_arguments)]
+fn ranked_roster(
     root: &Path,
     subject: &Path,
     published: &BTreeSet<String>,
     queries: &[lk_vault::DiscoveryQuery],
     ranked: &BTreeMap<lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>>,
+    per_query: usize,
     owners: &mut BTreeMap<String, PathBuf>,
     read: &lk_vault::ReadControl,
 ) -> Result<Vec<(lk_vault::DiscoveryQuery, Vec<lk_vault::RankedMatch>)>, GraphError> {
     let mut rosters = Vec::new();
     for query in queries {
         let mut seen = BTreeSet::new();
-        let mut places = SYNTHESIS_CANDIDATES_PER_QUERY;
+        let mut places = per_query;
         let mut roster = Vec::new();
         for matched in &ranked[query] {
             read.check().map_err(GraphError::from)?;
@@ -2233,13 +2291,9 @@ fn inputs_from_evidence(
         }
         queries.extend(plan.queries.clone());
     }
-    let discovered = match input_use {
-        InputUse::Audit => lk_vault::discover_query_matches_controlled(root, dirs, &queries, read),
-        InputUse::Synthesis => {
-            lk_vault::discover_ranked_query_matches_controlled(root, dirs, &queries, read)
-        }
-    }
-    .map_err(GraphError::from)?;
+    // Both readers bound discovery by a ranked roster, so both need the search order.
+    let discovered = lk_vault::discover_ranked_query_matches_controlled(root, dirs, &queries, read)
+        .map_err(GraphError::from)?;
     let mut owners = BTreeMap::new();
     let mut result = Vec::new();
     for page in pages.iter().filter(|page| selected(&page.path)) {
@@ -2292,6 +2346,8 @@ fn inputs_from_evidence(
             .iter()
             .map(AuditReviewDependency::identity)
             .collect::<Vec<_>>();
+        let mut context_cards = Vec::new();
+        let mut screened = None;
         let discovery = if let Some(plan) = receipts
             .discovery
             .get(&page_address(&page.path))
@@ -2301,41 +2357,65 @@ fn inputs_from_evidence(
                 InputUse::Audit => plan.selection.as_ref(),
                 InputUse::Synthesis => None,
             };
-            let mut matches = plan
-                .queries
-                .iter()
-                .flat_map(|query| discovered.matches[query].clone())
-                .filter(|citation| citation.path != page_address(&page.path))
-                .collect::<Vec<_>>();
-            if selection_plan.is_some() {
-                let owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
-                let mut distinct = Vec::new();
-                for citation in matches {
-                    if lk_vault::resolve_page_owner(root, Path::new(&citation.path))
-                        .map_err(error)?
-                        != owner
-                    {
-                        distinct.push(citation);
-                    }
-                }
-                matches = distinct;
-            }
-            matches.sort();
-            matches.dedup();
-            let ranked = match &discovered.ranked {
-                Some(ranked) => {
-                    let subject = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
-                    Some(synthesis_roster(
+            let subject_owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
+            let ranked = discovered
+                .ranked
+                .as_ref()
+                .expect("ranked discovery was requested");
+            let complete = || {
+                let mut matches = plan
+                    .queries
+                    .iter()
+                    .flat_map(|query| discovered.matches[query].clone())
+                    .filter(|citation| citation.path != page_address(&page.path))
+                    .collect::<Vec<_>>();
+                matches.sort();
+                matches.dedup();
+                matches
+            };
+            let (matches, ranked, ordered) = match (input_use, selection_plan) {
+                // A synthesis reads the complete matches through its ranked roster.
+                (InputUse::Synthesis, _) => {
+                    let roster = ranked_roster(
                         root,
-                        &subject,
-                        &review_index.unedited_publications(&page_address(&subject)),
+                        &subject_owner,
+                        &review_index.unedited_publications(&page_address(&subject_owner)),
                         &plan.queries,
                         ranked,
+                        SYNTHESIS_CANDIDATES_PER_QUERY,
                         &mut owners,
                         read,
-                    )?)
+                    )?;
+                    (complete(), Some(roster), Vec::new())
                 }
-                None => None,
+                // Discovery recorded before screening keeps its exact full-context derivation.
+                (InputUse::Audit, None) => (complete(), None, Vec::new()),
+                // A screened audit screens only its bounded roster, which already excludes the
+                // subject's owner, in roster order.
+                (InputUse::Audit, Some(_)) => {
+                    let roster = ranked_roster(
+                        root,
+                        &subject_owner,
+                        &BTreeSet::new(),
+                        &plan.queries,
+                        ranked,
+                        AUDIT_CANDIDATES_PER_QUERY,
+                        &mut owners,
+                        read,
+                    )?;
+                    let mut ordered = Vec::<Citation>::new();
+                    for (_, entries) in &roster {
+                        for matched in entries {
+                            if !ordered.contains(&matched.citation) {
+                                ordered.push(matched.citation.clone());
+                            }
+                        }
+                    }
+                    let mut matches = ordered.clone();
+                    matches.sort();
+                    screened = Some(matches.len());
+                    (matches, None, ordered)
+                }
             };
             let selection = selection_plan
                 .map(|selection| {
@@ -2354,16 +2434,50 @@ fn inputs_from_evidence(
                     )
                 })
                 .transpose()?;
-            if let Some(progress) = &selection {
+            if input_use == InputUse::Audit
+                && let Some(progress) = &selection
+            {
+                // Selected owners in roster order that the audit does not already read as a
+                // citation or direct link: the first `AUDIT_CONTEXT_PAGES` are read in full,
+                // the rest are cards.
                 let selected = progress.selected_owners()?;
-                for citation in &matches {
-                    let owner = lk_vault::resolve_page_owner(root, Path::new(&citation.path))
-                        .map_err(error)?;
-                    if selected.contains(&page_address(&owner)) {
-                        related_pages.push(citation.clone());
+                let mut owner_of = |path: &str| -> Result<PathBuf, GraphError> {
+                    if let Some(owner) = owners.get(path) {
+                        return Ok(owner.clone());
+                    }
+                    let owner =
+                        lk_vault::resolve_page_owner(root, Path::new(path)).map_err(error)?;
+                    owners.insert(path.to_owned(), owner.clone());
+                    Ok(owner)
+                };
+                let read_in_full = citations
+                    .iter()
+                    .chain(&related_pages)
+                    .map(|citation| owner_of(&citation.path))
+                    .collect::<Result<BTreeSet<_>, _>>()?;
+                let mut chosen = Vec::new();
+                for citation in &ordered {
+                    let owner = owner_of(&citation.path)?;
+                    if !read_in_full.contains(&owner) && selected.contains(&page_address(&owner)) {
+                        chosen.push(citation.clone());
                     }
                 }
+                let cards = chosen.split_off(chosen.len().min(AUDIT_CONTEXT_PAGES));
+                related_pages.extend(chosen);
+                context_cards = cards
+                    .into_iter()
+                    .map(|citation| {
+                        let page = by_path.get(Path::new(&citation.path)).ok_or_else(|| {
+                            error("audit discovery matched a page its scan did not read")
+                        })?;
+                        Ok(AuditContextCard {
+                            title: page.title.clone(),
+                            path: citation.path,
+                        })
+                    })
+                    .collect::<Result<_, GraphError>>()?;
             } else if input_use == InputUse::Audit {
+                // Every match of discovery recorded before screening is context.
                 related_pages.extend(matches.clone());
             }
             related_pages.sort();
@@ -2376,6 +2490,17 @@ fn inputs_from_evidence(
             })
         } else {
             None
+        };
+        let scope = AuditScope {
+            citations: citations.len(),
+            linked_pages: linked_pages.len(),
+            context_pages: related_pages.len() - linked_pages.len(),
+            context_cards: context_cards.len(),
+            screening: screened.map(|candidates| AuditScreeningScope {
+                candidates,
+                candidates_per_query: AUDIT_CANDIDATES_PER_QUERY,
+                context_page_limit: AUDIT_CONTEXT_PAGES,
+            }),
         };
         let input_revision = file_revision(
             &serde_json::to_string(&(
@@ -2425,6 +2550,8 @@ fn inputs_from_evidence(
             evidence: citations,
             related_pages,
             linked_pages,
+            context_cards,
+            scope,
             reviews: scoped_reviews,
             discovery,
             reason,
@@ -2538,6 +2665,8 @@ fn load_synthesis_receipts(
         _last_merges: Option<serde::de::IgnoredAny>,
         #[serde(default, rename = "selection_assessments")]
         _selection_assessments: Option<serde::de::IgnoredAny>,
+        #[serde(default, rename = "scopes")]
+        _scopes: Option<serde::de::IgnoredAny>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -3533,6 +3662,9 @@ pub fn record_with_guard_controlled(
         } else {
             AuditClass::Changed
         };
+        receipts
+            .scopes
+            .insert(assessment.path.clone(), candidate.scope.clone());
         receipts.entries.insert(assessment.path.clone(), assessment);
     }
     if whole_inputs.len() == selected.len() {
@@ -3547,6 +3679,7 @@ pub fn record_with_guard_controlled(
     receipts
         .selection_assessments
         .retain(|path, _| exists(path));
+    receipts.scopes.retain(|path, _| exists(path));
     receipts.pending.retain(|path| !recorded.contains(path));
     let after = serde_json::to_string_pretty(&receipts).map_err(error)? + "\n";
     plan.publish_expected(root, STATE, before, after)

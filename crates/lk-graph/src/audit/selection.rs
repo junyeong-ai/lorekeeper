@@ -693,12 +693,16 @@ fn capture_cards(
         .ok_or_else(|| error("legacy audit discovery uses its original full context"))?;
     let mut inventory =
         lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
+    // The audit's bounded roster (`AUDIT_CANDIDATES_PER_QUERY`), the one its rows screen.
+    let recipe = lk_vault::DiscoveryRecipe {
+        queries: discovery.queries.clone(),
+        roster: lk_vault::DiscoveryRoster::Ranked(super::AUDIT_ROSTER),
+        subject: Some(PathBuf::from(&candidate.path)),
+    };
     let (mut captures, _) = lk_vault::capture_discovery_batch_with_inventory(
         root,
         dirs,
-        &[lk_vault::DiscoveryRecipe::complete(
-            discovery.queries.clone(),
-        )],
+        &[recipe],
         &mut inventory,
         read,
     )
@@ -706,13 +710,7 @@ fn capture_cards(
     let capture = captures.pop().expect("one selected audit recipe");
     let mut reviews = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
     let mut cards = BTreeMap::new();
-    let subject_owner = page_address(
-        &lk_vault::resolve_page_owner(root, Path::new(&candidate.path)).map_err(error)?,
-    );
     for card in &capture.candidates {
-        if card.owner == subject_owner {
-            continue;
-        }
         let queries: Vec<_> = card
             .query_indexes
             .iter()
