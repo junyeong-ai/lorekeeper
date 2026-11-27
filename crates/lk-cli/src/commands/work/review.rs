@@ -217,9 +217,12 @@ pub(in crate::commands) fn same_kind_refusal(
     {
         let proposed_here = review.judged_citation_digest.as_deref()
             == Some(task.cache_hash.as_str())
-            && review.judged_review_digest.as_deref().is_none_or(|digest| {
-                digest == review_digest(open.iter().filter(|other| other.path != review.path))
-            });
+            && review
+                .judged_review_digest
+                .as_deref()
+                .is_some_and(|digest| {
+                    digest == review_digest(open.iter().filter(|other| other.path != review.path))
+                });
         if proposed_here {
             return Ok(Some(format!(
                 "this synthesis is owed because of the open {kind} review {} a synthesis of this concept proposed, and nothing else changed since; reference it in the synthesis instead of proposing another {kind} review",

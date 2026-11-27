@@ -1118,6 +1118,27 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         fixture.run();
         assert_eq!(fixture.calls(), calls, "the paraphrase loop ends");
         assert_eq!(reviews(&explorations), 2);
+        // A review recorded before the other reviews were part of its judgment cannot show the
+        // loop, so a distinct proposal beside it publishes.
+        let (fixture, task, explorations) = with_open_review("needs-review-distinct", "open");
+        let legacy = explorations.join("rollback-principle.md");
+        let raw = std::fs::read_to_string(&legacy).unwrap();
+        let recorded = raw.replace(
+            "  kind: conflict\n",
+            &format!(
+                "  kind: conflict\n  judged_citation_digest: \"{}\"\n",
+                task.cache_hash
+            ),
+        );
+        assert_ne!(recorded, raw);
+        std::fs::write(&legacy, recorded).unwrap();
+        let report = fixture.run();
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(reviews(&explorations), 2, "{report}");
+        assert!(fixture.done(&task), "{report}");
         // The causal loop alone: a synthesis that keeps proposing publishes one review, and
         // the resynthesis that review causes publishes the synthesis instead of another.
         let fixture = Fixture::new("codex");
