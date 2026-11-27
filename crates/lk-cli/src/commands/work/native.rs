@@ -1216,7 +1216,9 @@ mod tests {
         let (task, _, context, _, _, _) = fixture();
         let root = tempfile::tempdir().unwrap();
         let session = lk_vault::MutationSession::acquire(root.path()).unwrap();
-        let resources = (0..380)
+        // Near the input bound, with room for the shared generation contracts the request
+        // carries to grow; a guard repeated per observation would exceed it many times over.
+        let resources = (0..370)
             .map(|index| {
                 let text = format!("Declared source {index}. {}", "x".repeat(2000));
                 SemanticResource {

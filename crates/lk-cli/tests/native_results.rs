@@ -2836,13 +2836,14 @@ fn changed_publication_contract_recovers_frontier_without_retrying_capacity_held
     for engine in ["codex", "claude-code"] {
         let fixture = Fixture::new(engine);
         let config = std::fs::read_to_string(&fixture.config).unwrap();
-        // The frontier request, with its packaged contracts, fits; the root request carries
-        // the 40000-character capacity observation on top of it and does not.
+        // The frontier request, with its packaged contracts, fits with room for them to grow;
+        // the root request carries the 40000-character capacity observation on top of it and
+        // does not.
         std::fs::write(
             &fixture.config,
             config
                 .replace("max_calls: 6", "max_calls: 64")
-                .replace("max_input_bytes: 65536", "max_input_bytes: 139264")
+                .replace("max_input_bytes: 65536", "max_input_bytes: 143360")
                 .replace("max_result_bytes: 8192", "max_result_bytes: 16384"),
         )
         .unwrap();
