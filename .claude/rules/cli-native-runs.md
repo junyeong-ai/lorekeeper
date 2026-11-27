@@ -33,7 +33,9 @@ paths:
   cancellation bound a child only until it exits; its answer is then complete, and cleanup
   is bounded on its own: its pipes get `CLEANUP_GRACE`, then the group is killed so a
   descendant releases them, then one more grace. Stdout still open after that fails only
-  where stdout carries the answer. The shared WorkflowLease
+  where stdout carries the answer. Once the answer is settled, a failed group signal never
+  discards it; a stopped child gets `KILL_REAP_DEADLINE` to exit after SIGKILL and is
+  otherwise reported as a cleanup failure rather than holding the lease. The shared WorkflowLease
   covers semantic reads through final publication. Native daily acquisition precedes a
   separate publication-only lease; `--wait` selects waiting rather than refusal at that
   boundary. Release it before the parent semantic lease. Never hold a writer claim

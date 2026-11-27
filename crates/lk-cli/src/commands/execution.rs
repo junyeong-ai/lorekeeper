@@ -86,6 +86,10 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
     }
 }
 
+/// How long a stopped child may take to exit after SIGKILL before cleanup reports it.
+#[cfg(unix)]
+const KILL_REAP_DEADLINE: Duration = Duration::from_secs(5);
+
 /// How long a child's pipes may stay open after the child itself exited, before and again
 /// after its group is killed.
 #[cfg(unix)]
@@ -411,9 +415,21 @@ impl RunningChild {
         };
         match signal_group(self.group, Signal::KILL) {
             Ok(()) if !reaped => {
-                if let Err(error) = self.child.wait().await {
-                    clean = false;
-                    detail.push_str(&format!("; reap child: {error}"));
+                // A child stuck in uninterruptible I/O can outlive SIGKILL; the run reports it
+                // rather than holding the workflow lease while it waits.
+                match tokio::time::timeout(KILL_REAP_DEADLINE, self.child.wait()).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        clean = false;
+                        detail.push_str(&format!("; reap child: {error}"));
+                    }
+                    Err(_) => {
+                        clean = false;
+                        detail.push_str(&format!(
+                            "; child did not exit within {}s of SIGKILL",
+                            KILL_REAP_DEADLINE.as_secs()
+                        ));
+                    }
                 }
             }
             Err(error) => {
@@ -611,8 +627,11 @@ async fn run_child(
     };
     let (cancelled, mut termination, mut detail) = match settled {
         Settled::Exited(status, stdout, delivery, killed) => {
+            // The answer is settled and the child reaped: killing the group only removes
+            // descendants, and a group with no live member may refuse the signal (macOS answers
+            // a group of zombies with EPERM). Neither outcome changes the answer.
             if !killed {
-                signal_group(running.group, Signal::KILL)?;
+                let _ = rustix::process::kill_process_group(running.group, Signal::KILL);
             }
             running.cleaned = true;
             let closed = matches!(delivery, InputDelivery::Closed);
