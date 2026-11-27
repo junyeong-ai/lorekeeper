@@ -472,7 +472,7 @@ fn a_scheduled_knowledge_run_without_semantic_hosts_skips_its_audit_without_paus
 }
 
 #[test]
-fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning() {
+fn a_scheduled_run_whose_host_account_directory_is_gone_defers_its_work_without_a_pause() {
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
     configure(&fixture, Some(20), 60);
     let missing = fixture.root().join("deleted-account");
@@ -483,23 +483,28 @@ fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning()
         .output()
         .unwrap();
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!output.status.success(), "the job is incomplete: {report}");
     assert_eq!(calls(&report), 0, "{report}");
-    let run = &report["runs"][0];
-    assert_eq!(run["halted"], true, "{report}");
-    let stage = run["stages"]
+    let first = &report["runs"][0];
+    assert_eq!(first["halted"], false, "{report}");
+    let stage = first["stages"]
         .as_array()
         .unwrap()
         .iter()
         .find(|stage| stage["name"] == "host environment")
         .unwrap_or_else(|| panic!("{report}"));
+    assert_eq!(stage["state"], "failed", "{report}");
     let detail = stage["detail"].as_str().unwrap();
     assert!(
         detail.contains("CODEX_HOME") && detail.contains("deleted-account"),
         "{detail}"
     );
+    let usage_file = fixture
+        .root()
+        .join("vault/.lorekeeper/automation-usage.json");
     assert!(
-        !usage(&fixture)["paused"].as_object().unwrap().is_empty(),
-        "the operation pauses with a configuration cause: {report}"
+        !usage_file.exists() || usage_paused_is_empty(&std::fs::read(&usage_file).unwrap()),
+        "a host environment is a current condition, not a pause: {report}"
     );
     for store in [
         "vault/.lorekeeper/audit-preparation-attempts",
@@ -513,6 +518,86 @@ fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning()
             .map(Result::unwrap)
             .all(|entry| entry.file_name() != "inspection-timeouts.json"),
         "no item is held"
+    );
+    // The next scheduled run checks again and, with the directory back, proceeds.
+    let recovered = run(&fixture, "knowledge", false);
+    assert!(calls(&recovered) > 0, "{recovered}");
+    assert!(
+        recovered["runs"][0]["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|stage| stage["name"] != "host environment"),
+        "{recovered}"
+    );
+}
+
+#[test]
+fn a_scheduled_run_defers_only_the_work_of_a_profile_that_cannot_start() {
+    let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+    super::stage_profiles::route_profiles(
+        &fixture,
+        "codex",
+        &[("reduce", "reducer")],
+        &[("reducer", "codex")],
+    );
+    configure(&fixture, Some(64), 120);
+    let reducer = fixture.root().join("reducer executable");
+    let saved = std::fs::read(&reducer).unwrap();
+    std::fs::remove_file(&reducer).unwrap();
+    let report = run(&fixture, "knowledge", false);
+    let runs = report["runs"].as_array().unwrap();
+    assert!(runs.iter().all(|run| run["halted"] == false), "{report}");
+    assert!(
+        runs.iter().any(|run| run["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "host environment"
+                && stage["state"] == "failed"
+                && stage["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("profile reducer"))),
+        "{report}"
+    );
+    let inspected = calls(&report);
+    assert!(inspected > 0, "the healthy profile keeps working: {report}");
+    assert!(
+        super::stage_profiles::routed_calls(&fixture)
+            .iter()
+            .all(|call| call["profile"] == "primary"),
+        "{report}"
+    );
+    assert!(
+        runs.iter()
+            .all(|run| run["audit"].as_array().is_none_or(Vec::is_empty)),
+        "the deferred reduction finishes no audit: {report}"
+    );
+    assert!(
+        usage_paused_is_empty(
+            &std::fs::read(
+                fixture
+                    .root()
+                    .join("vault/.lorekeeper/automation-usage.json")
+            )
+            .unwrap()
+        ),
+        "{report}"
+    );
+    // Restored, the profile is checked again by the next run and its work completes.
+    std::fs::write(&reducer, saved).unwrap();
+    std::fs::set_permissions(&reducer, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let recovered = run(&fixture, "knowledge", false);
+    assert!(
+        recovered["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|run| run["audit"].as_array())
+            .flatten()
+            .any(|audit| audit["assessed_path"] == "wiki/concepts/large.md"),
+        "{recovered}"
     );
 }
 

@@ -952,6 +952,9 @@ mod native {
         /// Host configurations that reached `HOST_FAILURE_LIMIT`; this run sends them nothing
         /// more, while other hosts keep their work.
         tripped_hosts: std::collections::BTreeSet<HostKey>,
+        /// Profiles whose host environment cannot start in this run's job, with why; this run
+        /// sends them nothing.
+        unavailable_profiles: std::collections::BTreeMap<String, String>,
         /// Host configurations that answered a call in this run.
         answered_hosts: std::collections::BTreeSet<HostKey>,
         /// Hosts this run invoked; a host it already reached needs no probe.
@@ -1453,6 +1456,42 @@ mod native {
                     .answered_hosts
                     .iter()
                     .all(|host| self.tripped_hosts.contains(host));
+        }
+
+        /// Sends nothing in this run to the profiles whose host environment cannot start, and
+        /// names them in a failed `host environment` stage, so the job reports itself
+        /// incomplete. Their work is deferred without a hold or a pause; other profiles keep
+        /// calling and returned results keep publishing, and the next run checks again.
+        fn exclude_unavailable_hosts(
+            &mut self,
+            unavailable: std::collections::BTreeMap<String, String>,
+        ) {
+            if unavailable.is_empty() {
+                return;
+            }
+            let detail = unavailable
+                .iter()
+                .map(|(profile, reason)| format!("profile {profile}: {reason}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            self.record(
+                "host environment",
+                StageState::Failed,
+                Some(format!(
+                    "{detail}; work routed to these profiles is deferred to a later run, which checks again"
+                )),
+            );
+            self.unavailable_profiles = unavailable;
+        }
+
+        /// The deferral of a call routed to a profile whose host environment cannot start in
+        /// this run, if it is one.
+        fn unavailable_profile(&self, profile: &str) -> Option<HostUnavailable> {
+            self.unavailable_profiles.get(profile).map(|reason| {
+                HostUnavailable(format!(
+                    "profile {profile}: {reason}; its work is deferred to a later run"
+                ))
+            })
         }
 
         /// The deferral of a call routed to a host this run tripped, if it is one.
@@ -2158,6 +2197,9 @@ mod native {
                 }
             }
             let name = name.to_owned();
+            if let Some(unavailable) = self.unavailable_profile(&name) {
+                return Err(unavailable.into());
+            }
             if let Some(agent) = self.agents.get(&name) {
                 metrics.execution = Some(agent.execution.clone());
                 return match self.tripped_host(metrics) {
@@ -8092,6 +8134,7 @@ mod native {
             drain_blocked: false,
             inspection_deferred: std::collections::BTreeMap::new(),
             host_failures: std::collections::BTreeMap::new(),
+            unavailable_profiles: std::collections::BTreeMap::new(),
             tripped_hosts: std::collections::BTreeSet::new(),
             answered_hosts: std::collections::BTreeSet::new(),
             hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
@@ -8163,13 +8206,14 @@ mod native {
             } else {
                 *campaign_root = Some(pin.clone());
             }
-            if runner.automation.is_some()
-                && runner.config.invokes_semantic_hosts()
-                && let Err(error) =
-                    execution::preflight_hosts(&runner.config.execution, operation.semantic())
-            {
-                runner.failure("host environment", error);
-                return runner.finish();
+            if runner.automation.is_some() && runner.config.invokes_semantic_hosts() {
+                match execution::preflight_hosts(&runner.config.execution, operation.semantic()) {
+                    Ok(unavailable) => runner.exclude_unavailable_hosts(unavailable),
+                    Err(error) => {
+                        runner.failure("host environment", error);
+                        return runner.finish();
+                    }
+                }
             }
             match operation {
                 Operation::Daily => {

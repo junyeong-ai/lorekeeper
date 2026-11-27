@@ -208,8 +208,12 @@ no query, fragment or non-root path. Regenerate definitions when these change.
 Before planning, a scheduled run checks each host its operation may use: the agent
 executable resolves to an executable file, and the captured `CODEX_HOME` or
 `CLAUDE_CONFIG_DIR` (or a Claude profile's `config_directory`) is an existing
-directory. A failure pauses the operation with a `host environment` cause naming the
-profile and directory, spends no call and holds no item.
+directory. A failing profile is a current condition of the job's environment, not a
+pause: the run reports a failed `host environment` stage naming each such profile and
+why (the job is incomplete), sends that profile nothing and defers its work without a
+hold, while other profiles keep calling and returned results keep publishing. The next
+scheduled run checks again, so restoring the executable or directory needs no
+`--resume`. When every profile the operation needs fails, the run spends no call.
 
 ## Timing and notifications
 

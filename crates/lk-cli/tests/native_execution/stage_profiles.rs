@@ -65,7 +65,7 @@ TRACE
     configure_profile_options(fixture, base);
 }
 
-fn routed_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
+pub(super) fn routed_calls(fixture: &Fixture) -> Vec<serde_json::Value> {
     std::fs::read_dir(fixture.root().join("stage-calls"))
         .unwrap()
         .map(|entry| {
