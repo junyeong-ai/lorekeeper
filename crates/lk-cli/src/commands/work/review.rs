@@ -199,7 +199,7 @@ pub(in crate::commands) fn admit(
 /// open review of its kind that a synthesis of this concept proposed against the same
 /// citations and the same other open reviews), or it leaves an open review of its kind
 /// without a declared difference.
-pub(in crate::commands) fn same_kind_refusal(
+fn same_kind_refusal(
     root: &Path,
     config: &lk_core::config::Config,
     task: &QueueTask,

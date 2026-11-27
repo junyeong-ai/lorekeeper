@@ -104,11 +104,12 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
         if mode.startswith('needs-review') and task['kind']=='synthesize-concept':
             roster=request['inspected_resources'] if completed is not None else item['resources']
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
-            if mode in ['needs-review-always','needs-review-distinct','needs-review-gap-always'] or not any(authority(entry)=='review' for entry in roster):
+            if mode in ['needs-review-always','needs-review-distinct','needs-review-gap-always','needs-review-then-linked-gap'] or not any(authority(entry)=='review' for entry in roster):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
                 (root/'review-proposals').write_text(str(proposals))
-                kind='evidence-gap' if mode in ['needs-review-gap','needs-review-gap-always'] else 'conflict'
+                later=mode=='needs-review-then-linked-gap' and proposals>1
+                kind='evidence-gap' if mode in ['needs-review-gap','needs-review-gap-always'] or later else 'conflict'
                 def lookup(node, key):
                     if isinstance(node, dict):
                         if key in node: return node[key]
@@ -124,7 +125,7 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
                     'review_refs':[review['path'] for review in reviews] if reviews else None,
                     'gap_claims':['The protocol is deployed in production.'] if any(review['kind']=='evidence-gap' for review in reviews) else None}
                 results.append({'status':'needs-review','value':{'kind':kind,'title':'Deployment status disagreement' if mode!='needs-review-distinct' else 'Deployment rollback question',
-                    'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page],
+                    'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' or later else ''),'evidence':[page],
                     'distinct_from':distinct,'synthesis':synthesis},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
@@ -1181,6 +1182,29 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             fixture.run();
             assert_eq!(reviews(&explorations), 2, "{reason}");
         }
+
+        // After a target published its review in this run, a refused proposal still publishes
+        // its synthesis rather than waiting for a later run.
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review-then-linked-gap").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.root().join("review-proposals")).unwrap(),
+            "2",
+            "{report}"
+        );
+        assert!(fixture.done(&task), "{planned}: {report}");
+        assert_eq!(
+            reviews(&fixture.root().join("vault/wiki/explorations")),
+            1,
+            "{report}"
+        );
 
         let fixture = Fixture::new("codex");
         fixture.route_synthesis();

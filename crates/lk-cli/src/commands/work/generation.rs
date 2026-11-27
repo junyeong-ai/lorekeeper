@@ -305,18 +305,14 @@ pub(super) fn assemble_prepared(
         work.plan.max_result_bytes,
     )?;
     // A refused proposal never holds the synthesis: its reply's synthesis is published and
-    // only the proposal is dropped.
+    // only the proposal is dropped. Once the target spent its review in this run, only an
+    // admissible proposal waits for a later run.
     Ok(match outcome {
-        Outcome::NeedsReview(proposal, reason, synthesis) if review == ReviewAllowance::Spent => {
-            match super::review::same_kind_refusal(root, config, task, &proposal)? {
-                Some(_) => Outcome::Complete(synthesis),
-                None => Outcome::ReviewDeferred(format!(
+        Outcome::NeedsReview(proposal, reason, synthesis) => {
+            match super::review::admit(root, config, task, prepared, proposal)? {
+                Ok(_) if review == ReviewAllowance::Spent => Outcome::ReviewDeferred(format!(
                     "{reason} (this target already published a review in this run; the proposal waits for a later run)"
                 )),
-            }
-        }
-        Outcome::NeedsReview(proposal, _, synthesis) => {
-            match super::review::admit(root, config, task, prepared, proposal)? {
                 Ok(review) => Outcome::ReviewAdmitted(review),
                 Err(_) => Outcome::Complete(synthesis),
             }

@@ -128,7 +128,7 @@ paths:
   refused. A new review never takes an address that folds (case, NFC) onto a removed review
   whose absence the request guards. A target publishes at most one review per run, spent when
   it publishes: a further admissible proposal in that run publishes and records nothing and
-  defers only that target, while one the rule refuses publishes its synthesis. The published
+  defers only that target, while one admission refuses for any reason publishes its synthesis. The published
   review records its `kind`, `judged_citation_digest` and `judged_review_digest`, with its
   concept as its subject, so automation's own reviews are recognizable.
 - A synthesis capture lists every open review whose subject owner is the concept in
