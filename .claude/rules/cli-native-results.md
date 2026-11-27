@@ -64,10 +64,11 @@ paths:
   `refine`): Rust writes each of those from its heading, the locale's off-focus sentence
   and its `🔗` source links, and every other event must keep its source links' destinations.
   A broken heading sequence, an invalid index, an off-focus event on a source without a
-  focus, a lost source link or written events beyond the body bytes the result allows is an
-  invalid body,
-  held as a rejected reply. Synthesis has no such typed disposition: telling unsupported
-  claims, evidence gaps and processing blockers apart stays with its instruction.
+  focus or a lost source link is an invalid body, held as a rejected reply; so is any
+  complete section body, refined or not, beyond the body bytes its result allows, since a
+  shorter envelope (`"off_focus":[]`, or none) fits the reply limit with a longer body.
+  Synthesis has no such typed disposition: telling unsupported claims, evidence gaps and
+  processing blockers apart stays with its instruction.
 - Discovery recovery journals the extraction discovery recipe and its
   `extraction-discovery-recovery-v1` sidecar together under vault→queue claims. Preserve
   exact current Source Work; a recipe that changes what a Work reads (cli-semantic-work.md)

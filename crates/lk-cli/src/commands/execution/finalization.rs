@@ -378,7 +378,7 @@ pub(in crate::commands) fn decode_value(
     let off_focus = response.off_focus.unwrap_or_default();
     let output = match (response.status.as_str(), response.body, response.reason) {
         ("complete", Some(body), None) => match lk_core::markdown::validate_section_body(&body) {
-            Ok(()) => refine(request, body, &off_focus),
+            Ok(()) => within_allowance(request, refine(request, body, &off_focus)),
             Err(error) => SectionResponse::InvalidBody(format!("invalid section body: {error}")),
         },
         ("needs-action", None, Some(reason))
@@ -399,11 +399,10 @@ pub(in crate::commands) fn decode_value(
 /// order. Each event it lists in `off_focus` is written here from its heading, the locale's
 /// off-focus sentence and its 🔗 source links (the template's `🔗 {original_link}` links), in
 /// place of what the reply wrote under it; every other event must keep each of those links'
-/// destinations, as CommonMark reads them. A reply breaking either, declaring an event
-/// off-focus on a source without a focus, or whose written events exceed the body bytes its
-/// result allows, is an invalid body: a target-local hold of that exact request, never a
-/// fatal publication error. A request without events takes its body as returned and declares
-/// no off-focus event.
+/// destinations, as CommonMark reads them. A reply breaking either, or declaring an event
+/// off-focus on a source without a focus, is an invalid body: a target-local hold of that
+/// exact request, never a fatal publication error. A request without events takes its body as
+/// returned and declares no off-focus event.
 fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse {
     let Some(events) = request["events"].as_array() else {
         return if off_focus.is_empty() {
@@ -505,30 +504,79 @@ fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse
         }
         refined.push_str(block);
     }
-    // The reply fit its allowance; the events Rust wrote may not. The allowance is what the
-    // section result leaves its body (`max_response_bytes` beyond an empty response).
-    let allowance = request["max_response_bytes"]
-        .as_u64()
-        .and_then(|limit| usize::try_from(limit).ok())
-        .and_then(|limit| limit.checked_sub(empty_response_bytes()));
-    let body_bytes = serde_json::to_string(&refined)
-        .expect("a body serializes")
-        .len()
-        - 2;
-    if let Some(allowance) = allowance.filter(|allowance| body_bytes > *allowance) {
-        return SectionResponse::InvalidBody(format!(
-            "the refined section with its off-focus events needs {body_bytes} body bytes, above the {allowance} its result allows"
-        ));
-    }
     match lk_core::markdown::validate_section_body(&refined) {
         Ok(()) => SectionResponse::Complete(refined),
         Err(error) => SectionResponse::InvalidBody(format!("invalid section body: {error}")),
     }
 }
 
+/// `response`, held as an invalid body when its complete body exceeds the bytes its section
+/// result allows (`max_response_bytes` beyond an empty response, as compact JSON string
+/// bytes). The reply's own limit does not bound the body: `"off_focus":[]` or an absent
+/// `off_focus` is shorter than the `null` the allowance reserves, and Rust writes off-focus
+/// events itself.
+fn within_allowance(request: &Value, response: SectionResponse) -> SectionResponse {
+    let SectionResponse::Complete(body) = response else {
+        return response;
+    };
+    let allowance = request["max_response_bytes"]
+        .as_u64()
+        .and_then(|limit| usize::try_from(limit).ok())
+        .and_then(|limit| limit.checked_sub(empty_response_bytes()));
+    let body_bytes = serde_json::to_string(&body)
+        .expect("a body serializes")
+        .len()
+        - 2;
+    match allowance.filter(|allowance| body_bytes > *allowance) {
+        Some(allowance) => SectionResponse::InvalidBody(format!(
+            "the complete section needs {body_bytes} body bytes, above the {allowance} its result allows"
+        )),
+        None => SectionResponse::Complete(body),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_complete_body_is_bounded_by_its_result_allowance_whatever_its_envelope() {
+        // The allowance reserves `"off_focus":null`; `[]` or an absent field is shorter, so a
+        // reply can fit its own limit with a body its section result cannot hold.
+        let allowance = 40;
+        let request = json!({"max_response_bytes": empty_response_bytes() + allowance});
+        let decode = |body: &str, envelope: Value| {
+            let mut value = json!({"status":"complete","body":body,"reason":null});
+            if let Some(off_focus) = envelope.get("off_focus") {
+                value["off_focus"] = off_focus.clone();
+            }
+            decode_value(value, &request).unwrap().0
+        };
+        let fits = "a".repeat(allowance);
+        for envelope in [
+            json!({"off_focus": null}),
+            json!({"off_focus": []}),
+            json!({}),
+        ] {
+            assert_eq!(
+                decode(&fits, envelope.clone()),
+                SectionResponse::Complete(fits.clone()),
+                "{envelope}"
+            );
+        }
+        for (body, envelope) in [
+            ("a".repeat(allowance + 2), json!({"off_focus": []})),
+            ("a".repeat(allowance + 1), json!({})),
+        ] {
+            assert!(
+                matches!(
+                    decode(&body, envelope.clone()),
+                    SectionResponse::InvalidBody(reason) if reason.contains("allows")
+                ),
+                "{envelope}"
+            );
+        }
+    }
 
     #[test]
     fn generation_contracts_include_complete_shared_rules_and_refuse_section_roles() {
