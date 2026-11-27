@@ -2991,24 +2991,26 @@ mod native {
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
-            for turn in &mut turns {
+            // A turn routed to a host this run tripped is deferred alone; the wave still sends
+            // the turns of healthy hosts, and the reservation still covers every planned turn.
+            let mut ready = Vec::new();
+            let mut pending = turns.into_iter();
+            while let Some(mut turn) = pending.next() {
                 if let Err(error) = self.prepare_agent(&mut turn.metrics).await {
                     if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
                         let reason = unavailable.to_string();
-                        for mut turn in turns {
-                            self.inspection_deferred
-                                .insert(turn.work_id.clone(), reason.clone());
-                            if let Some(target) = &turn.target {
-                                self.finalization_replans.defer(target, &reason);
-                            }
-                            turn.metrics.outcome = WorkOutcome::Rejected;
-                            self.record_work_step(turn.metrics);
-                        }
-                        self.queue_admitted.clear();
-                        self.deferred("host unavailable", reason);
-                        return Some(true);
+                        self.inspection_deferred
+                            .insert(turn.work_id.clone(), reason.clone());
+                        let subject = jobs
+                            .iter()
+                            .find(|(_, id)| **id == turn.work_id)
+                            .map_or(turn.work_id.as_str(), |(path, _)| path.as_str());
+                        self.deferred("host unavailable", format!("{subject}: {reason}"));
+                        turn.metrics.outcome = WorkOutcome::Rejected;
+                        self.record_work_step(turn.metrics);
+                        continue;
                     }
-                    for mut turn in turns {
+                    for mut turn in ready.into_iter().chain([turn]).chain(pending) {
                         turn.metrics.outcome = if self.result.cancelled {
                             WorkOutcome::Cancelled
                         } else {
@@ -3034,6 +3036,11 @@ mod native {
                 let (request, directory) = invocation.into_request(timeout, capture_limit);
                 requests.push(request);
                 directories.push(directory);
+                ready.push(turn);
+            }
+            let turns = ready;
+            if turns.is_empty() {
+                return Some(true);
             }
             let reservations = &reserved_targets[1..];
             {
@@ -4886,26 +4893,36 @@ mod native {
             let mut requests = Vec::new();
             let mut directories = Vec::new();
             let mut engines = Vec::new();
-            for (_, turn) in &mut turns {
+            // A turn routed to a host this run tripped is deferred alone; the wave still sends
+            // the turns of healthy hosts.
+            let planned = turns
+                .iter()
+                .map(|(target, _)| target.clone())
+                .collect::<Vec<_>>();
+            let mut ready = Vec::new();
+            let mut unavailable_hosts = false;
+            let mut pending = turns.into_iter();
+            while let Some((target, mut turn)) = pending.next() {
                 if let Err(error) = self.prepare_agent(turn.metrics_mut()).await {
                     if let Some(unavailable) = error.downcast_ref::<HostUnavailable>() {
                         let reason = unavailable.to_string();
-                        for (target, _) in &turns {
-                            self.finalization_replans.defer(target, &reason);
-                        }
-                        let targets = turns
-                            .iter()
-                            .map(|(target, _)| target.clone())
-                            .collect::<Vec<_>>();
-                        self.record_uninvoked_queue_reads(turns, WorkOutcome::Rejected);
-                        self.replan_after_hold();
-                        self.deferred(
-                            "host unavailable",
-                            format!("{}: {reason}", targets.join(", ")),
+                        self.finalization_replans.defer(&target, &reason);
+                        self.deferred("host unavailable", format!("{target}: {reason}"));
+                        self.record_uninvoked_queue_reads(
+                            vec![(target, turn)],
+                            WorkOutcome::Rejected,
                         );
-                        return true;
+                        unavailable_hosts = true;
+                        continue;
                     }
-                    self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
+                    self.record_uninvoked_queue_reads(
+                        ready
+                            .into_iter()
+                            .chain([(target, turn)])
+                            .chain(pending)
+                            .collect(),
+                        WorkOutcome::Failed,
+                    );
                     return self.agent_preflight_failure("bounded queue receipt", error);
                 }
                 let timeout = self.agent_profile(turn.metrics()).timeout();
@@ -4917,7 +4934,14 @@ mod native {
                 ) {
                     Ok(invocation) => invocation,
                     Err(error) => {
-                        self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
+                        self.record_uninvoked_queue_reads(
+                            ready
+                                .into_iter()
+                                .chain([(target, turn)])
+                                .chain(pending)
+                                .collect(),
+                            WorkOutcome::Failed,
+                        );
                         return self.failure("bounded queue receipt", error);
                     }
                 };
@@ -4927,6 +4951,12 @@ mod native {
                 let (request, directory) = invocation.into_request(timeout, limit);
                 requests.push(request);
                 directories.push(directory);
+                ready.push((target, turn));
+            }
+            let turns = ready;
+            if turns.is_empty() {
+                self.replan_after_hold();
+                return true;
             }
             {
                 let Some((session, waited)) = self.mutation_session("queue scheduling").await
@@ -4950,9 +4980,13 @@ mod native {
                         .filter(|binding| seen.insert(binding.target.clone()))
                         .cloned()
                         .collect::<Vec<_>>();
-                    let targets = admitted
+                    // The cursor passes every planned target, a deferred one included, so the
+                    // reservation matches the order the wave was planned in.
+                    let mut reserved = std::collections::BTreeSet::new();
+                    let targets = planned
                         .iter()
-                        .map(|binding| binding.target.clone())
+                        .filter(|target| reserved.insert((*target).clone()))
+                        .cloned()
                         .collect::<Vec<_>>();
                     if let Err(error) = scheduler::reserve_in_session(
                         &session,
@@ -4969,6 +5003,9 @@ mod native {
                 }
                 if let Err(error) = self.queue_admitted.charge(&bindings) {
                     return self.failure("queue scheduling", error);
+                }
+                if unavailable_hosts {
+                    self.replan_after_hold();
                 }
             }
             eprintln!(
