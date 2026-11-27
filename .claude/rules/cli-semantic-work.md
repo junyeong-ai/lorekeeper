@@ -69,8 +69,13 @@ paths:
   missing origin is a miss. The index is disposable: maintenance rebuilds it from stored
   Work and drops entries whose origin is gone. Existing Works, reductions and refined
   nodes are never seeded.
-- `work source` reuses fresh Work capture to page one planned resource: `--resource`
-  selects it by roster index, and its default is the unique retained task input. A queue
+- `work source` pages one planned resource from the Work's stored plan: `--resource`
+  selects it by roster index, and its default is the unique retained task input. Only that
+  resource is read, from its current bytes (the task's retained input, or the page read
+  exactly, semantically or through the request's context snapshot), and it is served only
+  when its text digest is the plan's; any other change refuses as changed context. The
+  Work's scope is not rebuilt, so a page read is no completion or currency proof:
+  publication guards the owned inputs. A queue
   Work's native finalizer can therefore reread a cited page or selected owner that a lossy
   observation summarized, instead of only refusing; audit requests carry no `source_read`. Literal seeks identify text
   positions, never events. Bound complete page JSON and

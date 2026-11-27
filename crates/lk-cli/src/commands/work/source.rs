@@ -32,12 +32,28 @@ fn retained_source<T>(
     Ok(source)
 }
 
-/// A read page is a current view of one planned resource, never an observation or completion
-/// receipt. Without `resource` it reads the Work's retained task source.
+/// The planned resource a read names: `resource` by its index in the Work's plan, by default
+/// the Work's retained task source.
+pub(super) fn resource_index(work: &Work, resource: Option<usize>) -> miette::Result<usize> {
+    let planned = &work.plan.resources;
+    match resource {
+        Some(index) if index < planned.len() => Ok(index),
+        Some(index) => Err(miette::miette!(
+            "resource {index} is not one of this Work's {} planned resources",
+            planned.len()
+        )),
+        None => retained_source(planned, |guard| guard.authority)?.ok_or_else(|| {
+            miette::miette!("this Work has no retained task source; choose a planned resource")
+        }),
+    }
+}
+
+/// A read page of the planned resource at `index`, whose text is `source`: a current view of
+/// it, never an observation or completion receipt.
 pub(super) fn read(
     work: &Work,
-    resources: &[SemanticResource],
-    resource: Option<usize>,
+    index: usize,
+    source: &SemanticResource,
     offset: usize,
     limit: usize,
     find: Option<&str>,
@@ -53,19 +69,6 @@ pub(super) fn read(
             "source find requires nonblank literal text"
         ));
     }
-    let index = match resource {
-        Some(index) if index < resources.len() => index,
-        Some(index) => {
-            return Err(miette::miette!(
-                "resource {index} is not one of this Work's {} planned resources",
-                resources.len()
-            ));
-        }
-        None => retained_source(resources, |resource| resource.authority)?.ok_or_else(|| {
-            miette::miette!("this Work has no retained task source; choose a planned resource")
-        })?,
-    };
-    let source = &resources[index];
     let guard = &work.plan.resources[index];
     if offset > guard.characters {
         return Err(miette::miette!(
@@ -149,6 +152,18 @@ fn ensure_fits(work: &Work, value: &Value) -> miette::Result<()> {
 mod tests {
     use super::*;
     use crate::commands::work::state::WorkLimits;
+
+    fn read(
+        work: &Work,
+        resources: &[SemanticResource],
+        resource: Option<usize>,
+        offset: usize,
+        limit: usize,
+        find: Option<&str>,
+    ) -> miette::Result<Value> {
+        let index = resource_index(work, resource)?;
+        super::read(work, index, &resources[index], offset, limit, find)
+    }
 
     fn fixture(text: &str, max_input_bytes: usize) -> (Work, Vec<SemanticResource>) {
         let resources = vec![SemanticResource {

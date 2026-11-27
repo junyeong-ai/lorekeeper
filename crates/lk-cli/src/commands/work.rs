@@ -4727,15 +4727,17 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             limit,
             find,
         } => {
-            let (work, prepared) = load(&root, &config, &config_revision, &work_id)?;
-            source::read(
+            // One planned resource is read and verified against its plan; rebuilding the
+            // Work's whole scope for each page would cost a full capture per call.
+            let work = Work::load(&root, &work_id)?;
+            let index = source::resource_index(&work, resource)?;
+            let source = resources::load_planned_controlled(
+                &root,
                 &work,
-                &prepared.resources,
-                resource,
-                offset,
-                limit,
-                find.as_deref(),
-            )?
+                index,
+                &lk_vault::ReadControl::default(),
+            )?;
+            source::read(&work, index, &source, offset, limit, find.as_deref())?
         }
         #[cfg(unix)]
         WorkCommand::Refine {

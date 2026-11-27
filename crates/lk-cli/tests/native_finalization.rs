@@ -416,7 +416,7 @@ fn source_start(fixture: &Fixture, id: &str) -> Value {
 }
 
 #[test]
-fn retained_source_reads_are_current_guarded_and_leave_paid_work_unchanged() {
+fn retained_source_reads_are_guarded_as_planned_and_leave_paid_work_unchanged() {
     let fixture = Fixture::new("codex", 8192);
     let (task, plan) = fixture.add("source", TaskKind::Summarize);
     fixture.record_source(&plan);
@@ -439,16 +439,15 @@ fn retained_source_reads_are_current_guarded_and_leave_paid_work_unchanged() {
     assert_eq!(fixture.source_snapshot(&plan), before);
     assert!(fixture.calls().is_empty());
     assert!(!fixture.work_path(&plan, "seal.json").exists());
+    // A read guards only the resource it serves: a changed target leaves the retained input
+    // readable, and publication still guards the target.
     let path = fixture.root().join("vault").join(&task.target.vault_path);
     let original = std::fs::read_to_string(&path).unwrap();
     std::fs::write(&path, original + "\nChanged publication context.\n").unwrap();
-    let refused = fixture
-        .command()
-        .args(["work", "source", id])
-        .output()
-        .unwrap();
-    assert!(!refused.status.success());
-    assert!(refused.stdout.is_empty());
+    assert_eq!(
+        fixture.json(&["work", "source", id, "--find", "proposal", "--limit", "16"])["text"],
+        source["text"]
+    );
     assert_eq!(fixture.source_snapshot(&plan), before);
     assert!(fixture.calls().is_empty());
 }

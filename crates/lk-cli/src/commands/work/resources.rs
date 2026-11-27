@@ -48,6 +48,76 @@ impl ContextReading {
     }
 }
 
+/// The resource at `index` of `work`'s plan, read from that resource's current bytes alone:
+/// the queue task's retained input, or the page at its address read exactly, in the semantic
+/// reading, or composed with the request's context snapshot. A text is served only when its
+/// digest is the one the plan recorded, so it is exactly what the Work planned; nothing else of
+/// the Work's scope is read. A resource that changed since refuses as changed context.
+pub(super) fn load_planned_controlled(
+    root: &Path,
+    work: &super::Work,
+    index: usize,
+    read: &lk_vault::ReadControl,
+) -> miette::Result<SemanticResource> {
+    read.check().into_diagnostic()?;
+    let guard = &work.plan.resources[index];
+    let subject: Subject =
+        serde_json::from_value(work.context["subject"].clone()).into_diagnostic()?;
+    let candidates = match (guard.authority, &subject) {
+        (SemanticAuthority::RetainedInput, Subject::Queue { task_id, .. }) => {
+            let task = super::super::queue::current_task_controlled(root, task_id, read)?;
+            task.input
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .into_iter()
+                .collect::<Vec<_>>()
+        }
+        (SemanticAuthority::RetainedInput, Subject::Audit { .. }) => Vec::new(),
+        (authority, _) => {
+            let absolute =
+                lk_vault::page_path(root, Path::new(&guard.address)).into_diagnostic()?;
+            let raw = read.read_to_string(&absolute).into_diagnostic()?;
+            let mut pages = vec![raw.clone()];
+            if authority == SemanticAuthority::Context
+                && let Subject::Queue {
+                    task_id,
+                    cache_hash,
+                    ..
+                } = &subject
+            {
+                let mut snapshot =
+                    super::snapshot::ContextSnapshot::load(root, read, task_id, cache_hash)?;
+                snapshot.bind(BTreeMap::from([(guard.address.clone(), raw)]));
+                pages.extend(snapshot.page(&guard.address).map(str::to_owned));
+            }
+            pages
+                .into_iter()
+                .flat_map(|raw| [ContextReading::Semantic.text(&raw), raw])
+                .collect()
+        }
+    };
+    read.check().into_diagnostic()?;
+    let text = candidates
+        .into_iter()
+        .find(|text| blake3::hash(text.as_bytes()).to_hex().as_str() == guard.text_digest)
+        .ok_or_else(|| {
+            super::publication_rejection(
+                super::RejectionKind::SemanticContextChanged,
+                format!(
+                    "planned resource {} changed since this Work was planned; replan",
+                    guard.address
+                ),
+            )
+        })?;
+    Ok(SemanticResource {
+        address: guard.address.clone(),
+        revision: guard.revision.clone(),
+        authority: guard.authority,
+        text,
+    })
+}
+
 #[derive(Clone)]
 pub(super) struct Prepared {
     read: lk_vault::ReadControl,
@@ -2196,6 +2266,72 @@ mod tests {
                 .review(&dependency(lk_graph::audit::AuditReviewState::Invalid))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_planned_resource_is_read_alone_and_served_only_as_planned() {
+        let (directory, config, tasks, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let context = "wiki/concepts/context.md";
+        let mut prepared = task_with_audit(&root, &config, &tasks[0].task_id, None).unwrap();
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        let work =
+            super::super::persist_prepared(&session, &config, "config", &mut prepared).unwrap();
+        drop(session);
+        let read = lk_vault::ReadControl::default();
+        let load = |index| load_planned_controlled(&root, &work, index, &read);
+        let planned = work
+            .plan
+            .resources
+            .iter()
+            .map(|guard| {
+                prepared
+                    .resources
+                    .iter()
+                    .find(|resource| resource.address == guard.address)
+                    .unwrap()
+                    .text
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        for (index, text) in planned.iter().enumerate() {
+            assert_eq!(&load(index).unwrap().text, text);
+        }
+        let index = work
+            .plan
+            .resources
+            .iter()
+            .position(|guard| guard.address == context)
+            .unwrap();
+
+        // A neighbor's resynthesis is read through the request's context snapshot.
+        let original = std::fs::read_to_string(root.join(context)).unwrap();
+        let resynthesized = lk_vault::replace_section(
+            &original,
+            "Synthesis",
+            "Context with a distinct authority.\nA resynthesized neighbor body.",
+        );
+        write(&root, context, &resynthesized);
+        assert_eq!(load(index).unwrap().text, planned[index]);
+
+        // An authored change to that page refuses it alone; the other resources still read.
+        write(
+            &root,
+            context,
+            &format!("{resynthesized}\n## Notes\nThe limit is 9.\n"),
+        );
+        let refused = load(index).unwrap_err();
+        assert!(
+            crate::commands::queue::application::is_semantic_context_changed(&refused),
+            "{refused}"
+        );
+        for (other, text) in planned
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+        {
+            assert_eq!(&load(other).unwrap().text, text);
+        }
     }
 
     #[test]

@@ -225,9 +225,10 @@ attribution and scope, and never infer missing article claims from a title.
 `work-source-v1` returns `page` with its exact resource guard, half-open range and
 `next_offset`, or `not-found` for the exact literal search. The complete compact
 JSON obeys this Work's input byte limit; a shorter page explicitly continues.
-Each page permits at most the shared inspection scalar workload. The command
-revalidates current Work/configuration/evidence and never records an observation,
-recovers a journal, changes paid outputs or establishes completion. Without
+Each page permits at most the shared inspection scalar workload. The command reads
+only the selected resource and serves it only exactly as the Work planned it; it never
+records an observation, recovers a journal, changes paid outputs or establishes
+completion, and publication still guards the Work's inputs. Without
 `--resource`, a Work lacking a unique retained task source refuses; name a resource
 index instead. A stale Work must be replanned and reread.
 
