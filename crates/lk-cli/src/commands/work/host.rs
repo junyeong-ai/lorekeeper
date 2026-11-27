@@ -307,6 +307,7 @@ pub(in crate::commands) struct PendingHold {
     pub host: Option<HostEnd>,
 }
 
+#[cfg(unix)]
 impl PendingHold {
     /// Whether `other` is this hold as one capture of the pending holds listed it: the same
     /// held input, failed when the same host ended. A renewed failure is a different hold.
