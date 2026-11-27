@@ -438,6 +438,104 @@ fn a_run_adopts_only_the_legacy_subjects_its_remaining_calls_can_screen() {
 }
 
 #[test]
+fn a_released_probe_is_sent_with_its_legacy_derivation_before_adoption() {
+    let host = format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_AUDIT}");
+    let fixture = fixture("codex", 0, "inspect", false, &host);
+    let config = std::fs::read_to_string(&fixture.config)
+        .unwrap()
+        .replace(
+            "batch_size: 1, subjects: [concept, document]",
+            "batch_size: 2, subjects: [concept]",
+        )
+        .replace(
+            "execution:\n",
+            "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 20, max_run_seconds: 60}\n",
+        );
+    std::fs::write(&fixture.config, config).unwrap();
+    let held = "wiki/concepts/b-legacy.md";
+    let vault = fixture.root().join("vault");
+    std::fs::write(
+        vault.join(held),
+        "---\ntype: concept\ntitle: Legacy\n---\n## Synthesis\nA legacy claim.\n\n## Sources\n",
+    )
+    .unwrap();
+    for index in 0..3 {
+        std::fs::write(
+            vault.join(format!("wiki/documents/gate-{index}.md")),
+            format!("---\ntype: document\ntitle: Gate {index}\n---\nThe legacy-gate scope covers gate {index}.\n"),
+        )
+        .unwrap();
+    }
+    discover(&fixture, held, &["legacy-gate"]);
+    // Both recipes were recorded before screening existed.
+    let state = vault.join(".lorekeeper/knowledge-audit.json");
+    let mut receipts: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    for path in [SUBJECT, held] {
+        receipts["discovery"][path]["selection"] = serde_json::Value::Null;
+    }
+    std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
+    let plan = json(&fixture, &["wiki", "audit-plan"]);
+    assert_eq!(plan["candidates"][0]["path"], SUBJECT, "{plan}");
+    assert_eq!(plan["candidates"][1]["path"], held, "{plan}");
+    let run = || {
+        let output = fixture
+            .command()
+            .args(["run", "knowledge", "--scheduled", "--json"])
+            .output()
+            .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)))
+    };
+
+    // A 0.163 state: the run's one call adopts the first subject, which screens nothing, and
+    // the shared assessment fails, holding the other subject's legacy request.
+    std::fs::write(fixture.root().join("fail"), "").unwrap();
+    let first = run();
+    assert_eq!(first["runs"][0]["audit_adoptions"], 1, "{first}");
+    assert!(
+        receipts_of(&state)["discovery"][held]["selection"].is_null(),
+        "{first}"
+    );
+    std::fs::remove_file(fixture.root().join("fail")).unwrap();
+    let candidate =
+        json(&fixture, &["wiki", "audit-plan", "--path", SUBJECT])["candidates"][0].clone();
+    let assessment = fixture.root().join("settled-assessment.json");
+    std::fs::write(&assessment, serde_json::to_vec(&serde_json::json!({"assessments":[{
+        "path":SUBJECT, "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
+        "disposition":"reviewed", "reason":"The subject was read in full.", "reviews":[]
+    }]})).unwrap()).unwrap();
+    json(
+        &fixture,
+        &[
+            "wiki",
+            "audit-record",
+            "--file",
+            assessment.to_str().unwrap(),
+        ],
+    );
+    let screened = calls(&fixture).len();
+
+    // Only the held subject is due: its hold is released as the probe and sent as it was.
+    let probed = run();
+    assert_eq!(probed["runs"][0]["halted"], false, "{probed}");
+    assert_eq!(probed["runs"][0]["audit_adoptions"], 0, "{probed}");
+    assert_eq!(
+        calls(&fixture).len(),
+        screened,
+        "the probe's turn is not spent on screening: {probed}"
+    );
+    assert_eq!(
+        probed["runs"][0]["audit"][0]["assessed_path"], held,
+        "{probed}"
+    );
+}
+
+fn receipts_of(state: &Path) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(state).unwrap()).unwrap()
+}
+
+#[test]
 fn a_candidate_edited_during_the_assessment_replans_the_subject_instead_of_halting() {
     for engine in ["codex", "claude-code"] {
         // The assessment's host edits a selected candidate once, which reopens screening.

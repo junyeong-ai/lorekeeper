@@ -30,7 +30,8 @@ paths:
   stop adoption between commits. The rest keep their legacy derivation and their place for a
   later run, so a large legacy backlog never holds the writer claim across work the run
   cannot screen. `audit_adoption_duration_ms` measures that work after the claim is acquired.
-  A current subject is not touched. A refused
+  A current subject is not touched, and neither is the subject of the run's released probe
+  until that exact attempt settles: adoption would change the held request before it is sent. A refused
   adoption (a current processing action, an assessment recorded since planning, inputs
   changed since planning or before its journal) keeps that subject's legacy derivation for
   the rest of the run, recorded as a skipped `audit discovery adoption` stage and never

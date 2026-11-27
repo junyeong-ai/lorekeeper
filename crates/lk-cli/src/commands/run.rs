@@ -7626,7 +7626,8 @@ mod native {
         /// subject keeps its legacy derivation, which its receipt's currency still verifies.
         /// A subject whose adoption is refused (a current processing action, an assessment
         /// that became current, or inputs that changed since planning) keeps it for the rest
-        /// of this run, as a stage record names. Its predecessor Work stays as it is. Whether
+        /// of this run, as a stage record names, and the run's released probe keeps it until
+        /// its attempt settles. Its predecessor Work stays as it is. Whether
         /// the plan must be read again (a subject was adopted or refused), or `None` after a
         /// failure the run recorded.
         async fn adopt_legacy_screening(
@@ -7640,6 +7641,21 @@ mod native {
                     return None;
                 }
             };
+            // The run's released probe is the exact request its hold was prepared from; adopting
+            // its subject would change that request before it is sent, so the subject waits
+            // until the attempt settles.
+            let probe = if self.retire_settled_probe(crate::commands::work::host::ProbeScope::Audit)
+            {
+                self.host_probes
+                    .scope(crate::commands::work::host::ProbeScope::Audit)
+                    .as_ref()
+                    .and_then(|probe| probe.target.clone())
+            } else {
+                None
+            };
+            if self.result.is_halted() {
+                return None;
+            }
             let requests = plan
                 .candidates
                 .iter()
@@ -7650,6 +7666,7 @@ mod native {
                             .as_ref()
                             .is_some_and(|discovery| discovery.selection.is_none())
                         && !self.adoption_refused.contains(&candidate.path)
+                        && probe.as_ref() != Some(&candidate.path)
                 })
                 .take(self.remaining_calls(budget).max(1))
                 .map(|candidate| lk_graph::audit::selection::AdoptionRequest {
