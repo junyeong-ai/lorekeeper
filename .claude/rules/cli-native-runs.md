@@ -342,6 +342,10 @@ paths:
   assessment metadata and records current inputs through the shared audit owner.
   Replan original slots through this workflow's guarded concept merges; documents
   retain exact addresses. Isolate known blocked peers from publication readiness.
+  A candidate edited while a whole assessment ran reopens its subject's screening: the
+  judgment is stale like any changed input (spending the subject's replan), is never held
+  on a failed invocation, and the subject is screened again before its next capture; a
+  second reopening in the same assessment defers it.
   Whole-input holds bind per-subject semantic context and assessment rules, excluding
   batch peers/order. Unfinished plan creation never clears a hold. Keep one bounded
   latest receipt per subject; canonical assessment removes it in the same journal.

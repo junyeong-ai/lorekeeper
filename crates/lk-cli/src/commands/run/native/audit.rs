@@ -38,6 +38,8 @@ impl Runner<'_> {
             .map(|candidate| self.audit_replans.bind(&candidate.path))
             .collect::<Vec<_>>();
         let mut pending = (0..batch.len()).collect::<std::collections::BTreeSet<_>>();
+        // Subjects screened again after their screening reopened; a second reopening defers.
+        let mut rescreened = std::collections::BTreeSet::new();
         while !pending.is_empty() {
             if !self.call_budget_available() || !self.configuration_is_current() {
                 return;
@@ -85,7 +87,14 @@ impl Runner<'_> {
                         return;
                     }
                 }
-                if candidate.discovery.is_none() {
+                // Missing discovery, or screening a candidate edit reopened, is planned again
+                // (discovery, screening) before the subject is captured.
+                if candidate.discovery.is_none() || screening_reopened(&candidate) {
+                    if candidate.discovery.is_some() && !rescreened.insert(index) {
+                        self.deferred("audit inputs unstable", &candidate.path);
+                        pending.remove(&index);
+                        continue;
+                    }
                     missing.push(candidate.path);
                     continue;
                 }
@@ -356,6 +365,10 @@ impl Runner<'_> {
                         let mut plan = lk_vault::MutationPlan::default();
                         let mut held = Vec::new();
                         for (subject, candidate) in subjects.iter().zip(fresh) {
+                            // Reopened screening is changed input: it is prepared afresh.
+                            if screening_reopened(&candidate) {
+                                continue;
+                            }
                             let current = capture_controlled(
                                 session.root(),
                                 &runner.config,
@@ -458,21 +471,27 @@ impl Runner<'_> {
             for (((subject, indices), candidate), judgment) in
                 subjects.iter().zip(&slots).zip(fresh).zip(judgments)
             {
-                let fresh = match capture_controlled(
-                    &self.root,
-                    &self.config,
-                    &self.config_revision,
-                    &candidate,
-                    self.supervisor.read_control(),
-                ) {
-                    Ok(fresh) => fresh,
-                    Err(error) => {
-                        self.record_work_step(metrics);
-                        self.failure("audit input revalidation", error);
-                        return;
+                // A candidate edited while the host ran reopens screening: the judgment then
+                // answers reads that changed, like any other changed input.
+                let fresh = if screening_reopened(&candidate) {
+                    None
+                } else {
+                    match capture_controlled(
+                        &self.root,
+                        &self.config,
+                        &self.config_revision,
+                        &candidate,
+                        self.supervisor.read_control(),
+                    ) {
+                        Ok(fresh) => Some(fresh),
+                        Err(error) => {
+                            self.record_work_step(metrics);
+                            self.failure("audit input revalidation", error);
+                            return;
+                        }
                     }
                 };
-                if !subject.same_input(&fresh) {
+                let Some(fresh) = fresh.filter(|fresh| subject.same_input(fresh)) else {
                     stale = true;
                     for index in indices {
                         if !self.audit_replans.try_spend(&bindings[*index]) {
@@ -482,7 +501,7 @@ impl Runner<'_> {
                     }
                     self.record("whole audit replanning", StageState::Skipped, Some("selected inputs changed; discard the old judgment and reread current inputs within the same run budget".into()));
                     continue;
-                }
+                };
                 match readiness.check(&candidate) {
                     Ok(true) => {}
                     Ok(false) => {
@@ -604,4 +623,14 @@ impl Runner<'_> {
             self.result.audit = Some(Vec::new());
         }
     }
+}
+
+/// Whether a candidate's screened discovery has undecided rows again, as after an edit to a
+/// candidate while its subject's host ran: its ready-only capture would refuse it.
+fn screening_reopened(candidate: &lk_graph::audit::AuditCandidate) -> bool {
+    candidate
+        .discovery
+        .as_ref()
+        .and_then(|discovery| discovery.selection.as_ref())
+        .is_some_and(|progress| !progress.is_ready())
 }
