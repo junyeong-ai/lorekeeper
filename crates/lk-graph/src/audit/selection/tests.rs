@@ -471,6 +471,23 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
 }
 
 #[test]
+fn a_dependency_edited_after_its_candidate_was_derived_is_typed_input_drift() {
+    for edited in [SUBJECT, "wiki/documents/candidate-000.md"] {
+        let (fixture, _) = build_legacy_adoption_fixture();
+        let candidate = fixture.candidate();
+        let raw = std::fs::read_to_string(fixture.root.join(edited)).unwrap();
+        fixture.write(edited, &format!("{raw}\nAn authored addition.\n"));
+        assert!(
+            matches!(
+                crate::audit::guard_candidate(&mut MutationPlan::default(), &fixture.root, &candidate),
+                Err(GraphError::AuditInputChanged(path)) if path == edited
+            ),
+            "{edited}"
+        );
+    }
+}
+
+#[test]
 fn packet_status_requires_the_exact_assigned_receipt_and_distinguishes_input_drift() {
     let fixture = Fixture::new(3);
     let first = fixture.packet(1, false);

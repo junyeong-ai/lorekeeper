@@ -7760,6 +7760,14 @@ mod native {
                             ))
                         }
                         Ok(_) => Ok(()),
+                        // A page edited since the shared capture: that subject's drift.
+                        Err(error)
+                            if error
+                                .downcast_ref::<crate::commands::work::SourceChanged>()
+                                .is_some() =>
+                        {
+                            Err(lk_graph::GraphError::AuditScreeningChanged)
+                        }
                         Err(error) => Err(lk_graph::GraphError::Io(error.to_string())),
                     }
                 }) else {

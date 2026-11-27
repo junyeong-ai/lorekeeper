@@ -442,6 +442,21 @@ struct Capture<'a> {
     absent: BTreeSet<PathBuf>,
 }
 
+/// A page a capture expected at a revision read differently: a writer edited it after the
+/// inputs naming that revision were derived. The capture describes nothing current; callers
+/// that can wait treat it as drift, never as a fault of the vault.
+#[derive(Debug)]
+pub(in crate::commands) struct SourceChanged(String);
+
+impl std::fmt::Display for SourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl std::error::Error for SourceChanged {}
+impl miette::Diagnostic for SourceChanged {}
+
 impl<'a> Capture<'a> {
     fn new(root: &'a Path, read: &lk_vault::ReadControl) -> Self {
         Self {
@@ -492,12 +507,16 @@ impl<'a> Capture<'a> {
         let raw = self.read.read_to_string(&absolute).into_diagnostic()?;
         let exact = file_revision(&raw);
         if expected_file.is_some_and(|expected| expected != exact) {
-            return Err(miette::miette!("semantic source changed: {path}"));
+            return Err(miette::Report::new(SourceChanged(format!(
+                "semantic source changed: {path}"
+            ))));
         }
         if let Some(expected) = expected_authored {
             let parsed = lk_vault::parse_page(&raw).map_err(|e| miette::miette!("{path}: {e}"))?;
             if source_revision(&parsed) != expected {
-                return Err(miette::miette!("semantic authored source changed: {path}"));
+                return Err(miette::Report::new(SourceChanged(format!(
+                    "semantic authored source changed: {path}"
+                ))));
             }
         }
         self.insert_page(relative, raw.clone(), authority)?;
@@ -511,10 +530,10 @@ impl<'a> Capture<'a> {
         authority: SemanticAuthority,
     ) -> miette::Result<()> {
         if self.pages.get(&relative).is_some_and(|prior| prior != &raw) {
-            return Err(miette::miette!(
+            return Err(miette::Report::new(SourceChanged(format!(
                 "semantic source changed during capture: {}",
                 relative.display()
-            ));
+            ))));
         }
         let address = lk_core::vault_path::address(&relative);
         if authority != SemanticAuthority::Context {
@@ -2494,6 +2513,28 @@ mod tests {
             !resumed(&tasks[0]).unwrap().0.is_planned(&root).unwrap(),
             "without its snapshot the request reads the neighbor as it is now"
         );
+    }
+
+    #[test]
+    fn a_page_edited_after_its_audit_candidate_was_derived_is_typed_source_drift() {
+        let (directory, config, _, candidates) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let candidate = &candidates[0];
+        let raw = std::fs::read_to_string(root.join(&candidate.path)).unwrap();
+        write(
+            &root,
+            &candidate.path,
+            &format!("{raw}\nAn authored addition.\n"),
+        );
+        let Err(error) = audit_candidate_controlled(
+            &root,
+            &config,
+            candidate,
+            &lk_vault::ReadControl::default(),
+        ) else {
+            panic!("an edited subject captures nothing current");
+        };
+        assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
     }
 
     #[test]

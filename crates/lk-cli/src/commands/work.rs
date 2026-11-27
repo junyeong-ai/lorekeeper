@@ -34,6 +34,7 @@ pub(crate) mod state;
 pub(super) mod workload;
 
 pub(super) use publication::publication_scope_controlled;
+pub(in crate::commands) use resources::SourceChanged;
 pub(super) use resources::graph_citation_digest;
 #[cfg(unix)]
 pub(super) use selection::ScreeningDecision;

@@ -24,6 +24,11 @@ pub enum GraphError {
     AuditAssessment(#[from] audit::AuditAssessmentError),
     #[error("audit screening inputs changed; reread the current subject and candidate cards")]
     AuditScreeningChanged,
+    /// A page an audit derivation read (its subject, evidence, context or a scoped review) was
+    /// edited or removed after the derivation: a recording or adoption guarded by it answers
+    /// earlier inputs.
+    #[error("audit read dependency changed: {0}")]
+    AuditInputChanged(String),
     /// Discovery adoption found the subject's assessment current: its legacy derivation is
     /// what its receipt verifies, so it is not adopted.
     #[error("the audit subject's assessment is current; its discovery is not adopted")]

@@ -171,13 +171,9 @@ impl Adoptions {
                     let (candidate, cards) = adopted.next().expect("an adopted legacy subject");
                     cards.and_then(|cards| {
                         let mut guards = MutationPlan::default();
-                        super::super::guard_candidate_controlled(
-                            &mut guards,
-                            root,
-                            &current,
-                            read,
-                        )?;
-                        cards.guard(root, &mut guards, read)?;
+                        super::super::guard_candidate_controlled(&mut guards, root, &current, read)
+                            .map_err(drift)?;
+                        cards.guard(root, &mut guards, read).map_err(drift)?;
                         adoption.changed = true;
                         adoption.input_revision = candidate.input_revision.clone();
                         adoption.required_context_pages = candidate.related_pages.len();
@@ -301,4 +297,13 @@ fn admit(
         return Err(GraphError::AuditSubjectCurrent);
     }
     Ok((adoption, Some(candidate)))
+}
+
+/// A page the subject's inputs read was edited or removed since they were derived: that
+/// subject's inputs changed like any planning drift.
+fn drift(error: GraphError) -> GraphError {
+    match error {
+        GraphError::AuditInputChanged(_) => GraphError::AuditScreeningChanged,
+        error => error,
+    }
 }

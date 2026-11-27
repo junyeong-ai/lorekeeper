@@ -3538,16 +3538,10 @@ fn guard_page_input_controlled(
     read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
     let Some((raw, current)) = load_page_input_controlled(root, &input.path, read)? else {
-        return Err(error(format!(
-            "audit read dependency disappeared: {}",
-            input.path
-        )));
+        return Err(GraphError::AuditInputChanged(input.path.clone()));
     };
     if current.file_revision != input.file_revision {
-        return Err(error(format!(
-            "audit read dependency changed: {}",
-            input.path
-        )));
+        return Err(GraphError::AuditInputChanged(input.path.clone()));
     }
     let canonical_root = root.canonicalize().map_err(error)?;
     let canonical = lk_vault::page_path(root, Path::new(&input.path))
@@ -3642,13 +3636,19 @@ fn guard_candidate_controlled(
                 .map_err(GraphError::from)?;
             read.check().map_err(GraphError::from)?;
         } else {
-            let raw = read
-                .read_to_string(
-                    &lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
-                )
-                .map_err(GraphError::from)?;
+            let raw = match read.read_to_string(
+                &lk_vault::page_path(root, Path::new(&citation.path)).map_err(error)?,
+            ) {
+                Ok(raw) => raw,
+                Err(lk_vault::VaultError::Io(failure))
+                    if failure.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Err(GraphError::AuditInputChanged(citation.path.clone()));
+                }
+                Err(failure) => return Err(GraphError::from(failure)),
+            };
             if source_revision(&lk_vault::parse_page(&raw).map_err(error)?) != citation.revision {
-                return Err(error("audit dependency changed"));
+                return Err(GraphError::AuditInputChanged(citation.path.clone()));
             }
             guard_page_input_controlled(plan, root, &page_input(&citation.path, &raw), read)?;
         }

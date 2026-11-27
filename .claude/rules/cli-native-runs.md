@@ -33,7 +33,9 @@ paths:
   A current subject is not touched, and neither is the subject of the run's released probe
   until that exact attempt settles: adoption would change the held request before it is sent. A refused
   adoption (a current processing action, an assessment recorded since planning, inputs
-  changed since planning or before its journal) keeps that subject's legacy derivation for
+  changed since planning, while its processing state and guards are read or before its
+  journal, as typed drift: `GraphError::AuditInputChanged`, `work::SourceChanged`) keeps
+  that subject's legacy derivation for
   the rest of the run, recorded as a skipped `audit discovery adoption` stage and never
   fatal, and the run plans again; journal and integrity failures stay fatal. Predecessor
   Work stays as it is. The report counts adoptions (`audit_adoptions`).
