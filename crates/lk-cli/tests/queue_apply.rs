@@ -3077,6 +3077,10 @@ fn staged_sections_are_snapshot_guarded_and_only_the_applier_stamps_completion()
             );
             assert!(after.contains("Preserve."));
             assert!(after.contains(body));
+            assert!(
+                lk_vault::generated_sections(&parsed).is_empty(),
+                "only concept synthesis records the bodies it writes: {after}"
+            );
             assert!(ws.run(&["queue", "apply"]).status.success());
             assert_eq!(ws.read("daily/source/page.md"), after);
         } else {

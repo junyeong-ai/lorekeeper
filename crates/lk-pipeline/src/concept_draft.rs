@@ -922,6 +922,27 @@ impl ConceptDraft {
                 content = replace_section_checked(&content, heading, body)?;
             }
         }
+        // Stamped here, like the review record, so the record that Lore wrote a spliced body
+        // survives any template. Only entries the spliced page still matches are carried: a
+        // body edited since Lore wrote it is its author's.
+        if let Some(record) = llm_inputs.get(field::GENERATED_SECTIONS) {
+            let recorded: BTreeMap<String, String> =
+                serde_json::from_str(record).unwrap_or_default();
+            let matching = recorded
+                .iter()
+                .filter(|(heading, digest)| {
+                    lk_vault::section_body(&content, heading)
+                        .is_some_and(|body| lk_vault::generated_body_digest(body) == **digest)
+                })
+                .map(|(heading, _)| heading.as_str())
+                .collect::<Vec<_>>();
+            if !matching.is_empty() {
+                content =
+                    lk_vault::record_generated_sections(&content, &matching).ok_or_else(|| {
+                        PipelineError::Render("concept template requires llm_inputs".into())
+                    })?;
+            }
+        }
 
         let mut page = RenderResult::fresh(path, content);
         page.expected_original = Some(self.original.clone());
@@ -1839,6 +1860,55 @@ mod tests {
         let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
         assert_eq!(
             parsed.frontmatter.fields["llm_inputs"]["synthesis_reviews"], record,
+            "{}",
+            page.content
+        );
+    }
+
+    /// The bodies a rerender splices back keep the record that Lore wrote them while they
+    /// still match it, whatever the template; a record the page's body no longer matches is
+    /// not carried.
+    #[test]
+    fn a_rerender_carries_the_provenance_of_the_bodies_it_preserves() {
+        let synthesis = "An answered synthesis.";
+        let record = serde_json::to_string(&BTreeMap::from([
+            ("Synthesis", lk_vault::generated_body_digest(synthesis)),
+            (
+                "Related",
+                lk_vault::generated_body_digest("An authored list."),
+            ),
+        ]))
+        .unwrap();
+        let draft = ConceptDraft {
+            original: None,
+            slug: "rag".into(),
+            name: "RAG".into(),
+            category: ConceptCategory::Unassigned,
+            first_seen: jiff::civil::date(2026, 5, 1),
+            last_seen: jiff::civil::date(2026, 5, 1),
+            source_count: 2,
+            preserved_llm_inputs: BTreeMap::from([
+                ("synthesis".into(), "digest".into()),
+                (field::GENERATED_SECTIONS.into(), record),
+            ]),
+            preserved_metadata: BTreeMap::new(),
+            preserved_synthesis: Some(synthesis.into()),
+            synthesis_evidence: None,
+            preserved_sources: None,
+            preserved_related: Some("An edited list.".into()),
+            aliases: Vec::new(),
+        };
+        let engine = TemplateEngine::build(None).unwrap();
+        let page = draft
+            .render(&engine, &VaultDirs::default(), Locale::En)
+            .unwrap();
+        let parsed = lk_core::frontmatter::parse_page(&page.content).unwrap();
+        assert_eq!(
+            lk_vault::generated_sections(&parsed),
+            BTreeMap::from([(
+                "Synthesis".to_owned(),
+                lk_vault::generated_body_digest(synthesis)
+            )]),
             "{}",
             page.content
         );
