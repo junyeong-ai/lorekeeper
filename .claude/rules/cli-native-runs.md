@@ -25,9 +25,11 @@ paths:
   whose discovery was recorded before screening, through lk-graph's adoption owner and its
   guards under the run's own writer claim, and plans again, so they screen and read the
   bounded roster in the same run. It adopts, in planned order, only as many as its remaining
-  calls can screen (at least one), from one shared capture (`selection::Adoptions`): each
-  subject journals alone and counts as it commits, and cancellation and the run's duration
-  stop adoption between commits. The rest keep their legacy derivation and their place for a
+  calls can screen (at least one), from one shared capture of their inputs and bounded card
+  rosters (`selection::Adoptions`): each subject reads the guards of its complete legacy
+  input just before its own journal and drops them after it, so no subject's unbounded
+  context is held for another; it counts as it commits, and cancellation and the run's
+  duration stop adoption between commits. The rest keep their legacy derivation and their place for a
   later run, so a large legacy backlog never holds the writer claim across work the run
   cannot screen. `audit_adoption_duration_ms` measures that work after the claim is acquired.
   A current subject is not touched, and neither is the subject of the run's released probe

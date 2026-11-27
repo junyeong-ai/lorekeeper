@@ -67,9 +67,11 @@ pub(super) fn build_adoption(
 }
 
 /// The discovery adoptions of one checkpoint. The requested subjects' current inputs, their
-/// inputs once adopted, their screened card rosters and their read guards come from one
-/// shared capture; [`Self::adopt_next`] then adopts each alone, in request order, under its
-/// own journal, so a caller can stop between commits and leave the rest legacy.
+/// inputs once adopted and their screened card rosters (bounded by the roster constants) come
+/// from one shared capture; [`Self::adopt_next`] then adopts each alone, in request order:
+/// it reads the guards of that subject's complete legacy input, journals them and drops
+/// them before the next, so no subject's unbounded legacy context is held for another and a
+/// caller can stop between commits and leave the rest legacy.
 pub struct Adoptions {
     read: ReadControl,
     state: Option<String>,
@@ -79,9 +81,9 @@ pub struct Adoptions {
 
 struct Prepared {
     adoption: Adoption,
-    /// The subject's current candidate and the guards of its complete current input and its
-    /// adopted card roster; `None` when the subject already screens.
-    legacy: Option<(AuditCandidate, MutationPlan)>,
+    /// The subject's current candidate and its adopted card roster; `None` when the subject
+    /// already screens.
+    legacy: Option<(AuditCandidate, CardCapture)>,
 }
 
 impl Adoptions {
@@ -169,11 +171,7 @@ impl Adoptions {
                 }),
                 Ok((mut adoption, Some(current))) => {
                     let (candidate, cards) = adopted.next().expect("an adopted legacy subject");
-                    cards.and_then(|cards| {
-                        let mut guards = MutationPlan::default();
-                        super::super::guard_candidate_controlled(&mut guards, root, &current, read)
-                            .map_err(drift)?;
-                        cards.guard(root, &mut guards, read).map_err(drift)?;
+                    cards.map(|cards| {
                         adoption.changed = true;
                         adoption.input_revision = candidate.input_revision.clone();
                         adoption.required_context_pages = candidate.related_pages.len();
@@ -183,10 +181,10 @@ impl Adoptions {
                             .and_then(|discovery| discovery.selection.as_ref())
                             .expect("adopted discovery selection")
                             .total;
-                        Ok(Prepared {
+                        Prepared {
                             adoption,
-                            legacy: Some((current, guards)),
-                        })
+                            legacy: Some((current, cards)),
+                        }
                     })
                 }
                 Err(refusal) => Err(refusal),
@@ -232,9 +230,10 @@ impl Adoptions {
         Ok(adoption)
     }
 
-    /// The subject's adoption plan: its captured guards and the receipt store with its
-    /// discovery screened, expecting the store as this batch last left it, and that store's
-    /// bytes. A subject that already screens needs no plan.
+    /// The subject's adoption plan, read now: the guards of its complete current input and
+    /// its adopted card roster, and the receipt store with its discovery screened, expecting
+    /// the store as this batch last left it, and that store's bytes. A subject that already
+    /// screens needs no plan.
     fn plan(
         &mut self,
         root: &Path,
@@ -242,10 +241,16 @@ impl Adoptions {
         prepared: Prepared,
         guard: impl FnOnce(&AuditCandidate) -> Result<(), GraphError>,
     ) -> Result<(MutationPlan, Adoption, Option<String>), GraphError> {
-        let Some((current, mut mutation)) = prepared.legacy else {
+        let Some((current, cards)) = prepared.legacy else {
             return Ok((MutationPlan::default(), prepared.adoption, None));
         };
         guard(&current)?;
+        let mut mutation = MutationPlan::default();
+        super::super::guard_candidate_controlled(&mut mutation, root, &current, &self.read)
+            .map_err(drift)?;
+        cards
+            .guard(root, &mut mutation, &self.read)
+            .map_err(drift)?;
         self.set_selection(path, Some(SelectionPlan::default()));
         let state = serde_json::to_string_pretty(&self.receipts).map_err(error);
         self.set_selection(path, None);
