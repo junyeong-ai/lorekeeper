@@ -89,7 +89,7 @@ fn child_attempt(started: Instant, result: miette::Result<ChildResult>) -> Child
 /// How long a child's pipes may stay open after the child itself exited, before and again
 /// after its group is killed.
 #[cfg(unix)]
-const CLEANUP_GRACE: Duration = Duration::from_millis(500);
+const CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
 /// The bounded end of a child's stderr. A raw window much larger than the reported tail is
 /// kept, so credentials are masked over complete text before the report is cut to size.
@@ -587,7 +587,11 @@ async fn run_child(
                 _ = &mut deadline, if status.is_none() => break Settled::Stopped(false, ChildTermination::TimedOut, "session deadline exceeded".to_string()),
                 _ = grace => match cleanup {
                     Some((_, false)) => {
-                        signal_group(running.group, Signal::KILL)?;
+                        // Killing the group releases a descendant's pipes. A group whose
+                        // remaining members already exited cannot always be signalled (macOS
+                        // refuses a group of zombies, EPERM), and their pipes are then already
+                        // closed; either way the second grace bounds the wait.
+                        let _ = rustix::process::kill_process_group(running.group, Signal::KILL);
                         cleanup = Some((tokio::time::Instant::now() + CLEANUP_GRACE, true));
                     }
                     _ => {
