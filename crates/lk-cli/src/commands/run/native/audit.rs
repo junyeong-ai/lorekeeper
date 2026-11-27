@@ -347,6 +347,7 @@ impl Runner<'_> {
             {
                 Some(ResultReply::Complete(response)) => response,
                 Some(ResultReply::HostUnavailable(reason)) => {
+                    self.record_work_step(metrics);
                     self.defer_audit_for_host(
                         subjects
                             .iter()

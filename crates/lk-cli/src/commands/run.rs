@@ -2621,6 +2621,8 @@ mod native {
                 return None;
             }
             if !self.configuration_is_current() {
+                // The reply answered a configuration the run no longer holds.
+                metrics.outcome = WorkOutcome::InputsChanged;
                 return None;
             }
             Some(ObservationReply::Output {
@@ -3870,6 +3872,8 @@ mod native {
                 return None;
             }
             if !self.configuration_is_current() {
+                // The reply answered a configuration the run no longer holds.
+                metrics.outcome = WorkOutcome::InputsChanged;
                 return None;
             }
             if !child.success {
@@ -7417,6 +7421,7 @@ mod native {
                 let mut metrics = WorkStepMetrics::new(WorkRole::Screening);
                 let response = self.request_result(&native, &schema, &mut metrics).await;
                 if let Some(ResultReply::HostUnavailable(reason)) = &response {
+                    self.record_work_step(metrics);
                     self.defer_audit_for_host([candidate.path.as_str()], reason);
                     refreshed = false;
                     plan = match self.audit_plan(paths) {

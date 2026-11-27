@@ -602,6 +602,32 @@ fn a_scheduled_run_defers_only_the_work_of_a_profile_that_cannot_start() {
 }
 
 #[test]
+fn an_assessment_whose_host_cannot_start_is_recorded_as_unsent() {
+    let fixture = Fixture::new("codex", 30, RECORD_AUDIT);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 1\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    write_audit_concept(&fixture, "a-held");
+    super::stage_profiles::route_profiles(
+        &fixture,
+        "codex",
+        &[("audit", "auditor")],
+        &[("auditor", "codex")],
+    );
+    configure(&fixture, Some(64), 120);
+    std::fs::remove_file(fixture.root().join("auditor executable")).unwrap();
+    let report = run(&fixture, "knowledge", false);
+    let runs = report["runs"].as_array().unwrap();
+    assert!(runs.iter().all(|run| run["halted"] == false), "{report}");
+    assert!(
+        runs.iter()
+            .flat_map(|run| run["work_steps"].as_array().unwrap())
+            .any(|step| step["role"] == "finalizer" && step["outcome"] == "unsent"),
+        "the assessment that was never sent is in the report: {report}"
+    );
+}
+
+#[test]
 fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() {
     // Each passes the preflight's metadata check, which only finds the executable; the last
     // also answers `--version`, then cannot start for its first semantic call.
