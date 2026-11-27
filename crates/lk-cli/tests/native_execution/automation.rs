@@ -602,6 +602,78 @@ fn a_scheduled_run_defers_only_the_work_of_a_profile_that_cannot_start() {
 }
 
 #[test]
+fn a_scheduled_run_defers_a_profile_whose_host_cannot_start_at_its_first_call() {
+    // Both pass the preflight's metadata check, which only finds the executable.
+    for (form, broken) in [
+        ("unsupported version", "#!/bin/sh\necho 'codex-cli 0.0.1'\n"),
+        (
+            "missing interpreter",
+            "#!/nonexistent/lorekeeper-test-interpreter\n",
+        ),
+    ] {
+        let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);
+        super::stage_profiles::route_profiles(
+            &fixture,
+            "codex",
+            &[("reduce", "reducer")],
+            &[("reducer", "codex")],
+        );
+        configure(&fixture, Some(64), 120);
+        let reducer = fixture.root().join("reducer executable");
+        let saved = std::fs::read(&reducer).unwrap();
+        std::fs::write(&reducer, broken).unwrap();
+        let report = run(&fixture, "knowledge", false);
+        let runs = report["runs"].as_array().unwrap();
+        assert!(
+            runs.iter().all(|run| run["halted"] == false),
+            "{form}: {report}"
+        );
+        assert!(
+            runs.iter()
+                .any(|run| run["stages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|stage| stage["name"] == "host environment"
+                        && stage["state"] == "failed"
+                        && stage["detail"]
+                            .as_str()
+                            .unwrap()
+                            .contains("profile reducer"))),
+            "{form}: {report}"
+        );
+        assert!(
+            calls(&report) > 0,
+            "{form}: the healthy profile keeps working: {report}"
+        );
+        assert!(
+            usage_paused_is_empty(
+                &std::fs::read(
+                    fixture
+                        .root()
+                        .join("vault/.lorekeeper/automation-usage.json")
+                )
+                .unwrap()
+            ),
+            "{form}: {report}"
+        );
+        // Replaced by a supported host, the profile is checked again and its work completes.
+        std::fs::write(&reducer, saved).unwrap();
+        let recovered = run(&fixture, "knowledge", false);
+        assert!(
+            recovered["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|run| run["audit"].as_array())
+                .flatten()
+                .any(|audit| audit["assessed_path"] == "wiki/concepts/large.md"),
+            "{form}: {recovered}"
+        );
+    }
+}
+
+#[test]
 fn a_knowledge_hold_of_a_profile_no_longer_used_gets_a_turn_beside_new_subjects() {
     let behavior =
         format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_BOUNDED_AUDIT}");

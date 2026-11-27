@@ -75,6 +75,10 @@ impl From<StoredUsage> for Usage {
     }
 }
 
+/// The stage a run records when a profile's host cannot start (`execution::preflight_hosts`,
+/// or its first call). It never halts: the condition is current, and each run checks again.
+pub(super) const HOST_ENVIRONMENT_STAGE: &str = "host environment";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::commands) struct Pause {
@@ -154,6 +158,14 @@ impl Usage {
             serde_json::from_value::<StoredUsage>(value)
                 .map_err(|_| miette::miette!("invalid automation usage schema or fields"))?,
         );
+        // 0.163 paused an operation when a profile's host environment could not start. That
+        // stage no longer halts, so such a pause holds nothing an operator must repair.
+        usage.paused.retain(|_, pause| {
+            pause
+                .cause
+                .as_ref()
+                .is_none_or(|cause| cause.stage != HOST_ENVIRONMENT_STAGE)
+        });
         if usage.utc_date > today {
             return Err(miette::miette!("automation UTC date moved backwards"));
         }
@@ -539,6 +551,38 @@ mod tests {
         let later = Usage::load(root, "2026-11-08".parse().unwrap()).unwrap();
         assert_eq!(later.reserved_calls, 0);
         assert!(later.paused.contains_key(&ExecutionOperation::Daily));
+    }
+
+    #[test]
+    fn a_host_environment_pause_from_0_163_no_longer_holds_its_operation() {
+        let directory = fixture();
+        let root = directory.path();
+        let mut usage = Usage::load(root, today()).unwrap();
+        for (operation, stage) in [
+            (ExecutionOperation::Knowledge, HOST_ENVIRONMENT_STAGE),
+            (ExecutionOperation::Process, "native result host"),
+        ] {
+            usage.paused.insert(
+                operation,
+                Pause {
+                    at: jiff::Timestamp::now(),
+                    cause: Some(HaltCause::new(stage, Some("profile primary: missing"))),
+                },
+            );
+        }
+        usage.save(root).unwrap();
+        let mut knowledge =
+            Control::new(policy(3), ExecutionOperation::Knowledge, false, 64).unwrap();
+        assert!(knowledge.preflight(root).unwrap());
+        assert!(knowledge.enter(root).unwrap());
+        let mut process = Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
+        assert!(!process.enter(root).unwrap());
+        assert_eq!(process.report.stop, Some(Stop::Paused));
+        let stored = Usage::load(root, today()).unwrap();
+        assert_eq!(
+            stored.paused.keys().copied().collect::<Vec<_>>(),
+            [ExecutionOperation::Process]
+        );
     }
 
     #[test]

@@ -147,7 +147,12 @@ paths:
   environment a scheduled run's preflight finds unable to start (executable, account
   directory) is a current condition: the run records a failed `host environment` stage per
   run, excludes only those profiles (`execution::preflight_hosts`, their turns deferred as
-  host-unavailable without holds) and the next run checks again. Fatal scheduled failures
+  host-unavailable without holds) and the next run checks again. A host that cannot start
+  at its first call in a scheduled run (no executable, a `ChildStartFailure`, a failed or
+  unsupported `--version`) is excluded the same way (`unstartable_host`); cancellation, and
+  any attended run, keep that error fatal. That stage never halts, so the ledger drops a pause
+  0.163 recorded under it when it loads; an unresolvable profile is configuration and
+  still halts, as `host configuration`. Fatal scheduled failures
   pause that operation: the `automation-usage-v2` ledger records the first halting stage
   and at most 1024 bytes of its detail, while the job report keeps the full detail. An
   `automation-usage-v1` ledger decodes with cause-less pauses and is written back as v2.

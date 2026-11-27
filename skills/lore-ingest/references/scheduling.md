@@ -213,7 +213,11 @@ pause: the run reports a failed `host environment` stage naming each such profil
 why (the job is incomplete), sends that profile nothing and defers its work without a
 hold, while other profiles keep calling and returned results keep publishing. The next
 scheduled run checks again, so restoring the executable or directory needs no
-`--resume`. When every profile the operation needs fails, the run spends no call.
+`--resume`. A host that passes this check but cannot start at its first call (its
+`--version` fails, for example through a missing interpreter, or reports a version
+outside the supported range) is handled the same way in a scheduled run; an attended run
+reports the error and stops. When every profile the operation needs fails, the run spends no call. A
+`host environment` pause recorded by 0.163 is dropped when the ledger is next read.
 
 ## Timing and notifications
 

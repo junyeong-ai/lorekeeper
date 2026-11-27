@@ -529,6 +529,12 @@ mod native {
     impl std::error::Error for HostUnavailable {}
     impl miette::Diagnostic for HostUnavailable {}
 
+    fn host_unavailable(profile: &str, reason: &str) -> HostUnavailable {
+        HostUnavailable(format!(
+            "profile {profile}: {reason}; its work is deferred to a later run"
+        ))
+    }
+
     /// Consecutive unanswered invocation failures of one host configuration, with no answered call
     /// on it between them, that end a run. One failure is usually its own request's and is held
     /// or replanned while the run continues; a repeat points at a fault shared by every
@@ -1475,7 +1481,7 @@ mod native {
                 .collect::<Vec<_>>()
                 .join("; ");
             self.record(
-                "host environment",
+                automation::HOST_ENVIRONMENT_STAGE,
                 StageState::Failed,
                 Some(format!(
                     "{detail}; work routed to these profiles is deferred to a later run, which checks again"
@@ -1484,14 +1490,33 @@ mod native {
             self.unavailable_profiles = unavailable;
         }
 
+        /// The error of a call whose host could not start (no executable, a start failure, a
+        /// failed or unsupported `--version`). A scheduled run excludes the profile for the
+        /// rest of the run, as its preflight does, and the next run checks again; an attended
+        /// run keeps the error.
+        fn unstartable_host(&mut self, profile: &str, error: miette::Report) -> miette::Report {
+            if self.automation.is_none() {
+                return error;
+            }
+            let reason = error.to_string();
+            self.record(
+                automation::HOST_ENVIRONMENT_STAGE,
+                StageState::Failed,
+                Some(format!(
+                    "profile {profile}: {reason}; work routed to it is deferred to a later run, which checks again"
+                )),
+            );
+            let unavailable = host_unavailable(profile, &reason);
+            self.unavailable_profiles.insert(profile.to_owned(), reason);
+            unavailable.into()
+        }
+
         /// The deferral of a call routed to a profile whose host environment cannot start in
         /// this run, if it is one.
         fn unavailable_profile(&self, profile: &str) -> Option<HostUnavailable> {
-            self.unavailable_profiles.get(profile).map(|reason| {
-                HostUnavailable(format!(
-                    "profile {profile}: {reason}; its work is deferred to a later run"
-                ))
-            })
+            self.unavailable_profiles
+                .get(profile)
+                .map(|reason| host_unavailable(profile, reason))
         }
 
         /// The deferral of a call routed to a host this run tripped, if it is one.
@@ -2208,11 +2233,14 @@ mod native {
                 };
             }
             let mut profile = profile.clone();
-            let executable = execution::executable_path(profile.executable())?;
+            let executable = match execution::executable_path(profile.executable()) {
+                Ok(executable) => executable,
+                Err(error) => return Err(self.unstartable_host(&name, error)),
+            };
             profile.set_executable(executable.clone());
             let mut command = tokio::process::Command::new(executable);
             command.arg("--version");
-            let version = self
+            let version = match self
                 .supervisor
                 .run(
                     command,
@@ -2220,24 +2248,35 @@ mod native {
                     true,
                     self.host_output,
                 )
-                .await?;
+                .await
+            {
+                Ok(version) => version,
+                Err(error)
+                    if error
+                        .downcast_ref::<execution::ChildStartFailure>()
+                        .is_some() =>
+                {
+                    return Err(self.unstartable_host(&name, error));
+                }
+                Err(error) => return Err(error),
+            };
             if version.cancelled {
                 self.result.cancelled = true;
             }
             if !version.success {
-                if !version.cancelled {
-                    metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
-                        profile.engine(),
-                        execution::diagnostic::Phase::VersionPreflight,
-                        &version,
-                    ));
-                }
-                return Err(miette::miette!(
+                let error = miette::miette!(
                     "agent preflight failed: {}",
-                    version
-                        .detail
-                        .unwrap_or_else(|| "version unavailable".into())
+                    version.detail.as_deref().unwrap_or("version unavailable")
+                );
+                if version.cancelled {
+                    return Err(error);
+                }
+                metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
+                    profile.engine(),
+                    execution::diagnostic::Phase::VersionPreflight,
+                    &version,
                 ));
+                return Err(self.unstartable_host(&name, error));
             }
             if let Err(error) = execution::verify_version(profile.engine(), &version.stdout) {
                 metrics.host_failure = Some(execution::diagnostic::HostFailure::from_child(
@@ -2245,7 +2284,7 @@ mod native {
                     execution::diagnostic::Phase::VersionPreflight,
                     &version,
                 ));
-                return Err(error);
+                return Err(self.unstartable_host(&name, error));
             }
             let host = RequestedExecution {
                 profile: name,
@@ -8274,7 +8313,7 @@ mod native {
                 match execution::preflight_hosts(&runner.config.execution, operation.semantic()) {
                     Ok(unavailable) => runner.exclude_unavailable_hosts(unavailable),
                     Err(error) => {
-                        runner.failure("host environment", error);
+                        runner.failure("host configuration", error);
                         return runner.finish();
                     }
                 }

@@ -405,6 +405,29 @@ impl ChildCancellation {
     }
 }
 
+/// A child process the operating system could not start (a missing executable or interpreter,
+/// a file it cannot execute), as distinct from a child that started and failed.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct ChildStartFailure(std::io::Error);
+
+#[cfg(unix)]
+impl std::fmt::Display for ChildStartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "start child: {}", self.0)
+    }
+}
+
+#[cfg(unix)]
+impl std::error::Error for ChildStartFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
+}
+
+#[cfg(unix)]
+impl miette::Diagnostic for ChildStartFailure {}
+
 #[cfg(unix)]
 struct RunningChild {
     child: tokio::process::Child,
@@ -427,9 +450,7 @@ impl RunningChild {
             .stdin(if input { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = command
-            .spawn()
-            .map_err(|e| miette::miette!("start child: {e}"))?;
+        let child = command.spawn().map_err(ChildStartFailure)?;
         let group = child
             .id()
             .and_then(|id| i32::try_from(id).ok())
