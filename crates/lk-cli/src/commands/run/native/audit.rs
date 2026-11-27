@@ -568,8 +568,7 @@ impl Runner<'_> {
                             .find(|(result, _, _)| result.path == assessment.path)
                             .expect("assembled assessment belongs to captured input")
                             .1
-                            .guard(mutation);
-                        Ok(())
+                            .plan_publication(session.root(), mutation)
                     },
                     self.supervisor.read_control(),
                 );

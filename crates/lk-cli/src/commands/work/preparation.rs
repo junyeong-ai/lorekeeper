@@ -438,6 +438,23 @@ impl Binding {
     }
 }
 
+/// Retires the attempt retained for `key` in `plan`, which publishes that stage's result for
+/// the subject's current input. Whatever input the attempt failed on (an older context,
+/// another profile's request), nothing of the stage is pending any more, so the failure
+/// neither holds the subject nor stays pending as a probe.
+#[cfg(unix)]
+pub(in crate::commands) fn plan_retire(
+    root: &Path,
+    key: &Key,
+    plan: &mut MutationPlan,
+) -> miette::Result<()> {
+    let path = key.path();
+    if let Some((raw, _)) = read(root, &path)? {
+        plan.remove(path, raw);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 pub(in crate::commands) fn plan_retry(
     root: &Path,

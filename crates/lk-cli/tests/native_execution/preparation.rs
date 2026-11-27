@@ -316,6 +316,74 @@ fn native_discovery_holds_failed_inputs_and_explicit_actions_without_pausing_ope
 }
 
 #[test]
+fn a_preparation_a_replacement_profile_publishes_retires_the_failed_attempt() {
+    let assessment_fails = RECORD_AUDIT.replace(
+        "    assert request['schema']=='native-audit-results-v1'",
+        "    sys.exit(51)",
+    );
+    assert_ne!(assessment_fails, RECORD_AUDIT);
+    for engine in ["codex", "claude-code"] {
+        for (failing, stage) in [
+            ("exit 51", "audit-discovery"),
+            (assessment_fails.as_str(), "audit-assessment"),
+        ] {
+            let fixture = Fixture::new(engine, 30, failing);
+            let directory = fixture.root().join("vault/wiki/concepts");
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(
+                directory.join("blocked.md"),
+                include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md"),
+            )
+            .unwrap();
+            let (_, failed) = fixture.run("knowledge");
+            assert_eq!(failed["halted"], false, "{failed}");
+            let attempts = fixture
+                .root()
+                .join("vault/.lorekeeper/audit-preparation-attempts");
+            let held = std::fs::read_dir(&attempts)
+                .unwrap()
+                .map(|entry| {
+                    let raw = std::fs::read(entry.unwrap().path()).unwrap();
+                    serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["key"]["stage"]
+                        .clone()
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(held, [stage], "{engine}: {failed}");
+
+            // The failed profile never answers again; another one takes the subject over.
+            let replacement = fixture.root().join("replacement agent");
+            std::fs::write(
+                &replacement,
+                std::fs::read_to_string(fixture.root().join("agent executable"))
+                    .unwrap()
+                    .replace(failing, RECORD_AUDIT),
+            )
+            .unwrap();
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let config = std::fs::read_to_string(&fixture.config)
+                .unwrap()
+                .replace("default_profile: primary", "default_profile: replacement")
+                + &format!(
+                    "    replacement:\n      engine: {engine}\n      executable: {}\n      timeout_seconds: 30\n",
+                    serde_json::to_string(&replacement).unwrap()
+                );
+            std::fs::write(&fixture.config, config).unwrap();
+            let (_, replaced) = fixture.run("knowledge");
+            assert_eq!(replaced["halted"], false, "{replaced}");
+            assert_eq!(
+                replaced["audit"][0]["assessed_path"], "wiki/concepts/blocked.md",
+                "{replaced}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&attempts).unwrap().count(),
+                0,
+                "{engine}/{stage}: the publication retires the attempt it answered: {replaced}"
+            );
+        }
+    }
+}
+
+#[test]
 fn whole_section_failures_are_held_without_repeating_or_creating_semantic_progress() {
     for engine in ["codex", "claude-code"] {
         for (behavior, kind) in [

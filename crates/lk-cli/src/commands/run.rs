@@ -1121,8 +1121,19 @@ mod native {
             let mut probe = self.host_probes.scope(scope).take().unwrap_or_default();
             let withdrawn = probe.released.take();
             probe.target = None;
-            let mut remaining = match probe.remaining.take() {
-                Some(remaining) => remaining,
+            let mut remaining: std::collections::VecDeque<_> = match probe.remaining.take() {
+                // A candidate whose request settled or whose preparation was published since
+                // it was listed is no longer pending; only standing holds are released.
+                Some(remaining) => match host::pending_holds(&root) {
+                    Ok(pending) => remaining
+                        .into_iter()
+                        .filter(|hold| pending.iter().any(|current| current.is_same_hold(hold)))
+                        .collect(),
+                    Err(error) => {
+                        self.failure("host probe", error);
+                        return false;
+                    }
+                },
                 None => {
                     let candidates = host::pending_holds(&root).and_then(|holds| {
                         host::HostAnswers::load(&root)?.probe_candidates(
@@ -1256,11 +1267,7 @@ mod native {
             };
             let root = self.root.clone();
             let pending = match host::pending_holds(&root) {
-                Ok(holds) => holds.into_iter().any(|hold| {
-                    hold.identity == released.identity
-                        && hold.host.as_ref().map(|host| host.at)
-                            == released.host.as_ref().map(|host| host.at)
-                }),
+                Ok(holds) => holds.iter().any(|hold| hold.is_same_hold(&released)),
                 Err(error) => {
                     self.failure("host probe", error);
                     return false;

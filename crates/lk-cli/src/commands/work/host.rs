@@ -307,6 +307,15 @@ pub(in crate::commands) struct PendingHold {
     pub host: Option<HostEnd>,
 }
 
+impl PendingHold {
+    /// Whether `other` is this hold as one capture of the pending holds listed it: the same
+    /// held input, failed when the same host ended. A renewed failure is a different hold.
+    pub(in crate::commands) fn is_same_hold(&self, other: &Self) -> bool {
+        self.identity == other.identity
+            && self.host.as_ref().map(|host| host.at) == other.host.as_ref().map(|host| host.at)
+    }
+}
+
 impl HostAnswers {
     pub(in crate::commands) fn load(root: &Path) -> miette::Result<Self> {
         let path = lk_vault::page_path(root, Path::new(PATH)).into_diagnostic()?;
