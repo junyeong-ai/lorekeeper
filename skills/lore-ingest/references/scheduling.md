@@ -197,12 +197,14 @@ packaged skill paths with a workspace-write sandbox. These are different host
 permission models. Native result, source and target guards remain authoritative.
 
 Schedules capture absolute config/data paths, PATH entries anchored to the
-generation directory, and relevant existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME`
-directories. They do not copy credential values. Explicit standard proxy variables
+generation directory, and the existing `CLAUDE_CONFIG_DIR` or `CODEX_HOME`
+directories of the hosts the scheduled operations use: the profile each stage of each
+scheduled operation resolves to (only `knowledge` audits), the same set a scheduled
+run checks. They do not copy credential values. Explicit standard proxy variables
 retain casing and empty values; endpoint URLs must be credential-free and contain
 no query, fragment or non-root path. Regenerate definitions when these change.
-Before planning, a scheduled run checks each host its operation may use, that is, the
-profile each of its stages resolves to (only `knowledge` audits): the agent executable resolves to an executable file, and the captured `CODEX_HOME` or
+Before planning, a scheduled run checks each host its operation may use: the agent
+executable resolves to an executable file, and the captured `CODEX_HOME` or
 `CLAUDE_CONFIG_DIR` (or a Claude profile's `config_directory`) is an existing
 directory. A failure pauses the operation with a `host environment` cause naming the
 profile and directory, spends no call and holds no item.

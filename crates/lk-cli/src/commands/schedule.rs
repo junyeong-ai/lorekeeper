@@ -241,7 +241,10 @@ pub async fn run(
             execution
                 .select_profile(name)
                 .map_err(|e| miette::miette!("scheduled semantic job: {e}"))?;
-            for name in std::iter::once(name).chain(execution.stages.values().map(String::as_str)) {
+            let names = execution
+                .operation_profiles(operation)
+                .map_err(|e| miette::miette!("scheduled semantic job: {e}"))?;
+            for name in names {
                 let profile = &execution.profiles[name];
                 if !matches!(
                     profile,

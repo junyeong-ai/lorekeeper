@@ -207,6 +207,38 @@ fn stage_overrides_capture_both_hosts_without_capturing_unused_profiles() {
 }
 
 #[test]
+fn a_profile_routed_only_to_stages_no_scheduled_operation_uses_is_not_captured() {
+    let directory = workspace(Some("codex"));
+    let path = directory.path().join("config.yaml");
+    let codex = directory.path().join("codex");
+    std::fs::create_dir(&codex).unwrap();
+    let config = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("execution:\n", "execution:\n  stages: {audit: auditor}\n")
+        + "    auditor: {engine: claude-code, timeout_seconds: 60}\n";
+    std::fs::write(&path, config).unwrap();
+    // Only daily ingestion is scheduled, and it never audits: the auditor's stale host
+    // directory neither blocks generation nor enters the job environment.
+    let stale = directory.path().join("deleted-account");
+    let output = render(
+        directory.path(),
+        "cron",
+        &[
+            ("CODEX_HOME", codex.as_os_str()),
+            ("CLAUDE_CONFIG_DIR", stale.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("CODEX_HOME"), "{text}");
+    assert!(!text.contains("CLAUDE_CONFIG_DIR"), "{text}");
+}
+
+#[test]
 fn an_explicit_missing_selected_profile_is_not_silently_replaced() {
     let directory = workspace(Some("codex"));
     for value in ["", "missing"] {

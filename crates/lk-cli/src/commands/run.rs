@@ -40,23 +40,6 @@ pub enum Operation {
 }
 
 impl Operation {
-    /// The semantic stages this operation can invoke: queue work in every operation, and the
-    /// audit only in `knowledge`.
-    #[cfg(unix)]
-    fn stages(self) -> &'static [lk_core::execution::ExecutionStage] {
-        use lk_core::execution::ExecutionStage::*;
-        const QUEUE: &[lk_core::execution::ExecutionStage] = &[
-            Discovery, Screening, Inspect, Reduce, Section, Extraction, Synthesis,
-        ];
-        const KNOWLEDGE: &[lk_core::execution::ExecutionStage] = &[
-            Discovery, Screening, Inspect, Reduce, Section, Extraction, Synthesis, Audit,
-        ];
-        match self {
-            Self::Daily | Self::Process => QUEUE,
-            Self::Knowledge => KNOWLEDGE,
-        }
-    }
-
     #[cfg(unix)]
     fn semantic(self) -> lk_core::execution::ExecutionOperation {
         match self {
@@ -7908,7 +7891,7 @@ mod native {
             }
             if runner.automation.is_some()
                 && let Err(error) =
-                    execution::preflight_hosts(&runner.config.execution, operation.stages())
+                    execution::preflight_hosts(&runner.config.execution, operation.semantic())
             {
                 runner.failure("host environment", error);
                 return runner.finish();

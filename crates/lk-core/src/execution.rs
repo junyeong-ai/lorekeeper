@@ -67,6 +67,24 @@ pub enum ExecutionOperation {
     Knowledge,
 }
 
+impl ExecutionOperation {
+    /// The semantic stages a job of this operation can invoke: queue work in every operation,
+    /// and the knowledge audit only in `knowledge`.
+    pub fn stages(self) -> &'static [ExecutionStage] {
+        use ExecutionStage::*;
+        const QUEUE: &[ExecutionStage] = &[
+            Discovery, Screening, Inspect, Reduce, Section, Extraction, Synthesis,
+        ];
+        const KNOWLEDGE: &[ExecutionStage] = &[
+            Discovery, Screening, Inspect, Reduce, Section, Extraction, Synthesis, Audit,
+        ];
+        match self {
+            Self::Daily | Self::Process => QUEUE,
+            Self::Knowledge => KNOWLEDGE,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ExecutionStage {
@@ -397,6 +415,19 @@ impl ExecutionConfig {
             .get_key_value(name)
             .map(|(name, profile)| (name.as_str(), profile))
             .ok_or_else(|| ConfigError::Validation(format!("unknown execution profile '{name}'")))
+    }
+
+    /// The profiles the selected job of `operation` invokes: each stage it can use, resolved
+    /// through its stage override or the job profile.
+    pub fn operation_profiles(
+        &self,
+        operation: ExecutionOperation,
+    ) -> Result<std::collections::BTreeSet<&str>, ConfigError> {
+        operation
+            .stages()
+            .iter()
+            .map(|stage| self.resolve_stage_profile(*stage).map(|(name, _)| name))
+            .collect()
     }
 
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
