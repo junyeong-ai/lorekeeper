@@ -6954,6 +6954,41 @@ mod native {
             })
         }
 
+        /// The plan after recording a screening of `path`. A recorded screening changes only
+        /// that subject's selection state, so its candidate is read again from `screened`, the
+        /// scan the recording checked against, and the other planned subjects stand; a
+        /// deferral (`screened` is `None`) changes the batch, which is planned again.
+        fn replan_screening(
+            &mut self,
+            paths: &[String],
+            mut plan: lk_graph::audit::AuditPlan,
+            path: &str,
+            screened: Option<Vec<lk_graph::scan::ScannedPage>>,
+        ) -> miette::Result<lk_graph::audit::AuditPlan> {
+            let Some(pages) = screened else {
+                return self.audit_plan(paths);
+            };
+            let candidate = lk_graph::audit::load_selected_inputs_controlled(
+                &self.root,
+                &self.config.vault.dirs,
+                &pages,
+                &[path.to_owned()],
+                self.supervisor.read_control(),
+            )
+            .map_err(|e| miette::miette!("{e}"))?
+            .pop()
+            .ok_or_else(|| {
+                miette::miette!("screened audit subject is no longer selectable: {path}")
+            })?;
+            let slot = plan
+                .candidates
+                .iter_mut()
+                .find(|planned| planned.path == path)
+                .ok_or_else(|| miette::miette!("screened audit subject left its plan: {path}"))?;
+            *slot = candidate;
+            Ok(plan)
+        }
+
         fn defer_audit_screening(
             &mut self,
             candidate: &lk_graph::audit::AuditCandidate,
@@ -6980,6 +7015,8 @@ mod native {
                 }
             };
             let mut drifted = std::collections::BTreeSet::new();
+            // Whether only screened subjects were read again since the last complete plan.
+            let mut refreshed = false;
             loop {
                 let Some(candidate) = plan
                     .candidates
@@ -6993,7 +7030,20 @@ mod native {
                     })
                     .cloned()
                 else {
-                    return Some(plan);
+                    if !refreshed {
+                        return Some(plan);
+                    }
+                    // The other planned subjects were read before the screening calls: plan
+                    // them again before admission reads them.
+                    refreshed = false;
+                    plan = match self.audit_plan(paths) {
+                        Ok(plan) => plan,
+                        Err(error) => {
+                            self.failure("audit screening replanning", error);
+                            return None;
+                        }
+                    };
+                    continue;
                 };
                 let packet = match lk_graph::audit::selection::prepare_candidate_packet(
                     &self.root,
@@ -7006,6 +7056,7 @@ mod native {
                     Ok(packet) => packet,
                     Err(error @ lk_graph::GraphError::AuditScreeningCapacity { .. }) => {
                         self.defer_audit_screening(&candidate, error.to_string());
+                        refreshed = false;
                         plan = match self.audit_plan(paths) {
                             Ok(plan) => plan,
                             Err(error) => {
@@ -7028,6 +7079,7 @@ mod native {
                             admission.required_batches, admission.maximum_batches
                         ),
                     );
+                    refreshed = false;
                     plan = match self.audit_plan(paths) {
                         Ok(plan) => plan,
                         Err(error) => {
@@ -7049,6 +7101,7 @@ mod native {
                                     .into(),
                             );
                         }
+                        refreshed = false;
                         plan = match self.audit_plan(paths) {
                             Ok(plan) => plan,
                             Err(error) => {
@@ -7072,9 +7125,10 @@ mod native {
                             limits,
                             self.supervisor.read_control(),
                         )
+                        .map(|_| pages)
                     })();
-                    match result {
-                        Ok(_) => {}
+                    let screened = match result {
+                        Ok(pages) => Some(pages),
                         Err(lk_graph::GraphError::AuditScreeningChanged) => {
                             if !drifted.insert(candidate.path.clone()) {
                                 self.defer_audit_screening(
@@ -7083,14 +7137,16 @@ mod native {
                                         .into(),
                                 );
                             }
+                            None
                         }
                         Err(error) => {
                             self.failure("audit selection refresh", error);
                             return None;
                         }
-                    }
+                    };
                     drop(session);
-                    plan = match self.audit_plan(paths) {
+                    refreshed = screened.is_some();
+                    plan = match self.replan_screening(paths, plan, &candidate.path, screened) {
                         Ok(plan) => plan,
                         Err(error) => {
                             self.failure("audit selection replanning", error);
@@ -7104,6 +7160,7 @@ mod native {
                         &candidate,
                         "discovery candidates remain deferred for explicit reassessment".into(),
                     );
+                    refreshed = false;
                     plan = match self.audit_plan(paths) {
                         Ok(plan) => plan,
                         Err(error) => {
@@ -7133,6 +7190,7 @@ mod native {
                         &candidate,
                         "complete native screening request exceeds max_input_bytes".into(),
                     );
+                    refreshed = false;
                     plan = match self.audit_plan(paths) {
                         Ok(plan) => plan,
                         Err(error) => {
@@ -7155,6 +7213,7 @@ mod native {
                 match binding.held(&self.root) {
                     Ok(Some(reason)) => {
                         self.defer_audit_screening(&candidate, reason);
+                        refreshed = false;
                         plan = match self.audit_plan(paths) {
                             Ok(plan) => plan,
                             Err(error) => {
@@ -7174,6 +7233,7 @@ mod native {
                 let response = self.request_result(&native, &schema, &mut metrics).await;
                 if let Some(ResultReply::HostUnavailable(reason)) = &response {
                     self.defer_audit_for_host([candidate.path.as_str()], reason);
+                    refreshed = false;
                     plan = match self.audit_plan(paths) {
                         Ok(plan) => plan,
                         Err(error) => {
@@ -7241,17 +7301,19 @@ mod native {
                         limits,
                         self.supervisor.read_control(),
                     )
+                    .map(|changed| (changed, pages))
                 })();
                 drop(session);
                 metrics.revalidation_record_duration_ms =
                     Some(started.elapsed().as_millis() as u64);
-                match recorded {
-                    Ok(changed) => {
+                let screened = match recorded {
+                    Ok((changed, pages)) => {
                         metrics.outcome = WorkOutcome::Recorded;
                         self.result
                             .work_telemetry
                             .retained_progress
                             .screening_packets += usize::from(changed);
+                        Some(pages)
                     }
                     Err(lk_graph::GraphError::AuditScreeningChanged) => {
                         metrics.outcome = WorkOutcome::Rejected;
@@ -7259,15 +7321,17 @@ mod native {
                             &candidate,
                             "assigned candidate inputs changed; discard the old judgment".into(),
                         );
+                        None
                     }
                     Err(error) => {
                         self.record_work_step(metrics);
                         self.failure("audit screening recording", error);
                         return None;
                     }
-                }
+                };
                 self.record_work_step(metrics);
-                plan = match self.audit_plan(paths) {
+                refreshed = screened.is_some();
+                plan = match self.replan_screening(paths, plan, &candidate.path, screened) {
                     Ok(plan) => plan,
                     Err(error) => {
                         self.failure("audit screening replanning", error);

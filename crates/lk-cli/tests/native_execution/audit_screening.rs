@@ -222,6 +222,31 @@ fn native_audit_screening_resumes_partial_packets_without_repeating_paid_decisio
 }
 
 #[test]
+fn native_audit_screening_continues_its_packets_and_assessment_in_one_run() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 21, "not-selected", false, RECORD_AUDIT);
+        let config = std::fs::read_to_string(&fixture.config)
+            .unwrap()
+            .replace("max_calls: 1", "max_calls: 3");
+        std::fs::write(&fixture.config, config).unwrap();
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(report["semantic_calls"], 3, "{report}");
+        assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
+        let complete = packet(&fixture);
+        assert_eq!(complete["progress"]["not_selected"], 21);
+        assert_eq!(complete["progress"]["unknown"], 0);
+        let keys = calls(&fixture)
+            .iter()
+            .flat_map(|call| call["keys"].as_array().unwrap().clone())
+            .map(|key| key.as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 21, "each candidate is screened once");
+        assert_eq!(keys.iter().collect::<BTreeSet<_>>().len(), 21);
+    }
+}
+
+#[test]
 fn native_audit_screening_keeps_defer_and_advances_later_unknown_candidates() {
     for engine in ["codex", "claude-code"] {
         let fixture = fixture(engine, 21, "defer-first", false, RECORD_AUDIT);

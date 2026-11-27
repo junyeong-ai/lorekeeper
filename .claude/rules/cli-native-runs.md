@@ -14,6 +14,10 @@ paths:
   target with its reason, and any other audit record stays the audit's error; audit readiness cannot block its
   prerequisite queue tasks. Existing Work compares fresh subject/input
   identity before ready-only audit capture so valid scope drift remains a typed replan.
+  The screening loop plans the batch once and, after recording a packet, reads only that
+  subject again from the scan the recording checked against; a deferral changes the batch
+  and plans it again, and before admission the loop plans once more if it refreshed only
+  screened subjects since its last plan, since the others were read before its calls.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
