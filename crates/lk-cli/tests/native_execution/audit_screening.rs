@@ -54,6 +54,11 @@ with (root/'screen-calls.jsonl').open('a') as stream:
         'subject_text':subject.decode('utf-8'),
         'keys':[card['candidate']['path'] for card in request['candidates']]})+'\n')
 if mode=='failed': raise SystemExit(51)
+if mode=='edit-subject' and not (root/'subject-edited').exists():
+    # A writer appends prose to the subject itself while its packet runs.
+    (root/'subject-edited').write_text('')
+    page=root/'vault'/request['subject']['path']
+    page.write_text(page.read_text()+'\nAn authored addition.\n')
 if mode=='edit-own' and not (root/'own-edited').exists():
     # A writer changes one of this packet's own candidates while it runs.
     (root/'own-edited').write_text('')
@@ -405,6 +410,24 @@ fn a_candidate_edited_during_the_assessment_replans_the_subject_instead_of_halti
             "{report}"
         );
         assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
+    }
+}
+
+#[test]
+fn a_subject_edited_during_its_screening_packet_is_drift_not_a_halt() {
+    for engine in ["codex", "claude-code"] {
+        let fixture = fixture(engine, 3, "edit-subject", false, RECORD_AUDIT);
+        let (_, report) = fixture.run("knowledge");
+        assert_eq!(report["halted"], false, "{report}");
+        assert!(fixture.root().join("subject-edited").exists());
+        assert!(
+            report["work_steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|step| step["role"] == "screening" && step["outcome"] == "inputs-changed"),
+            "{report}"
+        );
     }
 }
 

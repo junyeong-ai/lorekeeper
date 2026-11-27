@@ -1127,11 +1127,14 @@ pub fn record(
     let candidate = selected
         .pop()
         .ok_or_else(|| error("audit screening requires an exact subject"))?;
+    // A screening reply is issued only for a subject with screened discovery, so its absence
+    // means the subject or its discovery changed after the packet: the reply answers earlier
+    // inputs.
     let progress = candidate
         .discovery
         .as_ref()
         .and_then(|discovery| discovery.selection.as_ref())
-        .ok_or_else(|| error("audit subject has no screened discovery"))?;
+        .ok_or(GraphError::AuditScreeningChanged)?;
     if supplied_purpose != &progress.purpose_revision {
         return Err(GraphError::AuditScreeningChanged);
     }
