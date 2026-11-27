@@ -1,6 +1,5 @@
 ---
 source: crates/lk-cli/tests/behaviour.rs
-assertion_line: 532
 expression: "observe(staged.path(), argv)"
 ---
 exit: 0
@@ -19,6 +18,6 @@ LORE_CONFIG=<staged>/corpus/config.yaml
 LORE_INSTALL_DATA_DIR=<staged>/data/lorekeeper
 PATH=<staged>/tools
 
-0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml run daily --wait
+0 7 * * * cd <staged> && lore --config <staged>/corpus/config.yaml run daily --wait --unattended
 */5 * * * * cd <staged> && lore --config <staged>/corpus/config.yaml task remind notify
 --- stderr ---

@@ -313,8 +313,12 @@ fn build_jobs(config: &lk_core::config::Config, flags: &[String]) -> Vec<Job> {
     };
     let semantic_job = |name: &str, schedule: &str, operation: &str| {
         let mut job = lore_job(name, schedule, &["run", operation, "--wait"]);
+        // Nobody reads a scheduled job's host transcripts, which repeat source text: every
+        // generated job runs unattended, and the automation budget alone adds --scheduled.
         if config.execution.automation.is_some() {
             job.args.extend(["--scheduled".into(), "--json".into()]);
+        } else {
+            job.args.push("--unattended".into());
         }
         job
     };
@@ -924,7 +928,10 @@ mod tests {
         config.personal = Some(personal);
         let jobs = build_jobs(&config, &[]);
         let named = |name: &str| jobs.iter().find(|job| job.name == name).unwrap();
-        assert_eq!(named("ingest").args, ["run", "daily", "--wait"]);
+        assert_eq!(
+            named("ingest").args,
+            ["run", "daily", "--wait", "--unattended"]
+        );
         assert_eq!(
             named("maintenance").args,
             ["maintenance", "--prune-queue", "--wait-for-vault"]
@@ -961,7 +968,7 @@ mod tests {
             .iter()
             .find(|job| job.name == "knowledge-audit")
             .unwrap();
-        assert_eq!(audit.args, ["run", "knowledge", "--wait"]);
+        assert_eq!(audit.args, ["run", "knowledge", "--wait", "--unattended"]);
         assert!(matches!(&audit.schedule, When::Calendar(value) if value == "0 7 * * 0"));
         config.graph.audit.schedule = None;
         assert!(

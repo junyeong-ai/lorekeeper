@@ -926,7 +926,9 @@ fn assert_tool_enabled_failure_hold(fixture: &Fixture, subject: &str) {
 
 #[test]
 fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
-    for scheduled in [true, false] {
+    // A scheduled job, a generated job without an automation budget (--unattended), and an
+    // attended run.
+    for (scheduled, unattended) in [(true, false), (false, true), (false, false)] {
         let token = ["ghp", "_0123456789abcdefghij", "klmnopqrstuvwxyz"].concat();
         let fixture = Fixture::new(
             "codex",
@@ -942,6 +944,9 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
         if scheduled {
             command.arg("--scheduled");
         }
+        if unattended {
+            command.arg("--unattended");
+        }
         let output = command.output().unwrap();
         let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let invoked = if scheduled {
@@ -953,10 +958,10 @@ fn scheduled_job_output_keeps_lore_stages_and_omits_host_transcripts() {
         let diagnostics = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             diagnostics.contains("host-stdout-marker"),
-            !scheduled,
+            !scheduled && !unattended,
             "{diagnostics}"
         );
-        if scheduled {
+        if scheduled || unattended {
             // Only the bounded, sanitized stderr tail an answerless failure reports reaches
             // the job's log, with credentials masked; the host's streams are not forwarded.
             let marked = diagnostics

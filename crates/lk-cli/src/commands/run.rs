@@ -26,6 +26,9 @@ pub struct RunOptions {
     /// Continue ready work within the configured automation duration and shared UTC-day allowance
     #[arg(long, conflicts_with = "batches")]
     scheduled: bool,
+    /// Discard host transcripts: report Lore stages and bounded host diagnostics only (implied by --scheduled)
+    #[arg(long)]
+    unattended: bool,
     /// Explicitly resume this paused scheduled operation without resetting its allowance
     #[arg(long, requires = "scheduled")]
     resume: bool,
@@ -68,6 +71,7 @@ pub async fn run(
             wait,
             json,
             scheduled,
+            unattended,
             resume,
         } = options;
         let _ = (
@@ -79,6 +83,7 @@ pub async fn run(
             wait,
             json,
             scheduled,
+            unattended,
             resume,
         );
         Err(miette::miette!(
@@ -7726,6 +7731,7 @@ mod native {
             wait,
             json,
             scheduled,
+            unattended,
             resume,
         } = options;
         let batches = batches.get();
@@ -7790,7 +7796,7 @@ mod native {
         };
         let mut campaign = Campaign {
             supervisor: execution::Supervisor::new()?,
-            host_output: if scheduled {
+            host_output: if scheduled || unattended {
                 execution::ChildOutput::Discard
             } else {
                 execution::ChildOutput::Forward

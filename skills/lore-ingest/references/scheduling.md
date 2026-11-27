@@ -19,7 +19,9 @@
 `lore schedule --format launchd --bin /absolute/path/to/lore`. On Linux review its
 cron output and merge with `crontab -e`; piping into `crontab -` replaces other jobs.
 Create the named log directory before loading launchd plists. Job logs keep Lore's
-report and progress, never host transcripts. Reproduce a host failure with the job's own
+report and progress, never host transcripts: every generated semantic job runs
+unattended (`--scheduled` with `execution.automation`, otherwise `--unattended`), and
+only the bounded, masked host failure diagnostic reaches the log. Reproduce a host failure with the job's own
 environment, not the terminal's: run the same command with the plist's
 `EnvironmentVariables` (or the cron line's assignments) applied, since a terminal can
 hold a different `CODEX_HOME`, `CLAUDE_CONFIG_DIR` or `PATH` and succeed where the job
