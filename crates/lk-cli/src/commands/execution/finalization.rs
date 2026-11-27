@@ -399,9 +399,11 @@ pub(in crate::commands) fn decode_value(
 /// order. Each event it lists in `off_focus` is written here from its heading, the locale's
 /// off-focus sentence and its 🔗 source links (the template's `🔗 {original_link}` links), in
 /// place of what the reply wrote under it; every other event must keep each of those links'
-/// destinations, as CommonMark reads them. A reply breaking either, or declaring an event off-focus on a source without
-/// a focus, is an invalid body, held as a rejected reply. A request without events takes its
-/// body as returned and declares no off-focus event.
+/// destinations, as CommonMark reads them. A reply breaking either, declaring an event
+/// off-focus on a source without a focus, or whose written events exceed the body bytes its
+/// result allows, is an invalid body: a target-local hold of that exact request, never a
+/// fatal publication error. A request without events takes its body as returned and declares
+/// no off-focus event.
 fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse {
     let Some(events) = request["events"].as_array() else {
         return if off_focus.is_empty() {
@@ -502,6 +504,21 @@ fn refine(request: &Value, body: String, off_focus: &[usize]) -> SectionResponse
             ));
         }
         refined.push_str(block);
+    }
+    // The reply fit its allowance; the events Rust wrote may not. The allowance is what the
+    // section result leaves its body (`max_response_bytes` beyond an empty response).
+    let allowance = request["max_response_bytes"]
+        .as_u64()
+        .and_then(|limit| usize::try_from(limit).ok())
+        .and_then(|limit| limit.checked_sub(empty_response_bytes()));
+    let body_bytes = serde_json::to_string(&refined)
+        .expect("a body serializes")
+        .len()
+        - 2;
+    if let Some(allowance) = allowance.filter(|allowance| body_bytes > *allowance) {
+        return SectionResponse::InvalidBody(format!(
+            "the refined section with its off-focus events needs {body_bytes} body bytes, above the {allowance} its result allows"
+        ));
     }
     match lk_core::markdown::validate_section_body(&refined) {
         Ok(()) => SectionResponse::Complete(refined),
@@ -728,6 +745,24 @@ mod tests {
                 "{body:?} {off_focus}"
             );
         }
+        // A reply that fits its allowance, but not once Rust writes its off-focus events.
+        let short =
+            "### Kept\nA refined finding.\n\n[🔗 Source](https://a.invalid)\n\n### Elsewhere\n";
+        let mut tight = request.clone();
+        tight["max_response_bytes"] =
+            json!(empty_response_bytes() + serde_json::to_string(short).unwrap().len() - 2 + 8);
+        assert!(
+            matches!(
+                decode_value(
+                    json!({"status":"complete","body":short,"reason":null,"off_focus":[1]}),
+                    &tight,
+                )
+                .unwrap()
+                .0,
+                SectionResponse::InvalidBody(reason) if reason.contains("allows")
+            ),
+            "an expansion beyond the result allowance is held, not published or fatal"
+        );
         let mut unfocused = request.clone();
         unfocused["work"]["context"]["purpose"]["parameters"]
             .as_object_mut()
