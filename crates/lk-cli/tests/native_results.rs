@@ -104,14 +104,28 @@ if request.get('schema') in ['native-selected-results-v4','native-finalize-resul
         if mode.startswith('needs-review') and task['kind']=='synthesize-concept':
             roster=request['inspected_resources'] if completed is not None else item['resources']
             authority=lambda entry: entry.get('authority') or entry.get('guard',{}).get('authority')
-            refusal=item.get('review_refusal') or request.get('review_refusal')
-            if refusal: (root/'review-refusal').write_text(json.dumps(refusal))
-            if (mode in ['needs-review-always','needs-review-stubborn','needs-review-gap-always'] or not any(authority(entry)=='review' for entry in roster)) and not (refusal and mode!='needs-review-stubborn'):
+            if mode in ['needs-review-always','needs-review-distinct','needs-review-gap-always'] or not any(authority(entry)=='review' for entry in roster):
                 page=next(index for index,entry in enumerate(roster) if authority(entry)=='page')
                 proposals=int((root/'review-proposals').read_text() if (root/'review-proposals').exists() else '0')+1
                 (root/'review-proposals').write_text(str(proposals))
-                results.append({'status':'needs-review','value':{'kind':'evidence-gap' if mode in ['needs-review-gap','needs-review-gap-always'] else 'conflict','title':'Deployment status disagreement',
-                    'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page]},
+                kind='evidence-gap' if mode in ['needs-review-gap','needs-review-gap-always'] else 'conflict'
+                def lookup(node, key):
+                    if isinstance(node, dict):
+                        if key in node: return node[key]
+                        node=list(node.values())
+                    if isinstance(node, list):
+                        for child in node:
+                            found=lookup(child, key)
+                            if found is not None: return found
+                    return None
+                reviews=lookup(item, 'open_reviews') or lookup(request, 'open_reviews') or []
+                distinct=[{'review':review['path'],'difference':'This asks whether the deployment was rolled back, not whether it happened.'} for review in reviews if review['kind']==kind] if mode=='needs-review-distinct' else []
+                synthesis={'synthesis':'The source reports a proposal; its deployment remains unknown.','related':None,
+                    'review_refs':[review['path'] for review in reviews] if reviews else None,
+                    'gap_claims':['The protocol is deployed in production.'] if any(review['kind']=='evidence-gap' for review in reviews) else None}
+                results.append({'status':'needs-review','value':{'kind':kind,'title':'Deployment status disagreement' if mode!='needs-review-distinct' else 'Deployment rollback question',
+                    'body':'# Deployment status disagreement\n\nThe cited source reports a proposal whose deployment is unconfirmed.'+(' See [the concept](../concepts/protocol.md).' if mode=='needs-review-concept-link' else ''),'evidence':[page],
+                    'distinct_from':distinct,'synthesis':synthesis},
                     'reason':'Cited sources disagree on deployment; no scoped review records it.'}); continue
         if mode=='changed-target':
             path=root/'vault'/target; path.write_text(path.read_text()+'\nExternal change.\n')
@@ -1063,47 +1077,66 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
             .unwrap();
             (fixture, task, explorations)
         };
-        for mode in ["needs-review-always", "needs-review-stubborn"] {
-            let (fixture, task, explorations) = with_open_review(mode, "open");
-            let mut report = fixture.run();
-            assert_eq!(report["halted"], false, "{report}");
-            assert_eq!(
-                report["retained_progress"]["synthesis_reviews"], 0,
-                "an open review of the same kind refuses a new one: {report}"
-            );
-            assert!(
-                std::fs::read_to_string(fixture.root().join("review-refusal"))
-                    .unwrap()
-                    .contains("wiki/explorations/rollback-principle.md"),
-                "the refusal names the open review to reference: {report}"
-            );
-            if !fixture.done(&task) && mode == "needs-review-always" {
-                report = fixture.run();
-            }
-            assert_eq!(
-                explorations.read_dir().unwrap().count(),
-                1,
-                "a rephrased question opens no further review: {report}"
-            );
-            if mode == "needs-review-always" {
-                assert!(
-                    fixture.done(&task),
-                    "the reconsidered finalizer completes against the open review: {planned}: {report}"
-                );
-                continue;
-            }
-            if fixture.calls() < 3 {
-                fixture.run();
-            }
-            assert!(!fixture.done(&task));
-            let calls = fixture.calls();
-            let report = fixture.run();
-            assert_eq!(
-                fixture.calls(),
-                calls,
-                "a refusal after the reconsideration holds the task: {report}"
-            );
-        }
+        let reviews = |explorations: &Path| explorations.read_dir().unwrap().count();
+        // A same-kind proposal that leaves an open review of its kind undeclared is refused,
+        // and the synthesis its reply carries is published instead of holding the task.
+        let (fixture, task, explorations) = with_open_review("needs-review-always", "open");
+        let report = fixture.run();
+        assert_eq!(report["halted"], false, "{report}");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 0,
+            "{report}"
+        );
+        assert_eq!(reviews(&explorations), 1, "{report}");
+        assert!(
+            fixture.done(&task),
+            "a refused proposal never holds the synthesis: {report}"
+        );
+        // Declaring how the question differs admits a distinct same-kind review; the
+        // resynthesis that review causes is the loop, so its next proposal is refused while
+        // the synthesis publishes.
+        let (fixture, task, explorations) = with_open_review("needs-review-distinct", "open");
+        let report = fixture.run();
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(reviews(&explorations), 2, "{report}");
+        let published =
+            std::fs::read_to_string(explorations.join("deployment-rollback-question.md")).unwrap();
+        let metadata = &lk_core::frontmatter::parse_page(&published)
+            .unwrap()
+            .frontmatter
+            .fields["review"];
+        assert_eq!(metadata["judged_citation_digest"], task.cache_hash);
+        assert!(
+            metadata["judged_review_digest"].is_string(),
+            "a synthesis-proposed review records the other reviews it was judged against"
+        );
+        assert!(fixture.done(&task), "{report}");
+        let calls = fixture.calls();
+        fixture.run();
+        assert_eq!(fixture.calls(), calls, "the paraphrase loop ends");
+        assert_eq!(reviews(&explorations), 2);
+        // The causal loop alone: a synthesis that keeps proposing publishes one review, and
+        // the resynthesis that review causes publishes the synthesis instead of another.
+        let fixture = Fixture::new("codex");
+        fixture.route_synthesis();
+        std::fs::write(fixture.root().join("mode"), "needs-review-always").unwrap();
+        let (task, _) = fixture.add("subject", lk_queue::TaskKind::SynthesizeConcept, planned);
+        let report = fixture.run();
+        let explorations = fixture.root().join("vault/wiki/explorations");
+        assert_eq!(
+            report["retained_progress"]["synthesis_reviews"], 1,
+            "{report}"
+        );
+        assert_eq!(reviews(&explorations), 1, "{report}");
+        assert!(
+            fixture.done(&task),
+            "the loop is refused and the synthesis published: {report}"
+        );
+        fixture.run();
+        assert_eq!(reviews(&explorations), 1, "no paraphrased review follows");
         for (mode, status, reason) in [
             (
                 "needs-review-gap-always",
@@ -1122,16 +1155,10 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
                 report["retained_progress"]["synthesis_reviews"], 1,
                 "{reason}: {report}"
             );
-            assert_eq!(explorations.read_dir().unwrap().count(), 2);
-            assert!(
-                std::fs::read_to_string(fixture.root().join("review-refusal"))
-                    .unwrap()
-                    .contains("wiki/explorations/deployment-status-disagreement.md"),
-                "the next rephrasing in the same run is refused, naming the review just published, before the run's review allowance defers it: {report}"
-            );
-            let report = fixture.run();
-            assert_eq!(explorations.read_dir().unwrap().count(), 2, "{report}");
-            assert!(fixture.done(&task), "{report}");
+            assert_eq!(reviews(&explorations), 2, "{reason}: {report}");
+            assert!(fixture.done(&task), "{reason}: {report}");
+            fixture.run();
+            assert_eq!(reviews(&explorations), 2, "{reason}");
         }
 
         let fixture = Fixture::new("codex");
@@ -1141,14 +1168,8 @@ fn a_proposed_synthesis_review_is_published_and_the_synthesis_completes_against_
         let report = fixture.run();
         assert_eq!(report["halted"], false, "{report}");
         assert!(
-            std::fs::read_to_string(fixture.root().join("review-refusal"))
-                .unwrap()
-                .contains("concept"),
-            "a refused review is reconsidered with Rust's refusal: {report}"
-        );
-        assert!(
             fixture.done(&task),
-            "the reconsidered finalizer corrects its reply: {planned}: {report}"
+            "a refused review publishes its synthesis: {planned}: {report}"
         );
         assert!(!fixture.root().join("vault/wiki/explorations").exists());
     }

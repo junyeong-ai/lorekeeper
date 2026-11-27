@@ -105,33 +105,32 @@ paths:
   publishes an open review naming the concept in `subjects` through
   `lk_vault::plan_curation`, journaled with the Work's read guards. Admission plans that
   curation, judges concept links through the filesystem and bounds the file stem in bytes;
-  a refusal, including a curation the vault refuses, holds only that task, while I/O stays a
-  fault. The first refusal under a context is stored with it (`action::REVIEW_REFUSAL`,
-  `.lorekeeper/queue/review-refusals/`, pruned with the task), and the next request for that
-  task and context carries it as `review_refusal` with its instruction (a request without a
-  refusal keeps its bytes): that request differs from the held one, so it is reconsidered
-  once, and a further refusal marks the record exhausted, which holds the task under that
-  context on every finalization path (selected, root and frontier) without a call. A proposal citing an origin both as a page and
-  by its RSS events keeps the events. The run then replans; the review enters the concept's scope through `subjects`,
-  so the next finalization completes against it. `needs-review` is only for an issue no
-  open review in scope records. One open review of a kind carries that kind of question for a
-  concept: while an open review of the proposal's kind names the concept (its verified owner,
-  among every review in the vault's review inventory, whoever wrote it and whether or not the
-  Work read it), the proposal is refused, naming that review, and the finalizer references it
-  and states any distinct question in the synthesis until the review is resolved. A new
-  review makes its concept owed a resynthesis, so a rephrased question would otherwise open
-  review after review. A proposal of another kind, or after the review resolves, still
-  publishes. A proposal repeating a scoped review exactly (kind,
-  title, judgment and evidence, whatever its status, compared against every review the
-  Work's scope depends on) is that review: it publishes nothing and is refused, so its task is
-  reconsidered once with that refusal and then held while its inputs stay current. A new review never takes an address that folds (case, NFC) onto a
-  removed review whose absence the request guards. A target publishes at most one review per run, spent
-  when it publishes: a further proposal in that run publishes and records nothing and
-  defers only that target, and a repeating finalizer cannot loop through paid calls. The
-  same-kind refusal is evaluated first, so a further proposal of a kind with an open review
-  is refused and reconsidered rather than deferred to a later paid call. The
-  published review records its `kind` and `judged_citation_digest`, the concept citations
-  it was judged against.
+  a refusal, including a curation the vault refuses, never holds the synthesis, while I/O
+  stays a fault: every `needs-review` reply carries `synthesis`, the complete synthesis value
+  the finalizer would publish without the review (referencing only existing reviews), and on
+  refusal Rust publishes it and drops only the proposal. No refusal is stored or
+  reconsidered; records of the superseded reconsideration (`action::REVIEW_REFUSAL`,
+  `.lorekeeper/queue/review-refusals/`) hold nothing and are pruned with their tasks. A
+  proposal citing an origin both as a page and by its RSS events keeps the events. An
+  admitted review is published and the run replans; the review enters the concept's scope
+  through `subjects`, so the next finalization completes against it. `needs-review` is only
+  for an issue no open review in scope records. Only the causal loop is blocked: a review a
+  synthesis publishes makes its concept owed a resynthesis, and that resynthesis may not
+  propose another review of the same kind while nothing else changed, that is, while an open
+  review of that kind naming the concept records `judged_citation_digest` equal to the
+  task's citation digest and `judged_review_digest` equal to the digest of the other open
+  reviews naming the concept (by address and file revision). Any other synthesis may propose
+  a review of a kind already open for its concept when `distinct_from` declares, for each
+  open review of that kind naming the concept (its verified owner, among every review in the
+  vault's review inventory), how its question differs; Rust refuses an incomplete list. A
+  proposal repeating a scoped review exactly (kind, title, judgment and evidence, whatever its
+  status, compared against every review the Work's scope depends on) is that review and is
+  refused. A new review never takes an address that folds (case, NFC) onto a removed review
+  whose absence the request guards. A target publishes at most one review per run, spent when
+  it publishes: a further admissible proposal in that run publishes and records nothing and
+  defers only that target, while one the rule refuses publishes its synthesis. The published
+  review records its `kind`, `judged_citation_digest` and `judged_review_digest`, with its
+  concept as its subject, so automation's own reviews are recognizable.
 - A synthesis capture lists every open review whose subject owner is the concept in
   `open_reviews` (`work/open_review.rs`), once under its owner's address with its authored
   revision, each marked `citations_changed` when the request's citations differ from those

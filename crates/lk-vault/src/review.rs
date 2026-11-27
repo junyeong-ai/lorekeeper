@@ -40,6 +40,11 @@ pub struct KnowledgeReview {
     /// question cannot have been settled by new evidence.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub judged_citation_digest: Option<String>,
+    /// For a typed review a synthesis proposed, the digest of the other open reviews naming
+    /// its concept, by address and revision, when it was proposed. With the citation digest it
+    /// tells a later synthesis whether anything but this review changed since.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub judged_review_digest: Option<String>,
 }
 
 impl<'de> Deserialize<'de> for KnowledgeReview {
@@ -57,6 +62,8 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             resolution: Option<String>,
             #[serde(default)]
             judged_citation_digest: Option<String>,
+            #[serde(default)]
+            judged_review_digest: Option<String>,
         }
         let mapping = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
         let fields: Fields = serde_json::from_value(serde_json::Value::Object(mapping))
@@ -68,6 +75,7 @@ impl<'de> Deserialize<'de> for KnowledgeReview {
             evidence: fields.evidence,
             resolution: fields.resolution,
             judged_citation_digest: fields.judged_citation_digest,
+            judged_review_digest: fields.judged_review_digest,
         })
     }
 }
@@ -211,17 +219,17 @@ impl KnowledgeReview {
                 errors.push(error.to_string());
             }
         }
-        if let Some(digest) = &self.judged_citation_digest
-            && (self.kind.is_none()
-                || digest.len() != 32
-                || !digest
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
-        {
-            errors.push(
-                "judged_citation_digest is a typed review's 32-digit lowercase citation digest"
-                    .into(),
-            );
+        for (field, digest) in [
+            ("judged_citation_digest", &self.judged_citation_digest),
+            ("judged_review_digest", &self.judged_review_digest),
+        ] {
+            if let Some(digest) = digest
+                && (self.kind.is_none() || !lk_core::concept::is_source_revision(digest))
+            {
+                errors.push(format!(
+                    "{field} is a typed review's 32-digit lowercase digest"
+                ));
+            }
         }
         errors
     }

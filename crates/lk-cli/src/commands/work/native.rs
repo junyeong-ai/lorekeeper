@@ -179,7 +179,6 @@ struct Captured<'a> {
     resources: &'a [SemanticResource],
     owners: &'a super::generation::Owners,
     roster: Option<&'a super::selection::RosterBinding>,
-    review_refusal: Option<&'a str>,
 }
 
 /// Disclose to a finalizer what each recipe reached. Only screened extraction has a
@@ -264,7 +263,6 @@ pub(super) fn selected_task(
             resources: &prepared.resources,
             owners: &super::generation::Owners::build(config, prepared)?,
             roster: prepared.roster.as_ref(),
-            review_refusal: prepared.review_refusal(&work.plan.subject_revision),
         },
         work,
         target_owner,
@@ -365,10 +363,6 @@ fn selected_task_value(
         "max_response_bytes":super::generation::response_limit(task, captured.subject, &binding, &work.plan.subject_revision, captured.owners, work.plan.max_result_bytes)?,
     });
     disclose_roster(&mut selected, captured.roster)?;
-    if let Some(refusal) = captured.review_refusal {
-        selected["review_refusal"] =
-            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
-    }
     Ok(selected)
 }
 
@@ -600,7 +594,6 @@ pub(super) fn finalization_request(
     roster: Option<&super::selection::RosterBinding>,
     context_revision: &str,
     completed: &Value,
-    review_refusal: Option<&str>,
 ) -> miette::Result<Value> {
     if context_revision != work.plan.subject_revision
         || completed["kind"] != "finalize"
@@ -641,10 +634,6 @@ pub(super) fn finalization_request(
         "instructions":format!("Finalize only this exact Work from its complete guarded root observation. inspected_resources is the complete planned read roster with every native resource index and full guard. completed.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native observation, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. The supplied completed object replaces work result/status setup reads. Use source_read for a necessary targeted reread of an inspected resource, with --resource INDEX (default: the retained task source). Its literal matches are text positions, never event identities or semantic support. Preserve page continuation and resource guards. Ordinary setup and paid inspections must not restart; targeted owner comparison remains permitted, and an extraction's required change of discovery scope uses the typed needs-discovery response with a complete explicit replacement query list. {}", super::generation::instruction([kind])),
     });
     disclose_roster(&mut request, roster)?;
-    if let Some(refusal) = review_refusal {
-        request["review_refusal"] =
-            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
-    }
     Ok(request)
 }
 
@@ -655,7 +644,6 @@ pub(super) fn frontier_request(
     owners: &super::generation::Owners,
     roster: Option<&super::selection::RosterBinding>,
     frontier: &Value,
-    review_refusal: Option<&str>,
 ) -> miette::Result<Value> {
     if frontier["kind"] != "finalize-frontier"
         || frontier["work_id"] != work.plan.id
@@ -699,10 +687,6 @@ pub(super) fn frontier_request(
         "instructions":format!("Finalize only this exact Work from the supplied complete current frontier. Its observations cover every planned inspection exactly once; no combined reduction or joint verdict has been recorded. Read every observation and evidence mapping. inspected_resources is the complete planned read roster with every native resource index and full guard. frontier.evidence_resources lists the exact cited subset by resource index into that roster; use it with this Work's finding/question/resolution ranges. Captured context retains its own mappings. No guard or observation content was dropped. input_revision identifies the canonical native frontier, not a hash to reconstruct from this model view. The roster is not source content or a semantic identity judgment. rss_evidence_bindings supplies exact retained-manifest event_id/revision selectors and their inspected resource indices; copy selectors only for articles that support the reported concept. Do not reconstruct IDs from URLs, titles or payload filenames, infer support from roster membership, or upgrade legacy page-only evidence. Compare claims only under their declared scope and effective time; an inherited resolution is not authority to resolve another open question. Processing concerns cannot be relabeled as source uncertainty. The frontier replaces work result/status setup reads; use source_read for a necessary targeted reread of an inspected resource, with --resource INDEX (default: the retained task source), following its page continuation and resource guards. Literal matches are positions, never event identities. Targeted owner comparison remains permitted; an extraction's required change of discovery scope uses the typed needs-discovery response with a complete explicit replacement query list. Do not restart paid inspections or write a reduction output. Rust owns its distinct guarded completion proof and final publication. {}", super::generation::instruction([kind])),
     });
     disclose_roster(&mut request, roster)?;
-    if let Some(refusal) = review_refusal {
-        request["review_refusal"] =
-            json!({"reason":refusal, "instruction":super::generation::REVIEW_REFUSAL_REPLY});
-    }
     Ok(request)
 }
 
@@ -785,7 +769,6 @@ mod tests {
                 resources: &resources,
                 owners: &super::super::generation::Owners::default(),
                 roster: None,
-                review_refusal: None,
             },
             &work,
             Path::new("wiki/documents/owner.md"),
@@ -811,7 +794,6 @@ mod tests {
                     resources: &resources,
                     owners: &super::super::generation::Owners::default(),
                     roster: None,
-                    review_refusal: None,
                 },
                 &work,
                 Path::new("wiki/documents/owner.md"),
@@ -886,7 +868,6 @@ mod tests {
                         resources: &resources,
                         owners: &super::super::generation::Owners::default(),
                         roster: None,
-                        review_refusal: None,
                     },
                     &work,
                     Path::new(&task.target.vault_path),
@@ -962,7 +943,6 @@ mod tests {
                 resources: &resources,
                 owners: &super::super::generation::Owners::default(),
                 roster: None,
-                review_refusal: None,
             },
             &work,
             Path::new("wiki/documents/owner.md"),
@@ -1019,7 +999,6 @@ mod tests {
             None,
             "scope",
             &completed,
-            None,
         )
         .unwrap();
         assert_eq!(canonical_observation(&request, "completed"), completed);
@@ -1053,7 +1032,6 @@ mod tests {
                 None,
                 "another-scope",
                 &completed,
-                None,
             )
             .is_err()
         );
@@ -1108,7 +1086,6 @@ mod tests {
             None,
             "scope",
             &completed,
-            None,
         )
         .unwrap();
         let frontier_request = frontier_request(
@@ -1118,7 +1095,6 @@ mod tests {
             &super::super::generation::Owners::default(),
             None,
             &frontier,
-            None,
         )
         .unwrap();
         for request in [&root, &frontier_request] {
@@ -1141,7 +1117,6 @@ mod tests {
                 None,
                 "scope",
                 &completed,
-                None,
             )
             .is_err()
         );
@@ -1157,7 +1132,6 @@ mod tests {
                 None,
                 "scope",
                 &completed,
-                None,
             )
             .is_err()
         );
@@ -1172,7 +1146,6 @@ mod tests {
                 None,
                 "scope",
                 &completed,
-                None,
             )
             .is_err()
         );
@@ -1188,7 +1161,6 @@ mod tests {
             None,
             "scope",
             &completed,
-            None,
         )
         .unwrap();
         assert_eq!(legacy["rss_evidence_bindings"], json!([]));
@@ -1319,7 +1291,6 @@ mod tests {
             &super::super::generation::Owners::default(),
             None,
             canonical,
-            None,
         )
         .unwrap();
         let canonical_bytes = serde_json::to_vec(canonical).unwrap().len();

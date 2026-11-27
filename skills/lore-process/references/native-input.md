@@ -125,20 +125,20 @@ a completed Work. Each entry has exactly `status`, `value` and `reason`:
   Include current queries still needed for the extraction; omitted queries are not
   carried forward. Native validation checks the resulting scope afresh. Changing
   queries alone does not establish that the missing semantic evidence was obtained.
-- Synthesis review: `status: needs-review`, `value: {kind, title, body, evidence}` and a
-  concrete nonblank reason, when the synthesis contract requires a durable review for a
-  material disagreement or evidence gap that no scoped review in the request records.
-  `kind` is `conflict` or `evidence-gap`; `body` is the review's Markdown judgment and
-  links no concept page; `evidence` indexes the cited source pages or RSS event payloads
-  it rests on. Rust publishes it as an open review of the concept recording its `kind`
-  and replans. While an open review of the same kind names the concept, complete the
-  synthesis and list it in `review_refs` instead, stating any distinct question in the
-  synthesis until that review is resolved: Rust refuses a further review of that kind and
-  names the open one. A review of another kind may still be proposed. A concept publishes at
-  most one review per run.
-  When the task or Work supplies `review_refusal`, Rust refused this task's previous review
-  proposal for the same inputs for that reason and this request is its one reconsideration:
-  never resubmit that proposal unchanged; correct it, or complete the synthesis.
+- Synthesis review: `status: needs-review`, `value: {kind, title, body, evidence,
+  distinct_from, synthesis}` and a concrete nonblank reason, when the synthesis contract
+  requires a durable review for a material disagreement or evidence gap that no scoped review
+  in the request records. `kind` is `conflict` or `evidence-gap`; `body` is the review's
+  Markdown judgment and links no concept page; `evidence` indexes the cited source pages or
+  RSS event payloads it rests on. `distinct_from` lists, for each open review of the same
+  kind naming the concept, `{review, difference}`: how this question differs. `synthesis` is
+  the complete synthesis value you would return without the review, referencing only reviews
+  that exist. Rust publishes an admitted proposal as an open review of the concept and
+  replans. It refuses a proposal whose `distinct_from` omits an open review of its kind, and
+  any review of a kind while this synthesis is owed only because of an open review of that
+  kind a synthesis of this concept proposed with nothing else changed: reference that review
+  instead. A refused proposal publishes its `synthesis` and is dropped; it never holds the
+  task. A concept publishes at most one review per run.
 - Synthesis value: `{synthesis, related, review_refs, gap_claims}`. `review_refs` lists, by
   path, each open review in `context.purpose.parameters.open_reviews` whose question the
   synthesis leaves open, `[]` when the citations now settle every one, and `null` without

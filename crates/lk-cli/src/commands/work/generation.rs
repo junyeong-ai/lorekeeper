@@ -22,14 +22,10 @@ pub(in crate::commands) enum Outcome {
     Complete(Value),
     NeedsAction(String),
     NeedsDiscovery(super::discovery::recovery::Recovery, String),
-    NeedsReview(super::review::ReviewProposal, String),
+    /// A review proposal, its reason, and the synthesis result its reply carries for publication
+    /// if Rust refuses the proposal.
+    NeedsReview(super::review::ReviewProposal, String, Value),
     ReviewAdmitted(super::review::AdmittedReview),
-    /// A review proposal Rust refused: held like `NeedsAction` with `reason`, and `refusal`
-    /// given once to the next request for the same context (`action::REVIEW_REFUSAL`).
-    ReviewRefused {
-        reason: String,
-        refusal: String,
-    },
     /// A review proposal the run's allowance for this target cannot publish now.
     ReviewDeferred(String),
     Rejected(rejection::ProposalRejection),
@@ -65,14 +61,18 @@ pub(in crate::commands) fn schema() -> Value {
         "rss_evidence":{"type":"array","items":{"type":"object","additionalProperties":false,
             "properties":{"event_id":{"type":"string"},"revision":{"type":"string"}},"required":["event_id","revision"]}}},
         "required":["admission","name","category","aliases","synthesis","rss_evidence"]});
+    let synthesis = json!({"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]},"review_refs":{"type":["array","null"],"items":{"type":"string"}},"gap_claims":{"type":["array","null"],"items":{"type":"string"}}},"required":["synthesis","related","review_refs","gap_claims"]});
     let value = json!({"anyOf":[{"type":"null"},
         {"type":"object","additionalProperties":false,"properties":{"concepts":{"type":"array","items":concept}},"required":["concepts"]},
-        {"type":"object","additionalProperties":false,"properties":{"synthesis":{"type":"string"},"related":{"type":["string","null"]},"review_refs":{"type":["array","null"],"items":{"type":"string"}},"gap_claims":{"type":["array","null"],"items":{"type":"string"}}},"required":["synthesis","related","review_refs","gap_claims"]},
+        synthesis.clone(),
         {"type":"object","additionalProperties":false,"properties":{"queries":{"type":"array","minItems":1,"maxItems":16,"items":{
             "type":"object","additionalProperties":false,"properties":{"query":{"type":"string","minLength":1},"phrase":{"type":"boolean"},"spacing":{"type":"boolean"}},"required":["query","phrase","spacing"]}}},"required":["queries"]},
         {"type":"object","additionalProperties":false,"properties":{"kind":{"type":"string","enum":["conflict","evidence-gap"]},
             "title":{"type":"string","minLength":1},"body":{"type":"string","minLength":1},
-            "evidence":{"type":"array","minItems":1,"items":{"type":"integer","minimum":0}}},"required":["kind","title","body","evidence"]}]});
+            "evidence":{"type":"array","minItems":1,"items":{"type":"integer","minimum":0}},
+            "distinct_from":{"type":"array","items":{"type":"object","additionalProperties":false,
+                "properties":{"review":{"type":"string"},"difference":{"type":"string","minLength":1}},"required":["review","difference"]}},
+            "synthesis":synthesis},"required":["kind","title","body","evidence","distinct_from","synthesis"]}]});
     json!({"type":"object","additionalProperties":false,"properties":{"results":{"type":"array","items":{
         "type":"object","additionalProperties":false,"properties":{
             "status":{"type":"string","enum":["complete","needs-action","needs-discovery","needs-review"]},"value":value,"reason":{"type":["string","null"]}},
@@ -125,7 +125,21 @@ pub(super) fn assemble(
         {
             let proposal: super::review::ReviewProposal =
                 serde_json::from_value(value).into_diagnostic()?;
-            return Ok(Outcome::NeedsReview(proposal, reason));
+            let Outcome::Complete(synthesis) = assemble(
+                task,
+                subject,
+                binding,
+                context_revision,
+                owners,
+                json!({"status":"complete","value":proposal.synthesis,"reason":null}),
+                max_result_bytes,
+            )?
+            else {
+                return Err(miette::miette!(
+                    "a review proposal carries the complete synthesis published if it is refused"
+                ));
+            };
+            return Ok(Outcome::NeedsReview(proposal, reason, synthesis));
         }
         ("complete", Some(value), None) if value.is_object() => value,
         _ => {
@@ -290,25 +304,21 @@ pub(super) fn assemble_prepared(
         reply,
         work.plan.max_result_bytes,
     )?;
+    // A refused proposal never holds the synthesis: its reply's synthesis is published and
+    // only the proposal is dropped.
     Ok(match outcome {
-        Outcome::NeedsReview(proposal, reason) if review == ReviewAllowance::Spent => {
-            match super::review::same_kind_refusal(root, config, task, proposal.kind)? {
-                Some(refusal) => Outcome::ReviewRefused {
-                    reason: format!("{reason} (review refused: {refusal})"),
-                    refusal,
-                },
+        Outcome::NeedsReview(proposal, reason, synthesis) if review == ReviewAllowance::Spent => {
+            match super::review::same_kind_refusal(root, config, task, &proposal)? {
+                Some(_) => Outcome::Complete(synthesis),
                 None => Outcome::ReviewDeferred(format!(
                     "{reason} (this target already published a review in this run; the proposal waits for a later run)"
                 )),
             }
         }
-        Outcome::NeedsReview(proposal, reason) => {
+        Outcome::NeedsReview(proposal, _, synthesis) => {
             match super::review::admit(root, config, task, prepared, proposal)? {
                 Ok(review) => Outcome::ReviewAdmitted(review),
-                Err(refusal) => Outcome::ReviewRefused {
-                    reason: format!("{reason} (review refused: {refusal})"),
-                    refusal,
-                },
+                Err(_) => Outcome::Complete(synthesis),
             }
         }
         outcome => outcome,
@@ -409,11 +419,7 @@ pub(super) fn minimum_reply(
 const DISCOVERY_REPLY: &str = "Extraction alone may return {status: needs-discovery, value: {queries: [{query: explicit_query, phrase: boolean, spacing: boolean}]}, reason: nonblank} when new lexical discovery is needed. Supply 1..16 explicit queries, never paths, task IDs or revisions. These queries replace the entire current discovery query list; they are not appended. Supply the complete intended search scope, including current queries still needed for this extraction. Omitted queries will not be carried forward. Rust validates the resulting scope afresh; changed queries alone do not establish that the missing semantic evidence has been obtained. This records an incomplete recovery request; it grants no semantic approval or completion.";
 
 /// The synthesis-only reply that proposes the durable review its contract requires.
-const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index]}, reason: nonblank} when its contract requires a durable review that no review in this request already records: a material disagreement, or a material evidence gap such as a lost definition. Whether a question is already recorded is your judgment over every review in open_reviews, whatever its kind: when one records the same issue, complete the synthesis and list it in review_refs instead. An open review of one kind holds this concept's questions of that kind until it is resolved: list it in review_refs and state a distinct question of that kind in the synthesis prose, because Rust refuses a further review of that kind. A question of a different kind still gets its own review. body is the review's complete Markdown judgment under the supplied Knowledge reviews contract; it may link source pages but never a concept page. evidence lists, by index into inspected_resources (a selected task's resources), the cited source pages or RSS event payloads that judgment rests on. Rust publishes it as an open review of this concept and replans, and the next finalization drafts the synthesis against that review.";
-
-/// What a request carrying `review_refusal` asks of its reconsideration. It travels inside that
-/// field, so a request without a refusal keeps its instructions byte for byte.
-pub(super) const REVIEW_REFUSAL_REPLY: &str = "Rust refused this task's previous review proposal for these exact inputs for this reason, and this request is its only reconsideration: never resubmit that proposal unchanged; correct it, or complete the synthesis, listing in review_refs an open review that already records the issue.";
+const REVIEW_REPLY: &str = "Synthesis alone may return {status: needs-review, value: {kind: conflict|evidence-gap, title: string, body: string, evidence: [resource_index], distinct_from: [{review: path, difference: string}], synthesis: synthesis_value}, reason: nonblank} when its contract requires a durable review for a material disagreement or evidence gap that no review in open_reviews already records; when one records the same issue, complete the synthesis and list it in review_refs instead. distinct_from states, for each open review of the proposal's kind naming this concept, how this question differs; Rust refuses a list that omits one, and any review of a kind while this synthesis is owed only to an open review of that kind a synthesis of this concept proposed with nothing else changed. synthesis is the complete value you would return without the review, referencing only existing reviews: Rust publishes it if it refuses the proposal. body is the review's Markdown judgment under the Knowledge reviews contract and never links a concept page; evidence indexes inspected_resources (a selected task's resources) it rests on. Rust publishes an admitted review and replans; the next finalization drafts the synthesis against it.";
 
 const REVIEW_REFS_REPLY: &str = "When context.purpose.parameters.open_reviews names open reviews of this concept, a complete synthesis lists in review_refs, by exact path, each one whose question it leaves open, and states that question's status in its prose; an empty list answers that the citations now settle every one. A review recorded with citations_changed: false was judged against these exact citations, so it stays listed. For each listed evidence-gap review, return the defining claims it names that the citations still do not support, one line each, in gap_claims; otherwise gap_claims is null. Rust appends the callouts referencing every listed review and records them, so never write those callouts in synthesis. Without open_reviews, review_refs and gap_claims are null.";
 
@@ -474,11 +480,6 @@ pub(super) fn admission(
     if let Some(reason) = rejection {
         return Ok(Admission::Deferred(reason));
     }
-    if let Some(reason) =
-        REVIEW_REFUSAL.exhausted(root, &task.task_id, &task.cache_hash, revision)?
-    {
-        return Ok(Admission::Deferred(reason));
-    }
     let Some((_, action)) = action else {
         return Ok(if history {
             Admission::Single
@@ -497,6 +498,8 @@ pub(in crate::commands) fn plan_prune(
     pending: &std::collections::BTreeSet<(String, String)>,
     plan: &mut lk_vault::MutationPlan,
 ) -> miette::Result<usize> {
+    // Review refusal records of the superseded reconsideration hold nothing now; pruning
+    // retires those written before it was replaced.
     Ok(GENERATION.plan_prune(root, pending, plan)?
         + REVIEW_REFUSAL.plan_prune(root, pending, plan)?
         + rejection::plan_prune(root, pending, plan)?)
@@ -664,12 +667,7 @@ pub(in crate::commands) fn finish_selected_controlled(
                 return Ok(SelectedFinish::ReviewRecorded(path));
             }
             Outcome::ReviewDeferred(reason) => return Ok(SelectedFinish::ReviewDeferred(reason)),
-            outcome @ (Outcome::NeedsAction(_) | Outcome::ReviewRefused { .. }) => {
-                let (reason, refusal) = match outcome {
-                    Outcome::ReviewRefused { reason, refusal } => (reason, Some(refusal)),
-                    Outcome::NeedsAction(reason) => (reason, None),
-                    _ => unreachable!("matched above"),
-                };
+            Outcome::NeedsAction(reason) => {
                 prepared.guard_pages(&mut plan);
                 let action = |schema: &str, reason: String| -> miette::Result<Action> {
                     Ok(Action {
@@ -690,13 +688,6 @@ pub(in crate::commands) fn finish_selected_controlled(
                         .into_diagnostic()?,
                 )
                 .into_diagnostic()?;
-                if let Some(refusal) = refusal {
-                    REVIEW_REFUSAL.plan_record_refusal(
-                        root,
-                        &action(REVIEW_REFUSAL.schema, refusal)?,
-                        &mut plan,
-                    )?;
-                }
                 SelectedFinish::NeedsAction(reason)
             }
             Outcome::Complete(result) => {

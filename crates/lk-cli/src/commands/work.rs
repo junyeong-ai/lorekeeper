@@ -2181,7 +2181,6 @@ fn current_result_finalization(
                     prepared.roster.as_ref(),
                     &work.plan.subject_revision,
                     completed,
-                    prepared.review_refusal(&work.plan.subject_revision),
                 )?,
                 state::CompletionKind::Frontier => native::frontier_request(
                     config,
@@ -2190,7 +2189,6 @@ fn current_result_finalization(
                     &generation::Owners::build(config, prepared)?,
                     prepared.roster.as_ref(),
                     completed,
-                    prepared.review_refusal(&work.plan.subject_revision),
                 )?,
             }
         }
@@ -3349,7 +3347,6 @@ fn frontier_result(
         &generation::Owners::build(config, prepared)?,
         prepared.roster.as_ref(),
         &completed,
-        prepared.review_refusal(&work.plan.subject_revision),
     ) {
         Ok(request) => request,
         Err(error) => {
@@ -3402,14 +3399,6 @@ fn native_finalization_hold(
     let action = work.load_finalization_action_for(root, request, &completed["result_revision"])?;
     let recovery = discovery::recovery::blocked(root, task, request)?;
     if let Some(reason) = generation::rejection::held(root, task, &work.plan.subject_revision)? {
-        return Ok(Some(FinalizationHold::GenerationRejection(reason)));
-    }
-    if let Some(reason) = action::REVIEW_REFUSAL.exhausted(
-        root,
-        &task.task_id,
-        &task.cache_hash,
-        &work.plan.subject_revision,
-    )? {
         return Ok(Some(FinalizationHold::GenerationRejection(reason)));
     }
     Ok(recovery
@@ -3676,7 +3665,6 @@ fn prepare_finalization_from_capture(
             prepared.roster.as_ref(),
             &work.plan.subject_revision,
             &completed,
-            prepared.review_refusal(&work.plan.subject_revision),
         ) {
             Ok(request) => request,
             Err(error) if error.downcast_ref::<generation::ResultCapacity>().is_some() => {
@@ -3916,13 +3904,7 @@ pub(super) fn finish_result(
             let path = review::record(session, &task, &prepared, review, plan)?;
             Ok(ResultFinish::ReviewRecorded(path))
         }
-        outcome @ (generation::Outcome::NeedsAction(_)
-        | generation::Outcome::ReviewRefused { .. }) => {
-            let (reason, refusal) = match outcome {
-                generation::Outcome::ReviewRefused { reason, refusal } => (reason, Some(refusal)),
-                generation::Outcome::NeedsAction(reason) => (reason, None),
-                _ => unreachable!("matched above"),
-            };
+        generation::Outcome::NeedsAction(reason) => {
             let mut plan = work.plan_finalization_action_for(
                 root,
                 &prepared.resources,
@@ -3932,29 +3914,6 @@ pub(super) fn finish_result(
                 result.kind,
             )?;
             prepared.guard_pages(&mut plan);
-            if let (
-                Some(refusal),
-                Subject::Queue {
-                    task_id,
-                    cache_hash,
-                    ..
-                },
-            ) = (refusal, &prepared.subject)
-            {
-                action::REVIEW_REFUSAL.plan_record_refusal(
-                    root,
-                    &action::Action {
-                        schema: action::REVIEW_REFUSAL.schema.into(),
-                        task_id: task_id.clone(),
-                        cache_hash: cache_hash.clone(),
-                        context_revision: work.plan.subject_revision.clone(),
-                        request_revision: action::digest(&result.request)?,
-                        reason: refusal,
-                        exhausted: false,
-                    },
-                    &mut plan,
-                )?;
-            }
             session.apply(plan).into_diagnostic()?;
             Ok(ResultFinish::NeedsAction(reason))
         }
@@ -7157,7 +7116,6 @@ mod tests {
             None,
             &work.plan.subject_revision,
             &completed,
-            None,
         )
         .unwrap();
         validate_native_finalization(&root, &config, &work, &prepared, &request).unwrap();

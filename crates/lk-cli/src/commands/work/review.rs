@@ -3,17 +3,23 @@
 //! material evidence gap: it proposes one durable review, and Rust publishes it as an open review
 //! of that concept through the guarded curation plan. Models never write the vault themselves.
 //!
-//! One open review of a kind per concept carries that kind of question: while an open
-//! `conflict` or `evidence-gap` review names the concept, by any author and whether or not this
-//! Work read it, a proposal of the same kind is refused, naming that review, and the finalizer
-//! references it and states any distinct question in the synthesis until it is resolved. A new
-//! review would make the concept owed a resynthesis, so a rephrased question could otherwise
-//! open review after review. A proposal repeating a scoped review exactly (kind, title,
-//! judgment and evidence) is that review: it publishes nothing and holds the task while its
-//! inputs stay current. Either refusal goes through the review refusal's one reconsideration.
-//! The run bounds the rest: a target publishes at most one review per run, and a further
-//! proposal of another kind waits unrecorded for a later run, whose request then scopes the
-//! reviews published. The same-kind refusal comes first, so that bound never postpones it.
+//! Only the causal loop is blocked. A synthesis finalizer that publishes a review makes its
+//! concept owed a resynthesis; that resynthesis, with no other changed input (the citations
+//! and the other open reviews naming the concept are as they were when the review was
+//! proposed), may not propose another review of that kind, or a rephrased question would open
+//! review after review. Any other synthesis may propose a review of a kind already open for its
+//! concept when the proposal declares, for each such open review, how its question differs
+//! (`distinct_from`); Rust checks that the list is complete. A proposal repeating a scoped
+//! review exactly (kind, title, judgment and evidence) is that review and publishes nothing.
+//!
+//! A refused proposal never holds the synthesis: every needs-review reply carries the complete
+//! synthesis the finalizer would publish without the review, whose references name only
+//! existing reviews, and Rust publishes it and drops only the proposal. A review a synthesis
+//! publishes records the citation digest and the digest of the other open reviews it was
+//! judged against (`judged_citation_digest`, `judged_review_digest`), with its concept as its
+//! subject: that is how a later synthesis recognizes the loop. The run bounds the rest: a
+//! target publishes at most one review per run, and a further admissible proposal waits
+//! unrecorded for a later run, whose request then scopes the reviews published.
 
 use std::path::{Path, PathBuf};
 
@@ -35,6 +41,18 @@ pub(in crate::commands) struct ReviewProposal {
     pub title: String,
     pub body: String,
     pub evidence: Vec<usize>,
+    /// For each open review of this kind naming the concept, how this question differs.
+    pub distinct_from: Vec<Distinction>,
+    /// The complete synthesis published instead if Rust refuses the proposal.
+    pub synthesis: Value,
+}
+
+/// How a proposed review's question differs from one open review of the same kind.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::commands) struct Distinction {
+    pub review: String,
+    pub difference: String,
 }
 
 const MAX_TITLE_CHARACTERS: usize = 200;
@@ -142,11 +160,14 @@ pub(in crate::commands) fn admit(
             "the proposal repeats the scoped review {recorded}; complete the synthesis with that review in scope"
         )));
     }
-    if let Some(refusal) = same_kind_refusal(root, config, task, proposal.kind)? {
+    if let Some(refusal) = same_kind_refusal(root, config, task, &proposal)? {
         return Ok(Err(refusal));
     }
+    let judged_review_digest =
+        review_digest(open_naming(root, config, &task.target.vault_path)?.iter());
     let metadata = json!({"status":"open","kind":proposal.kind,"subjects":[task.target.vault_path],
-        "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash});
+        "evidence":citations,"resolution":null,"judged_citation_digest":task.cache_hash,
+        "judged_review_digest":judged_review_digest});
     let content = format!(
         "---\ntype: exploration\ntitle: {}\nreview: {metadata}\n---\n{}\n",
         serde_json::to_string(title).into_diagnostic()?,
@@ -174,27 +195,74 @@ pub(in crate::commands) fn admit(
     }
 }
 
-/// The refusal of a proposal of `kind` while an open review of that kind names the task's
-/// concept. It holds whatever else the run allows, so a target that already published a
-/// review this run still receives the refusal's reconsideration.
+/// The refusal of `proposal` under the review rule, if it breaks it: it is the causal loop (an
+/// open review of its kind that a synthesis of this concept proposed against the same
+/// citations and the same other open reviews), or it leaves an open review of its kind
+/// without a declared difference.
 pub(in crate::commands) fn same_kind_refusal(
     root: &Path,
     config: &lk_core::config::Config,
     task: &QueueTask,
-    kind: lk_vault::ReviewKind,
+    proposal: &ReviewProposal,
 ) -> miette::Result<Option<String>> {
-    let open = open_of_kind(root, config, &task.target.vault_path, kind)?;
-    if open.is_empty() {
-        return Ok(None);
+    let open = open_naming(root, config, &task.target.vault_path)?;
+    let kind = serde_json::to_value(proposal.kind)
+        .into_diagnostic()?
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    for review in open
+        .iter()
+        .filter(|review| review.kind == Some(proposal.kind))
+    {
+        let proposed_here = review.judged_citation_digest.as_deref()
+            == Some(task.cache_hash.as_str())
+            && review.judged_review_digest.as_deref().is_none_or(|digest| {
+                digest == review_digest(open.iter().filter(|other| other.path != review.path))
+            });
+        if proposed_here {
+            return Ok(Some(format!(
+                "this synthesis is owed because of the open {kind} review {} a synthesis of this concept proposed, and nothing else changed since; reference it in the synthesis instead of proposing another {kind} review",
+                review.path
+            )));
+        }
     }
-    Ok(Some(format!(
-        "the open {} review {} already carries this concept's question of that kind; reference it in the synthesis and state any distinct question there until that review is resolved",
-        serde_json::to_value(kind)
-            .into_diagnostic()?
-            .as_str()
-            .unwrap_or_default(),
-        open.join(", ")
-    )))
+    let undeclared = open
+        .iter()
+        .filter(|review| review.kind == Some(proposal.kind))
+        .filter(|review| {
+            !proposal.distinct_from.iter().any(|distinction| {
+                distinction.review == review.path && !distinction.difference.trim().is_empty()
+            })
+        })
+        .map(|review| review.path.as_str())
+        .collect::<Vec<_>>();
+    if !undeclared.is_empty() {
+        return Ok(Some(format!(
+            "the proposal does not declare how its question differs from the open {kind} review(s) {}",
+            undeclared.join(", ")
+        )));
+    }
+    Ok(None)
+}
+
+/// One open review naming a concept, as the review rule compares it.
+struct NamingReview {
+    path: String,
+    revision: String,
+    kind: Option<lk_vault::ReviewKind>,
+    judged_citation_digest: Option<String>,
+    judged_review_digest: Option<String>,
+}
+
+/// The digest of a set of open reviews by address and file revision.
+fn review_digest<'a>(reviews: impl Iterator<Item = &'a NamingReview>) -> String {
+    let mut entries = reviews
+        .map(|review| (review.path.as_str(), review.revision.as_str()))
+        .collect::<Vec<_>>();
+    entries.sort_unstable();
+    let bytes = serde_json::to_vec(&entries).expect("review entries serialize");
+    blake3::hash(&bytes).to_hex()[..32].to_string()
 }
 
 /// The scoped review of `concept` this Work read that records the same question: the same
@@ -266,14 +334,13 @@ fn recorded(
     Ok(None)
 }
 
-/// The open reviews of `kind` that name `concept` under its verified owner, among every review
-/// in the vault: the shared inventory, not only the reviews this Work read.
-fn open_of_kind(
+/// The open reviews that name `concept` under its verified owner, among every review in the
+/// vault: the shared inventory, not only the reviews this Work read.
+fn open_naming(
     root: &Path,
     config: &lk_core::config::Config,
     concept: &str,
-    kind: lk_vault::ReviewKind,
-) -> miette::Result<Vec<String>> {
+) -> miette::Result<Vec<NamingReview>> {
     let owner = |address: &str| lk_vault::resolve_page_owner(root, Path::new(address)).ok();
     let Some(concept_owner) = owner(concept) else {
         return Ok(Vec::new());
@@ -291,17 +358,27 @@ fn open_of_kind(
         })
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    Ok(naming
-        .into_iter()
-        .filter(|path| {
-            inventory
-                .load_report(path)
-                .and_then(|report| report.review)
-                .is_some_and(|review| {
-                    review.status == lk_vault::ReviewStatus::Open && review.kind == Some(kind)
-                })
-        })
-        .collect())
+    let mut open = Vec::new();
+    for path in naming {
+        let Some(review) = inventory
+            .load_report(&path)
+            .and_then(|report| report.review)
+            .filter(|review| review.status == lk_vault::ReviewStatus::Open)
+        else {
+            continue;
+        };
+        let text =
+            std::fs::read_to_string(lk_vault::page_path(root, Path::new(&path)).into_diagnostic()?)
+                .into_diagnostic()?;
+        open.push(NamingReview {
+            revision: lk_core::concept::file_revision(&text),
+            path,
+            kind: review.kind,
+            judged_citation_digest: review.judged_citation_digest,
+            judged_review_digest: review.judged_review_digest,
+        });
+    }
+    Ok(open)
 }
 
 /// A review judgment as compared for an exact repeat: without the blank lines framing it,

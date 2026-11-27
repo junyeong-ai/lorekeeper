@@ -36,8 +36,9 @@ pub(super) const GENERATION: Store = Store {
     schema: "native-result-action-v1",
     directory: ".lorekeeper/queue/result-actions",
 };
-/// The first refusal of a synthesis task's review proposal for one context: its `reason` is
-/// Rust's refusal, which the next request for that context carries once (`review_refusal`).
+/// Review proposal refusals of a reconsideration that has been replaced: a refused proposal
+/// now publishes its synthesis instead. Records written before hold nothing and are pruned with
+/// their tasks.
 pub(super) const REVIEW_REFUSAL: Store = Store {
     schema: "review-refusal-v1",
     directory: ".lorekeeper/queue/review-refusals",
@@ -95,51 +96,6 @@ impl Store {
             ));
         }
         Ok(action)
-    }
-
-    /// Record a refusal: the first under a context stands, so what it gives the next request
-    /// cannot change, and a refusal arriving with it already recorded marks it exhausted.
-    pub fn plan_record_refusal(
-        &self,
-        root: &Path,
-        action: &Action,
-        plan: &mut lk_vault::MutationPlan,
-    ) -> miette::Result<()> {
-        let before = self.read(root, &action.task_id, &action.cache_hash)?;
-        let after = match &before {
-            Some((_, stored)) if stored.context_revision == action.context_revision => Action {
-                exhausted: true,
-                ..stored.clone()
-            },
-            _ => action.clone(),
-        };
-        plan.publish_expected(
-            root,
-            self.path(&action.task_id, &action.cache_hash),
-            before.map(|(raw, _)| raw),
-            serde_json::to_string(&after).into_diagnostic()?,
-        )
-        .into_diagnostic()
-    }
-
-    /// The refusal holding this task under `context_revision` after its one reconsideration.
-    pub fn exhausted(
-        &self,
-        root: &Path,
-        task_id: &str,
-        cache_hash: &str,
-        context_revision: &str,
-    ) -> miette::Result<Option<String>> {
-        Ok(self
-            .read(root, task_id, cache_hash)?
-            .map(|(_, stored)| stored)
-            .filter(|stored| stored.exhausted && stored.context_revision == context_revision)
-            .map(|stored| {
-                format!(
-                    "the review proposal was refused again after its reconsideration: {}",
-                    stored.reason
-                )
-            }))
     }
 
     pub fn plan_prune(
