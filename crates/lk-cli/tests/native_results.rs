@@ -804,12 +804,18 @@ impl Fixture {
             let node = node.as_str().unwrap();
             let request = self.json(&["work", "read", id, node]);
             assert_eq!(request["kind"], "inspect");
-            let questions = if source_questions {
-                vec![
-                    json!({"id":format!("{node}:source:0"),"question":"Was the unrelated captured deployment completed?","evidence":[request["input"]["ranges"][0]["range"]]}),
-                ]
-            } else {
-                Vec::new()
+            // A question cites the part's first non-context range, so a context page an
+            // inspection read stays uncited.
+            let cited = request["input"]["ranges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|range| range["authority"] != "context");
+            let questions = match cited {
+                Some(range) if source_questions => vec![
+                    json!({"id":format!("{node}:source:0"),"question":"Was the unrelated captured deployment completed?","evidence":[range["range"]]}),
+                ],
+                _ => Vec::new(),
             };
             let observation = json!({"work_id":id,"node_id":node,"input_revision":request["input_revision"],
                 "summary":"Exact retained evidence.","findings":[],"source_questions":questions,"unresolved":[],"resolutions":[]});

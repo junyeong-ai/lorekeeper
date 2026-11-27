@@ -435,17 +435,17 @@ mod tests {
 
     #[test]
     fn text_rejections_bind_fresh_requests_and_keep_append_only_history_and_paid_bytes() {
-        for policy in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
-            check_text_rejection_history(policy);
+        for partition in [Partition::Bytes, Partition::Inspection] {
+            check_text_rejection_history(partition);
         }
     }
 
-    fn check_text_rejection_history(policy: Option<std::num::NonZeroUsize>) {
+    fn check_text_rejection_history(partition: Partition) {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
         let work =
-            Work::build_with_inspection(&source, "subject", context("subject"), limits(), policy)
+            Work::build_partitioned(&source, "subject", context("subject"), limits(), partition)
                 .unwrap()
                 .persist(&session, lk_vault::MutationPlan::default())
                 .unwrap();
@@ -551,7 +551,7 @@ mod tests {
         let changed_hold = work
             .load_inspection_hold(root.path(), request, &changed)
             .unwrap();
-        if policy.is_none() {
+        if partition == Partition::Bytes {
             assert!(changed_hold.unwrap().contains("Explicit old action."));
         } else {
             assert!(changed_hold.is_none());

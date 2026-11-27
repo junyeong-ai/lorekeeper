@@ -778,7 +778,7 @@ mod tests {
             let context = json!({"subject":{"kind":"audit","path":"wiki/documents/source.md",
                 "file_revision":"a".repeat(64),"input_revision":"b".repeat(64)},
                 "purpose":{"kind":"audit","locale":"en"},"output_contract":"audit"});
-            let work = Work::build_with_inspection(
+            let work = Work::build_partitioned(
                 &resources,
                 "native-subject",
                 context,
@@ -786,7 +786,7 @@ mod tests {
                     max_input_bytes: 16000,
                     max_result_bytes: 1200,
                 },
-                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+                Partition::Inspection,
             )
             .unwrap()
             .persist(&session, lk_vault::MutationPlan::default())
@@ -1597,7 +1597,7 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
             let (legacy, resources) = fixture(&session);
-            let work = Work::build_with_inspection(
+            let work = Work::build_partitioned(
                 &resources,
                 "native-journal",
                 legacy.context.clone(),
@@ -1605,7 +1605,7 @@ mod tests {
                     max_input_bytes: legacy.max_input_bytes,
                     max_result_bytes: legacy.plan.max_result_bytes,
                 },
-                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+                Partition::Inspection,
             )
             .unwrap()
             .persist(&session, lk_vault::MutationPlan::default())

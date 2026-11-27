@@ -871,6 +871,29 @@ fn validate_output_questions(output: &WorkOutput, children: &[&WorkOutput]) -> m
     Ok(())
 }
 
+/// How a Work's plan partitions its resources into parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Partition {
+    /// Byte-bounded parts (`lk_core::semantic::SEMANTIC_POLICY`).
+    Bytes,
+    /// Page-aligned inspection parts (`lk_core::semantic::INSPECTION_POLICY`).
+    Inspection,
+    /// Byte-filled inspection parts (`lk_core::semantic::LEGACY_INSPECTION_POLICY`), which a
+    /// Work planned before page alignment keeps.
+    LegacyInspection,
+}
+
+impl Partition {
+    fn max_part_characters(self) -> Option<std::num::NonZeroUsize> {
+        match self {
+            Self::Bytes => None,
+            Self::Inspection | Self::LegacyInspection => {
+                Some(lk_core::semantic::INSPECTION_CHARACTERS)
+            }
+        }
+    }
+}
+
 impl Work {
     #[cfg(test)]
     pub fn build(
@@ -879,35 +902,49 @@ impl Work {
         context: Value,
         limits: WorkLimits,
     ) -> miette::Result<Self> {
-        Self::build_with_inspection(resources, subject_revision, context, limits, None)
+        Self::build_partitioned(
+            resources,
+            subject_revision,
+            context,
+            limits,
+            Partition::Bytes,
+        )
     }
 
-    pub fn build_with_inspection(
+    pub fn build_partitioned(
         resources: &[SemanticResource],
         subject_revision: &str,
         context: Value,
         limits: WorkLimits,
-        max_part_characters: Option<std::num::NonZeroUsize>,
+        partition: Partition,
     ) -> miette::Result<Self> {
-        let overhead = context_overhead(&context, max_part_characters)?;
+        let overhead = context_overhead(&context, partition.max_part_characters())?;
         let inner_limit = limits
             .max_input_bytes
             .checked_sub(overhead)
             .filter(|limit| *limit > 0)
             .ok_or_else(|| planning_capacity(overhead, 1, limits.max_input_bytes))?;
-        let plan = match max_part_characters {
-            Some(characters) => SemanticPlan::build_inspection(
+        let characters = lk_core::semantic::INSPECTION_CHARACTERS;
+        let plan = match partition {
+            Partition::Bytes => SemanticPlan::build(
+                subject_revision,
+                resources,
+                inner_limit,
+                limits.max_result_bytes,
+            ),
+            Partition::Inspection => SemanticPlan::build_inspection(
                 subject_revision,
                 resources,
                 inner_limit,
                 limits.max_result_bytes,
                 characters,
             ),
-            None => SemanticPlan::build(
+            Partition::LegacyInspection => SemanticPlan::build_legacy_inspection(
                 subject_revision,
                 resources,
                 inner_limit,
                 limits.max_result_bytes,
+                characters,
             ),
         }
         .map_err(|error| match error {

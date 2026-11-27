@@ -313,7 +313,7 @@ fn expected(
 
 /// The Work one reading of a preparation plans.
 enum Planned {
-    /// Stored under either partition policy.
+    /// Stored under any partition policy.
     Stored(Work),
     /// Not stored; the current partition policy plans it.
     New(Work),
@@ -325,37 +325,38 @@ fn planned(
     config: &lk_core::config::Config,
     config_revision: &str,
 ) -> miette::Result<Planned> {
-    let byte_only = expected_with_inspection(root, prepared, config, config_revision, None)?;
+    let expected =
+        |partition| expected_partitioned(root, prepared, config, config_revision, partition);
+    let byte_only = expected(state::Partition::Bytes)?;
     if byte_only.is_planned(root)? {
         return Ok(Planned::Stored(byte_only));
     }
-    let current = expected_with_inspection(
-        root,
-        prepared,
-        config,
-        config_revision,
-        Some(lk_core::semantic::INSPECTION_CHARACTERS),
-    )?;
-    Ok(if current.is_planned(root)? {
-        Planned::Stored(current)
+    let current = expected(state::Partition::Inspection)?;
+    if current.is_planned(root)? {
+        return Ok(Planned::Stored(current));
+    }
+    // Work planned before page alignment continues under its byte-filled parts.
+    let byte_filled = expected(state::Partition::LegacyInspection)?;
+    Ok(if byte_filled.is_planned(root)? {
+        Planned::Stored(byte_filled)
     } else {
         Planned::New(current)
     })
 }
 
-fn expected_with_inspection(
+fn expected_partitioned(
     root: &Path,
     prepared: &Prepared,
     config: &lk_core::config::Config,
     config_revision: &str,
-    max_part_characters: Option<std::num::NonZeroUsize>,
+    partition: state::Partition,
 ) -> miette::Result<Work> {
-    let current = Work::build_with_inspection(
+    let current = Work::build_partitioned(
         &prepared.resources,
         &prepared.revision(config_revision)?,
         prepared.context.clone(),
         limits(config)?,
-        max_part_characters,
+        partition,
     )?
     .with_saved_policy(root)?;
     if current.is_planned(root)? {
@@ -386,12 +387,12 @@ fn expected_with_inspection(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(current),
         Err(error) => return Err(error).into_diagnostic(),
     }
-    let legacy = Work::build_with_inspection(
+    let legacy = Work::build_partitioned(
         &prepared.resources,
         &legacy_revision,
         prepared.context.clone(),
         limits(config)?,
-        max_part_characters,
+        partition,
     )?
     .with_saved_policy(root)?;
     if legacy.is_planned(root)? {
@@ -5473,13 +5474,13 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn native_inspection_admission_checks_only_the_next_exact_request() {
-        for policy in [None, Some(lk_core::semantic::INSPECTION_CHARACTERS)] {
-            check_native_inspection_admission(policy);
+        for partition in [state::Partition::Bytes, state::Partition::Inspection] {
+            check_native_inspection_admission(partition);
         }
     }
 
     #[cfg(unix)]
-    fn check_native_inspection_admission(policy: Option<std::num::NonZeroUsize>) {
+    fn check_native_inspection_admission(partition: state::Partition) {
         for (index, current_contract) in [(0, true), (1, true), (0, false), (1, false)] {
             let root = tempfile::tempdir().unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
@@ -5490,7 +5491,7 @@ mod tests {
                 authority: lk_core::semantic::SemanticAuthority::Page,
                 text,
             }];
-            let work = Work::build_with_inspection(
+            let work = Work::build_partitioned(
                 &resources,
                 "subject",
                 json!({"purpose":{"kind":"synthesis","locale":"en"}}),
@@ -5498,7 +5499,7 @@ mod tests {
                     max_input_bytes: 8192,
                     max_result_bytes: 2048,
                 },
-                policy,
+                partition,
             )
             .unwrap()
             .persist(&session, lk_vault::MutationPlan::default())
@@ -5532,7 +5533,7 @@ mod tests {
                 inspection_admission(root.path(), &work, &resources)
                     .unwrap()
                     .is_some(),
-                index == 0 && (current_contract || policy.is_none())
+                index == 0 && (current_contract || partition == state::Partition::Bytes)
             );
             if index == 1 {
                 work.record(
@@ -5554,7 +5555,7 @@ mod tests {
                     inspection_admission(root.path(), &work, &resources)
                         .unwrap()
                         .is_some(),
-                    current_contract || policy.is_none()
+                    current_contract || partition == state::Partition::Bytes
                 );
                 assert_eq!(work.progress(root.path(), &resources).unwrap().completed, 1);
             }
@@ -5959,6 +5960,37 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn work_planned_before_page_alignment_continues_under_its_byte_filled_parts() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = context_audit_fixture(&root);
+        let mut prepared = resources::audit(&root, &config, CONTEXT_SUBJECT).unwrap();
+        let current = expected(&root, &mut prepared, &config, &revision).unwrap();
+        assert_eq!(current.plan.policy, lk_core::semantic::INSPECTION_POLICY);
+        let session = MutationSession::acquire(&root).unwrap();
+        let byte_filled = Work::build_partitioned(
+            &prepared.resources,
+            &prepared.revision(&revision).unwrap(),
+            prepared.context.clone(),
+            limits(&config).unwrap(),
+            state::Partition::LegacyInspection,
+        )
+        .unwrap()
+        .persist(&session, lk_vault::MutationPlan::default())
+        .unwrap();
+        drop(session);
+        assert_eq!(
+            byte_filled.plan.policy,
+            lk_core::semantic::LEGACY_INSPECTION_POLICY
+        );
+        assert_eq!(
+            expected(&root, &mut prepared, &config, &revision).unwrap(),
+            byte_filled
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_whole_audit_capture_changes_once_a_stored_work_continues_its_subject() {
         // A semantic Work keeps the revision and is told apart by the stored Work; a revived
         // exact-bytes Work also changes the reading.
@@ -6034,7 +6066,7 @@ mod tests {
         let current = resources::audit(&root, &config, subject).unwrap();
         let exact = current.read_as(resources::ContextReading::Exact).unwrap();
         let plans = |prepared: &Prepared, max_input_bytes| {
-            Work::build_with_inspection(
+            Work::build_partitioned(
                 &prepared.resources,
                 &prepared.revision("configuration").unwrap(),
                 prepared.context.clone(),
@@ -6042,7 +6074,7 @@ mod tests {
                     max_input_bytes,
                     max_result_bytes: 1024,
                 },
-                Some(lk_core::semantic::INSPECTION_CHARACTERS),
+                state::Partition::Inspection,
             )
             .is_ok()
         };

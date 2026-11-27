@@ -8,9 +8,15 @@ use pulldown_cmark::{Event, Options};
 use serde::{Deserialize, Serialize};
 
 pub const SEMANTIC_POLICY: &str = "semantic-ranges-v1";
-pub const INSPECTION_POLICY: &str = "semantic-ranges-v2";
+/// Inspection parts align to whole pages (`semantic-ranges-v3`).
+pub const INSPECTION_POLICY: &str = "semantic-ranges-v3";
+/// Byte-filled inspection parts, which Work planned before page alignment still reads.
+pub const LEGACY_INSPECTION_POLICY: &str = "semantic-ranges-v2";
 /// Native reading work per request, independent of byte admissibility or model fidelity.
 pub const INSPECTION_CHARACTERS: NonZeroUsize = NonZeroUsize::new(80_000).unwrap();
+/// Average page-aligned group, in parts: larger groups pack parts fuller and let an edit move
+/// more of them.
+const GROUP_PARTS: usize = 2;
 const DIGEST_WIDTH: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -509,6 +515,88 @@ fn guards(resources: &[SemanticResource]) -> Result<Vec<SemanticResourceGuard>> 
         .collect()
 }
 
+/// Places `units` of `resource` into parts in order: whole units while they fit beside the active
+/// ranges, a unit too large for any part split at the largest prefixes that fit.
+fn place_units(
+    context: &InputContext<'_>,
+    parts: &mut Vec<SemanticPart>,
+    active: &mut Vec<SemanticRange>,
+    resource: usize,
+    units: Vec<(usize, usize)>,
+) -> Result<()> {
+    for (mut start, end) in units {
+        let range = SemanticRange {
+            resource,
+            start,
+            end,
+        };
+        let candidate = appended(active, range.clone());
+        if context.fits(&candidate)? {
+            *active = candidate;
+            continue;
+        }
+        flush(parts, active);
+        if context.fits(std::slice::from_ref(&range))? {
+            active.push(range);
+            continue;
+        }
+        while start < end {
+            let mut low = start;
+            let mut high = end;
+            while low < high {
+                let middle = low + (high - low).div_ceil(2);
+                let range = SemanticRange {
+                    resource,
+                    start,
+                    end: middle,
+                };
+                if context.fits(std::slice::from_ref(&range))? {
+                    low = middle;
+                } else {
+                    high = middle - 1;
+                }
+            }
+            if low == start {
+                return Err(SemanticError::InputCapacity {
+                    required_bytes: context.input_bytes(&[SemanticRange {
+                        resource,
+                        start,
+                        end: start + 1,
+                    }])?,
+                    max_bytes: context.max_input_bytes,
+                });
+            }
+            active.push(SemanticRange {
+                resource,
+                start,
+                end: low,
+            });
+            start = low;
+            if start < end {
+                flush(parts, active);
+            }
+        }
+        if end == 0 {
+            return Err(SemanticError::InputCapacity {
+                required_bytes: context.input_bytes(&[range])?,
+                max_bytes: context.max_input_bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether a page-aligned group closes after this page, read from the page alone as in
+/// content-defined chunking: its address digest selects it with probability
+/// `characters / group_characters`, so groups average `group_characters` whatever the page sizes.
+/// A page whose content changes keeps its digest; only its own size can move its choice.
+fn closes_group(guard: &SemanticResourceGuard, group_characters: usize) -> bool {
+    let digest = blake3::hash(guard.address.as_bytes());
+    let mut selector = [0; 8];
+    selector.copy_from_slice(&digest.as_bytes()[..8]);
+    u64::from_le_bytes(selector) % (group_characters as u64) < (guard.characters as u64)
+}
+
 fn appended(ranges: &[SemanticRange], next: SemanticRange) -> Vec<SemanticRange> {
     let mut ranges = ranges.to_vec();
     if let Some(last) = ranges.last_mut()
@@ -539,6 +627,7 @@ impl SemanticPlan {
         max_result_bytes: usize,
     ) -> Result<Self> {
         Self::build_partitioned(
+            SEMANTIC_POLICY,
             subject_revision,
             resources,
             max_input_bytes,
@@ -547,6 +636,7 @@ impl SemanticPlan {
         )
     }
 
+    /// Inspection parts under `INSPECTION_POLICY`, aligned to whole pages.
     pub fn build_inspection(
         subject_revision: &str,
         resources: &[SemanticResource],
@@ -555,6 +645,26 @@ impl SemanticPlan {
         max_part_characters: NonZeroUsize,
     ) -> Result<Self> {
         Self::build_partitioned(
+            INSPECTION_POLICY,
+            subject_revision,
+            resources,
+            max_input_bytes,
+            max_result_bytes,
+            Some(max_part_characters),
+        )
+    }
+
+    /// Inspection parts under `LEGACY_INSPECTION_POLICY`, byte-filled across pages: the plan
+    /// of a Work stored before page alignment, rebuilt so it continues as planned.
+    pub fn build_legacy_inspection(
+        subject_revision: &str,
+        resources: &[SemanticResource],
+        max_input_bytes: usize,
+        max_result_bytes: usize,
+        max_part_characters: NonZeroUsize,
+    ) -> Result<Self> {
+        Self::build_partitioned(
+            LEGACY_INSPECTION_POLICY,
             subject_revision,
             resources,
             max_input_bytes,
@@ -564,6 +674,7 @@ impl SemanticPlan {
     }
 
     fn build_partitioned(
+        policy: &'static str,
         subject_revision: &str,
         resources: &[SemanticResource],
         max_input_bytes: usize,
@@ -575,11 +686,6 @@ impl SemanticPlan {
                 "subject revision and positive input/result bounds are required",
             ));
         }
-        let policy = if max_part_characters.is_some() {
-            INSPECTION_POLICY
-        } else {
-            SEMANTIC_POLICY
-        };
         let resource_guards = guards(resources)?;
         let texts = resources
             .iter()
@@ -607,64 +713,34 @@ impl SemanticPlan {
                     .map(|pair| (pair[0], pair[1]))
                     .collect()
             };
-            for (mut start, end) in units {
-                let range = SemanticRange {
-                    resource,
-                    start,
-                    end,
-                };
-                let candidate = appended(&active, range.clone());
-                if context.fits(&candidate)? {
-                    active = candidate;
-                    continue;
-                }
+            let Some(limit) = max_part_characters.filter(|_| policy == INSPECTION_POLICY) else {
+                place_units(&context, &mut parts, &mut active, resource, units)?;
+                continue;
+            };
+            // Page-aligned: a page is placed whole beside its neighbors in its group, or alone
+            // across parts of its own when it fits no part whole. Groups are filled
+            // independently, so a page that changes moves the parts of its own group and, when
+            // its size changes whether it closes that group, of the next one; the parts of every
+            // other group keep their identity.
+            let whole = SemanticRange {
+                resource,
+                start: 0,
+                end: units.last().map_or(0, |unit| unit.1),
+            };
+            let candidate = appended(&active, whole.clone());
+            if context.fits(&candidate)? {
+                active = candidate;
+            } else if context.fits(std::slice::from_ref(&whole))? {
                 flush(&mut parts, &mut active);
-                if context.fits(std::slice::from_ref(&range))? {
-                    active.push(range);
-                    continue;
-                }
-                while start < end {
-                    let mut low = start;
-                    let mut high = end;
-                    while low < high {
-                        let middle = low + (high - low).div_ceil(2);
-                        let range = SemanticRange {
-                            resource,
-                            start,
-                            end: middle,
-                        };
-                        if context.fits(std::slice::from_ref(&range))? {
-                            low = middle;
-                        } else {
-                            high = middle - 1;
-                        }
-                    }
-                    if low == start {
-                        return Err(SemanticError::InputCapacity {
-                            required_bytes: context.input_bytes(&[SemanticRange {
-                                resource,
-                                start,
-                                end: start + 1,
-                            }])?,
-                            max_bytes: max_input_bytes,
-                        });
-                    }
-                    active.push(SemanticRange {
-                        resource,
-                        start,
-                        end: low,
-                    });
-                    start = low;
-                    if start < end {
-                        flush(&mut parts, &mut active);
-                    }
-                }
-                if end == 0 {
-                    return Err(SemanticError::InputCapacity {
-                        required_bytes: context.input_bytes(&[range])?,
-                        max_bytes: max_input_bytes,
-                    });
-                }
+                active.push(whole);
+            } else {
+                flush(&mut parts, &mut active);
+                place_units(&context, &mut parts, &mut active, resource, units)?;
+                flush(&mut parts, &mut active);
+                continue;
+            }
+            if closes_group(&resource_guards[resource], GROUP_PARTS * limit.get()) {
+                flush(&mut parts, &mut active);
             }
         }
         flush(&mut parts, &mut active);
@@ -740,7 +816,7 @@ impl SemanticPlan {
     fn verify_structure(&self) -> Result<()> {
         if !matches!(
             (self.policy.as_str(), self.max_part_characters),
-            (SEMANTIC_POLICY, None) | (INSPECTION_POLICY, Some(_))
+            (SEMANTIC_POLICY, None) | (INSPECTION_POLICY | LEGACY_INSPECTION_POLICY, Some(_))
         ) || self.subject_revision.trim().is_empty()
             || self.max_input_bytes == 0
             || self.max_result_bytes == 0
@@ -949,6 +1025,104 @@ mod tests {
             SemanticPlan::build("subject", &[resource("source", "x")], 0, 1024),
             Err(SemanticError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn page_aligned_parts_keep_their_identity_outside_a_changed_pages_group() {
+        let paragraph = |index: usize, length: usize| {
+            format!(
+                "Page {index} opens a paragraph. {}\n\n",
+                "word ".repeat(length / 5)
+            )
+        };
+        let pages = |edited: Option<(usize, usize)>| {
+            (0..64)
+                .map(|index| {
+                    let length = 3_000 + (index * 37) % 4_000;
+                    let mut text = paragraph(index, length);
+                    if let Some((page, added)) = edited
+                        && page == index
+                    {
+                        text.push_str(&paragraph(index, added));
+                    }
+                    resource(&format!("wiki/documents/page-{index:02}.md"), &text)
+                })
+                .collect::<Vec<_>>()
+        };
+        let limit = NonZeroUsize::new(40_000).unwrap();
+        let build = |resources: &[SemanticResource]| {
+            SemanticPlan::build_inspection("subject", resources, 262_144, 32_768, limit).unwrap()
+        };
+        let closes = |plan: &SemanticPlan, page: usize| {
+            closes_group(&plan.resources[page], GROUP_PARTS * limit.get())
+        };
+        let original = pages(None);
+        let plan = build(&original);
+        assert_eq!(plan.policy, INSPECTION_POLICY);
+        reconstruct(&plan, &original);
+        for part in &plan.parts {
+            assert!(
+                part.ranges.iter().all(|range| range.start == 0
+                    && range.end == plan.resources[range.resource].characters),
+                "every page fits a part, so every part holds whole pages"
+            );
+        }
+        let unchanged = plan
+            .parts
+            .iter()
+            .map(|part| part.id.clone())
+            .collect::<BTreeSet<_>>();
+        for edited in [0, 20, 63] {
+            for added in [2_500, 10_000, 30_000] {
+                let changed = pages(Some((edited, added)));
+                let aligned = build(&changed);
+                reconstruct(&aligned, &changed);
+                // The edited page's group opens after the last earlier page closing one, and
+                // runs to the first page from the edited one on that closes it in both plans.
+                let opens = (0..edited)
+                    .rev()
+                    .find(|&page| closes(&plan, page))
+                    .map_or(0, |page| page + 1);
+                let ends = (edited..original.len())
+                    .find(|&page| closes(&plan, page) && closes(&aligned, page))
+                    .unwrap_or(original.len());
+                let (outside, within): (Vec<_>, Vec<_>) = aligned.parts.iter().partition(|part| {
+                    part.ranges
+                        .iter()
+                        .all(|range| range.resource < opens || range.resource > ends)
+                });
+                assert!(!outside.is_empty(), "the fixture holds other groups");
+                assert!(
+                    outside.iter().all(|part| unchanged.contains(&part.id)),
+                    "page {edited} +{added} moved a part outside its group"
+                );
+                assert!(within.iter().any(|part| !unchanged.contains(&part.id)));
+            }
+        }
+        // A page no part holds whole is split within itself, and its neighbors stay whole.
+        let mut large = original.clone();
+        large[10] = resource("wiki/documents/page-10.md", &paragraph(10, 120_000));
+        let split = build(&large);
+        reconstruct(&split, &large);
+        for part in &split.parts {
+            if part.ranges.iter().any(|range| range.resource == 10) {
+                assert!(part.ranges.iter().all(|range| range.resource == 10));
+            } else {
+                assert!(part.ranges.iter().all(|range| range.start == 0
+                    && range.end == split.resources[range.resource].characters));
+            }
+        }
+        // Work planned before page alignment rebuilds its byte-filled plan unchanged.
+        let legacy =
+            SemanticPlan::build_legacy_inspection("subject", &original, 262_144, 32_768, limit)
+                .unwrap();
+        legacy.verify_structure().unwrap();
+        reconstruct(&legacy, &original);
+        assert_eq!(legacy.policy, LEGACY_INSPECTION_POLICY);
+        assert_eq!(
+            legacy.id,
+            "660f129bf02354dab0e564fe660dce73c1334f14a17a29928efb11995e024257"
+        );
     }
 
     #[test]

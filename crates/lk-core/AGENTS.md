@@ -119,6 +119,9 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   distinguishable. Parts are execution units, never canonical knowledge nodes.
 - Reuse requires identical assigned evidence and purpose; changed revisions invalidate
   dependent reductions. Never infer read coverage from an exit code or lexical match.
+- A policy name fixes how parts are cut, because stored Work is found by rebuilding its
+  plan identity. Cutting differently needs a new policy, and every builder stored Work can
+  still name stays byte-identical (the v2 byte-filled plan identity is pinned in a test).
 
 ## Durable files (`fs.rs`)
 

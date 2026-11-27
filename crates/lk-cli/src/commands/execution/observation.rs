@@ -75,7 +75,12 @@ fn schema() -> Value {
 
 fn can_refine(request: &Value) -> bool {
     request["kind"] == "inspect"
-        && request["input"]["policy"] == lk_core::semantic::INSPECTION_POLICY
+        && [
+            lk_core::semantic::INSPECTION_POLICY,
+            lk_core::semantic::LEGACY_INSPECTION_POLICY,
+        ]
+        .iter()
+        .any(|policy| request["input"]["policy"] == *policy)
         && request["inspection"]["can_refine"] == true
 }
 
@@ -717,6 +722,9 @@ mod tests {
             contract_revision(&legacy).unwrap(),
             contract_revision(&current).unwrap()
         );
+        let mut byte_filled = current.clone();
+        byte_filled["input"]["policy"] = lk_core::semantic::LEGACY_INSPECTION_POLICY.into();
+        assert_eq!(response_schema(&byte_filled), response_schema(&current));
         for engine in [AgentEngine::Codex, AgentEngine::ClaudeCode] {
             let envelope = if engine == AgentEngine::ClaudeCode {
                 json!({"type":"result","subtype":"success","is_error":false,"structured_output":refusal})

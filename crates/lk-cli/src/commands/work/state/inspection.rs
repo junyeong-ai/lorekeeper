@@ -549,12 +549,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
-        let work = Work::build_with_inspection(
+        let work = Work::build_partitioned(
             &source,
             "subject",
             context("subject"),
             limits(),
-            Some(lk_core::semantic::INSPECTION_CHARACTERS),
+            Partition::Inspection,
         )
         .unwrap()
         .persist(&session, lk_vault::MutationPlan::default())
@@ -610,12 +610,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let source = resources();
-        let work = Work::build_with_inspection(
+        let work = Work::build_partitioned(
             &source,
             "subject",
             context("subject"),
             limits(),
-            Some(lk_core::semantic::INSPECTION_CHARACTERS),
+            Partition::Inspection,
         )
         .unwrap()
         .persist(&session, lk_vault::MutationPlan::default())

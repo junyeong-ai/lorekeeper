@@ -9,9 +9,9 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
             count=sum(len(item['text']) for item in request['input']['ranges'])
             if (root/'refinement-ready').exists():
                 saved=json.loads((root/'vault/.lorekeeper/work'/work_id/'inspection-refinements.json').read_text())
-                refined={part['id'] for entry in saved['entries'].values() for part in entry['parts']}
-                if node_id in refined:
-                    assert count<=20000, 'native refinement must honor the operator bound'
+                bounds={part['id']:entry['max_part_characters'] for entry in saved['entries'].values() for part in entry['parts']}
+                if node_id in bounds:
+                    assert count<=bounds[node_id], 'native refinement must honor the operator bound'
             else:
                 try:
                     with (root/'initial-observation').open('x') as flag: flag.write(node_id)
@@ -87,13 +87,23 @@ fn explicit_queue_refinement_resumes_serial_and_parallel_hosts_with_independent_
             assert_eq!(repeated["semantic_calls"], 0, "{repeated}");
             assert_eq!(bounded_calls(&fixture).len(), calls);
             for node in actions["actions"].as_object().unwrap().keys() {
+                // Half of what the held inspection read: a strictly smaller bound.
+                let characters = held["work_steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|step| step["node_id"] == node.as_str())
+                    .unwrap()["workload"]["characters"]
+                    .as_u64()
+                    .unwrap();
+                let bound = (characters / 2).to_string();
                 let args = [
                     "work",
                     "refine",
                     work_id,
                     node.as_str(),
                     "--max-part-characters",
-                    "20000",
+                    bound.as_str(),
                 ];
                 let mut preview = args.to_vec();
                 preview.push("--dry-run");
