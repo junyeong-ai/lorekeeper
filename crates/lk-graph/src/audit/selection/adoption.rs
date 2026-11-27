@@ -42,7 +42,12 @@ pub fn adopt(
 ) -> Result<Adoption, GraphError> {
     let (mutation, adoption) = build_adoption(session.root(), dirs, pages, request, guard, read)?;
     if mutation.has_changes() {
-        session.apply(mutation).map_err(error)?;
+        // A guarded byte that changed after the adoption was derived refuses at preflight,
+        // before anything is journaled: the subject's inputs changed like any planning drift.
+        session.apply(mutation).map_err(|failure| match failure {
+            lk_vault::VaultError::MutationConflict(_) => GraphError::AuditScreeningChanged,
+            failure => error(failure),
+        })?;
     }
     Ok(adoption)
 }
@@ -100,9 +105,7 @@ pub(super) fn build_adoption(
         return Ok((MutationPlan::default(), adoption));
     }
     if candidate.reason == super::super::AuditReason::Current {
-        return Err(error(
-            "current assessments do not require discovery adoption",
-        ));
+        return Err(GraphError::AuditSubjectCurrent);
     }
     guard(&candidate)?;
     let mut mutation = MutationPlan::default();

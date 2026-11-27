@@ -986,6 +986,9 @@ mod native {
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
+        /// Subjects whose discovery adoption was refused in this run: each keeps its legacy
+        /// derivation until the run ends, so a later replan does not adopt it.
+        adoption_refused: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         /// The audit subject selected for a single bounded step and the keys it was ordered
@@ -7613,9 +7616,10 @@ mod native {
         /// for each planned subject that is due and whose discovery was recorded before
         /// screening, so it reads the bounded roster this run instead of every match. A
         /// current subject keeps its legacy derivation, which its receipt's currency still
-        /// verifies. A subject whose adoption is refused (a current processing action, or
-        /// inputs that changed since planning) keeps it for this run, as a stage record
-        /// names. Its predecessor Work stays as it is. Whether any subject was adopted, or
+        /// verifies. A subject whose adoption is refused (a current processing action, an
+        /// assessment that became current, or inputs that changed since planning) keeps it
+        /// for the rest of this run, as a stage record names. Its predecessor Work stays as it
+        /// is. Whether the plan must be read again (a subject was adopted or refused), or
         /// `None` after a failure the run recorded.
         async fn adopt_legacy_screening(
             &mut self,
@@ -7630,6 +7634,7 @@ mod native {
                             .discovery
                             .as_ref()
                             .is_some_and(|discovery| discovery.selection.is_none())
+                        && !self.adoption_refused.contains(&candidate.path)
                 })
                 .collect::<Vec<_>>();
             if legacy.is_empty() {
@@ -7679,23 +7684,26 @@ mod native {
                     },
                     &read,
                 );
-                match result {
-                    Ok(adoption) => adopted += usize::from(adoption.changed),
-                    Err(_) if held.is_some() => kept.push(format!(
-                        "{}: {}",
-                        candidate.path,
-                        held.expect("held reason")
-                    )),
-                    Err(lk_graph::GraphError::AuditScreeningChanged) => kept.push(format!(
-                        "{}: its inputs changed since planning",
-                        candidate.path
-                    )),
+                let refusal = match result {
+                    Ok(adoption) => {
+                        adopted += usize::from(adoption.changed);
+                        continue;
+                    }
+                    Err(_) if held.is_some() => held.expect("held reason"),
+                    Err(lk_graph::GraphError::AuditSubjectCurrent) => {
+                        "its assessment became current".into()
+                    }
+                    Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                        "its inputs changed since planning".into()
+                    }
                     Err(error) => {
                         drop(session);
                         self.failure("audit discovery adoption", miette::miette!("{error}"));
                         return None;
                     }
-                }
+                };
+                kept.push(format!("{}: {refusal}", candidate.path));
+                self.adoption_refused.insert(candidate.path.clone());
             }
             drop(session);
             self.result.audit_adoptions += adopted;
@@ -7716,7 +7724,7 @@ mod native {
                     )),
                 );
             }
-            Some(adopted > 0)
+            Some(adopted > 0 || !kept.is_empty())
         }
 
         async fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
@@ -8515,6 +8523,7 @@ mod native {
             recovery_turns: std::collections::BTreeSet::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
+            adoption_refused: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
             audit_turn: None,

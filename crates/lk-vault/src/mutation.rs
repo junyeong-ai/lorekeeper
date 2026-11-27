@@ -380,12 +380,12 @@ impl MutationSession {
             match step {
                 Step::RequireAbsent { path } => {
                     if state[path].is_some() {
-                        return Err(Self::conflict(path));
+                        return Err(VaultError::MutationConflict(path.clone()));
                     }
                 }
                 Step::Create { path, after } => {
                     if state[path].is_some() {
-                        return Err(Self::conflict(path));
+                        return Err(VaultError::MutationConflict(path.clone()));
                     }
                     state.insert(path.clone(), Some(after.clone()));
                 }
@@ -395,23 +395,23 @@ impl MutationSession {
                     after,
                 } => {
                     if state[path].as_ref() != Some(before) {
-                        return Err(Self::conflict(path));
+                        return Err(VaultError::MutationConflict(path.clone()));
                     }
                     state.insert(path.clone(), Some(after.clone()));
                 }
                 Step::Rename { from, to, expected } => {
                     if state[from].as_ref() != Some(expected) {
-                        return Err(Self::conflict(from));
+                        return Err(VaultError::MutationConflict(from.clone()));
                     }
                     if state[to].is_some() && from != to && !self.same_entry(from, to)? {
-                        return Err(Self::conflict(to));
+                        return Err(VaultError::MutationConflict(to.clone()));
                     }
                     state.insert(from.clone(), None);
                     state.insert(to.clone(), Some(expected.clone()));
                 }
                 Step::Remove { path, expected } => {
                     if state[path].as_ref() != Some(expected) {
-                        return Err(Self::conflict(path));
+                        return Err(VaultError::MutationConflict(path.clone()));
                     }
                     state.insert(path.clone(), None);
                 }

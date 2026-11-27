@@ -24,6 +24,10 @@ pub enum GraphError {
     AuditAssessment(#[from] audit::AuditAssessmentError),
     #[error("audit screening inputs changed; reread the current subject and candidate cards")]
     AuditScreeningChanged,
+    /// Discovery adoption found the subject's assessment current: its legacy derivation is
+    /// what its receipt verifies, so it is not adopted.
+    #[error("the audit subject's assessment is current; its discovery is not adopted")]
+    AuditSubjectCurrent,
     #[error(
         "audit screening requires {required} {boundary} bytes, above the complete configured bound {maximum}"
     )]

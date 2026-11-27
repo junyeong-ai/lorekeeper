@@ -25,10 +25,11 @@ paths:
   and whose discovery was recorded before screening, through lk-graph's adoption owner and
   its guards under the run's own writer claim, and plans again, so the subject screens and
   reads the bounded roster in the same run. A current subject is not touched. A refused
-  adoption (a current processing action, inputs changed since planning) keeps that subject's
-  legacy derivation for the run, recorded as a skipped `audit discovery adoption` stage and
-  never fatal; predecessor Work stays as it is. The report counts adoptions
-  (`audit_adoptions`).
+  adoption (a current processing action, an assessment recorded since planning, inputs
+  changed since planning or before its journal) keeps that subject's legacy derivation for
+  the rest of the run, recorded as a skipped `audit discovery adoption` stage and never
+  fatal, and the run plans again; journal and integrity failures stay fatal. Predecessor
+  Work stays as it is. The report counts adoptions (`audit_adoptions`).
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.

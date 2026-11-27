@@ -144,6 +144,13 @@ pub enum VaultError {
     Cancelled,
     #[error("vault mutation is busy: lock acquisition would block")]
     MutationBusy,
+    /// A file a plan expects differed from the vault at preflight: a writer outside the
+    /// session changed it after the plan was derived. Nothing was journaled or written.
+    #[error(
+        "mutation conflict at {}: it changed after the plan was derived; nothing was written",
+        .0.display()
+    )]
+    MutationConflict(std::path::PathBuf),
     /// A session's publication precondition refused a plan before it was journaled.
     #[error("{0}")]
     PublicationRefused(String),

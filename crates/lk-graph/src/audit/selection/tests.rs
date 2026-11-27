@@ -400,12 +400,13 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
         "wiki/documents/candidate-000.md",
         "---\ntype: document\ntitle: Changed\n---\nScreen protocol changed after preparation.\n",
     );
-    assert!(
+    assert!(matches!(
         MutationSession::acquire(&fixture.root)
             .unwrap()
-            .apply(mutation)
-            .is_err()
-    );
+            .apply(mutation),
+        Err(lk_vault::VaultError::MutationConflict(path))
+            if path == Path::new("wiki/documents/candidate-000.md")
+    ));
     assert_eq!(
         std::fs::read(fixture.root.join(crate::audit::STATE)).unwrap(),
         ledger
@@ -430,7 +431,7 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
         &serde_json::to_string(&receipts).unwrap(),
     );
     let before = fixture.snapshot();
-    assert!(
+    assert!(matches!(
         preview_adoption(
             &fixture.root,
             &fixture.dirs,
@@ -438,9 +439,9 @@ fn adoption_guards_dependencies_during_publication_and_preserves_current_assessm
             request,
             |_| Ok(()),
             &ReadControl::default(),
-        )
-        .is_err()
-    );
+        ),
+        Err(GraphError::AuditSubjectCurrent)
+    ));
     assert_eq!(fixture.snapshot(), before);
 }
 
