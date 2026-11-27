@@ -7035,6 +7035,9 @@ mod native {
             Ok(plan.coverage())
         }
 
+        /// The plan of the selected `paths` that are still due. An exact plan keeps current
+        /// subjects, but one a writer assessed since admission (a manual `wiki audit-record`
+        /// during another subject's call) is settled: no audit route sends it again.
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
             let pages = lk_graph::scan::scan_vault_controlled(
                 &self.root,
@@ -7091,6 +7094,9 @@ mod native {
                 .audit_deferred
                 .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
+            let mut plan = plan;
+            plan.candidates
+                .retain(|candidate| candidate.reason != lk_graph::audit::AuditReason::Current);
             Ok(plan)
         }
 
@@ -7580,6 +7586,9 @@ mod native {
             Some(jobs)
         }
 
+        /// The selected subjects ready for an audit route: planned again (`audit_plan`, which
+        /// keeps only due subjects) until each has current discovery, so a recipe an edit
+        /// invalidated, before or after adoption, is discovered again before either route.
         async fn replan_audit(&mut self, paths: &[String]) -> Option<lk_graph::audit::AuditPlan> {
             let mut plan = match self.audit_plan(paths) {
                 Ok(plan) => plan,
@@ -7595,25 +7604,20 @@ mod native {
                     .filter(|candidate| candidate.discovery.is_none())
                     .map(|candidate| candidate.path.clone())
                     .collect::<Vec<_>>();
-                if missing.is_empty() {
-                    break;
-                }
-                if !self.discover_audit(&missing).await {
-                    return None;
-                }
-                plan = match self.audit_plan(paths) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        self.failure("audit discovery replanning", error);
+                let stage = if !missing.is_empty() {
+                    if !self.discover_audit(&missing).await {
                         return None;
                     }
+                    "audit discovery replanning"
+                } else if self.adopt_legacy_screening(&plan).await? {
+                    "audit adoption replanning"
+                } else {
+                    break;
                 };
-            }
-            if self.adopt_legacy_screening(&plan).await? {
                 plan = match self.audit_plan(paths) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        self.failure("audit adoption replanning", error);
+                        self.failure(stage, error);
                         return None;
                     }
                 };

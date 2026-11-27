@@ -1187,6 +1187,71 @@ fn scheduled_tool_enabled_failure_holds_its_request_without_pausing_or_refunding
 }
 
 #[test]
+fn a_subject_settled_during_another_subjects_discovery_is_not_assessed_again() {
+    let settle = r#"if request.get('kind')=='audit-discovery':
+    settle=root/'settle-during-discovery'
+    if settle.exists():
+        path=settle.read_text()
+        settle.unlink()
+        lore=os.environ['LORE_BIN']
+        candidate=json.loads(subprocess.check_output([lore,'wiki','audit-plan','--path',path]))['candidates'][0]
+        assessment=root/'settled.json'
+        assessment.write_text(json.dumps({'assessments':[{'path':path,'file_revision':candidate['file_revision'],
+            'input_revision':candidate['input_revision'],'disposition':'reviewed',
+            'reason':'Settled by hand during discovery.','reviews':[]}]}))
+        subprocess.check_call([lore,'wiki','audit-record','--file',str(assessment)])
+"#;
+    let host = RECORD_AUDIT.replacen(
+        "if request.get('kind')=='audit-discovery':\n",
+        &format!("{settle}if request.get('kind')=='audit-discovery':\n"),
+        1,
+    );
+    assert_ne!(host, RECORD_AUDIT);
+    let fixture = Fixture::new("codex", 30, &host);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 2\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    write_audit_concept(&fixture, "settled");
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::write(
+        concepts.join("undiscovered.md"),
+        include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md")
+            .replace("Unlinked note", "undiscovered")
+            .replace("unlinked-note", "undiscovered"),
+    )
+    .unwrap();
+    let settled = "wiki/concepts/settled.md";
+    std::fs::write(fixture.root().join("settle-during-discovery"), settled).unwrap();
+
+    let (_, report) = fixture.run("knowledge");
+    assert_eq!(report["halted"], false, "{report}");
+    assert!(
+        !fixture.root().join("settle-during-discovery").exists(),
+        "the discovery ran: {report}"
+    );
+    let assessed: Vec<String> =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("maintain-command")).unwrap())
+            .unwrap();
+    assert!(
+        !assessed.iter().any(|path| path == settled),
+        "a subject a writer settled is not sent again: {assessed:?} {report}"
+    );
+    let receipts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        receipts["entries"][settled]["reason"], "Settled by hand during discovery.",
+        "{receipts}"
+    );
+}
+
+#[test]
 fn a_manual_audit_record_settles_the_attempts_a_native_failure_left() {
     let attempts = |fixture: &Fixture| -> Vec<serde_json::Value> {
         let directory = fixture

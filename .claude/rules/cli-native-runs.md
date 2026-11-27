@@ -43,6 +43,11 @@ paths:
   the rest of the run, recorded as a skipped `audit discovery adoption` stage and never
   fatal, and the run plans again; journal and integrity failures stay fatal. Predecessor
   Work stays as it is. The report counts adoptions (`audit_adoptions`).
+  Every selected replan keeps only due subjects: an exact plan keeps current ones, but a
+  subject a writer assessed since admission (a manual `wiki audit-record` during another
+  subject's call) is settled and no route sends it again. The run plans again after
+  adoption until every remaining subject has current discovery, so a recipe an edit
+  invalidated is discovered before either audit route.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
