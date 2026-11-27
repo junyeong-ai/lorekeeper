@@ -402,6 +402,39 @@ fn a_scheduled_run_checks_only_the_hosts_its_stages_use() {
     );
 }
 
+fn usage_paused_is_empty(raw: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(raw).unwrap()["paused"]
+        .as_object()
+        .is_none_or(serde_json::Map::is_empty)
+}
+
+#[test]
+fn a_scheduled_daily_run_without_semantic_hosts_checks_no_host() {
+    let fixture = Fixture::new("codex", 30, "exit 91");
+    let config = std::fs::read_to_string(&fixture.config).unwrap().replace(
+        "execution:\n  default_profile: primary\n",
+        "llm: {provider: noop}\nexecution:\n  operations: {process: primary}\n",
+    );
+    std::fs::write(&fixture.config, config).unwrap();
+    configure(&fixture, Some(20), 60);
+    let report = run(&fixture, "daily", false);
+    assert!(
+        !report["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stage| stage["name"] == "host environment"),
+        "{report}"
+    );
+    let usage = fixture
+        .root()
+        .join("vault/.lorekeeper/automation-usage.json");
+    assert!(
+        !usage.exists() || usage_paused_is_empty(&std::fs::read(&usage).unwrap()),
+        "{report}"
+    );
+}
+
 #[test]
 fn a_scheduled_run_whose_host_account_directory_is_gone_pauses_before_planning() {
     let fixture = bounded_audit_fixture("codex", 64, RECORD_BOUNDED_AUDIT);

@@ -7975,6 +7975,7 @@ mod native {
                 *campaign_root = Some(pin.clone());
             }
             if runner.automation.is_some()
+                && runner.config.invokes_semantic_hosts()
                 && let Err(error) =
                     execution::preflight_hosts(&runner.config.execution, operation.semantic())
             {

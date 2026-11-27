@@ -67,6 +67,12 @@ pub struct Config {
 }
 
 impl Config {
+    /// Whether jobs invoke semantic hosts at all: none run while `llm.provider` is `noop`.
+    /// Schedule generation and a scheduled run's host preflight both decide by this.
+    pub fn invokes_semantic_hosts(&self) -> bool {
+        self.llm.provider == LlmProvider::Queue
+    }
+
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         Self::load_with_revision(path).map(|(config, _)| config)
     }

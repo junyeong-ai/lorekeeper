@@ -219,8 +219,7 @@ pub async fn run(
     let mut engines = Vec::new();
     for (enabled, operation) in [
         (
-            config.ingest.schedule.is_some()
-                && config.llm.provider == lk_core::config::LlmProvider::Queue,
+            config.ingest.schedule.is_some(),
             lk_core::execution::ExecutionOperation::Daily,
         ),
         (
@@ -232,7 +231,7 @@ pub async fn run(
             lk_core::execution::ExecutionOperation::Process,
         ),
     ] {
-        if enabled {
+        if enabled && config.invokes_semantic_hosts() {
             let (name, _) = config
                 .execution
                 .resolve_profile(operation, None)
