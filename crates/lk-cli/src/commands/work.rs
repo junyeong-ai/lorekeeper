@@ -6301,6 +6301,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_whole_audit_capture_changes_once_a_stored_work_continues_its_subject() {
         // A semantic Work keeps the revision and is told apart by the stored Work; a revived
