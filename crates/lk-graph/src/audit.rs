@@ -157,8 +157,7 @@ struct Receipts {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     scopes: BTreeMap<String, AuditScope>,
     /// The currency key each recorded assessment was due under, by subject address. A
-    /// receipt recorded before currency was kept has none and stays current while its exact
-    /// read identity does.
+    /// receipt without one is due.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     currency: BTreeMap<String, String>,
 }
@@ -2582,7 +2581,6 @@ fn inputs_from_evidence(
                     receipt,
                     receipts.currency.get(&path).map(String::as_str),
                     &currency_revision,
-                    &input_revision,
                     &scoped_reviews,
                 ) =>
             {
@@ -2876,14 +2874,9 @@ fn receipt_is_current(
     receipt: &AuditAssessment,
     recorded_currency: Option<&str>,
     currency_revision: &str,
-    input_revision: &str,
     reviews: &[AuditReviewDependency],
 ) -> bool {
-    let due_under = match recorded_currency {
-        Some(recorded) => recorded == currency_revision,
-        None => receipt.input_revision == input_revision,
-    };
-    due_under
+    recorded_currency == Some(currency_revision)
         && reviews.iter().all(|review| review.state.is_current())
         && (receipt.disposition != AuditDisposition::FollowUp
             || reviews
@@ -4147,6 +4140,9 @@ mod tests {
             .unwrap()
             .candidates
             .remove(0);
+            receipts
+                .currency
+                .insert(path.into(), candidate.currency_revision.clone());
             receipts.entries.insert(path.into(), assessment(&candidate));
         }
         receipts.discovery.insert(
@@ -6776,7 +6772,7 @@ mod tests {
     }
 
     #[test]
-    fn a_receipt_recorded_before_currency_was_kept_stays_current_until_its_reads_change() {
+    fn a_receipt_without_a_currency_key_is_due_even_for_its_exact_reads() {
         let root = tempfile::tempdir().unwrap();
         let dirs = VaultDirs::default();
         let source = "---\ntype: document\ntitle: Source\n---\n## Summary\nA uses B under condition X.\n\n## Related Concepts\n- [A](../concepts/a.md)\n";
@@ -6786,8 +6782,8 @@ mod tests {
         write(root.path(), "wiki/documents/source.md", source);
         write(root.path(), "wiki/concepts/a.md", concept);
         write(root.path(), "wiki/concepts/b.md", related);
-        // An assessment recorded for these exact reads before receipts kept a currency key;
-        // its read identity, which binds the linked page's revision, as 0.163 computed it.
+        // An assessment for these exact reads, recorded without the currency key it was due
+        // under: nothing says which scope it checked, so its subject is due.
         let mut receipts = Receipts::default();
         receipts.entries.insert(
             "wiki/concepts/a.md".into(),
@@ -6807,19 +6803,19 @@ mod tests {
             STATE,
             &serde_json::to_string(&receipts).unwrap(),
         );
-        let reason = |root: &Path| {
-            load_selected_inputs(root, &dirs, &scan(root), &["wiki/concepts/a.md".into()])
-                .unwrap()
-                .remove(0)
-                .reason
-        };
-        assert_eq!(reason(root.path()), AuditReason::Current);
-        write(
+        let candidate = load_selected_inputs(
             root.path(),
-            "wiki/concepts/b.md",
-            &related.replace("an implementation", "a different implementation"),
+            &dirs,
+            &scan(root.path()),
+            &["wiki/concepts/a.md".into()],
+        )
+        .unwrap()
+        .remove(0);
+        assert_eq!(
+            candidate.input_revision,
+            "08bf95944d718cb4ff8b97f79da2482461e33ce576ed73798cc93aa8f9c118e2"
         );
-        assert_eq!(reason(root.path()), AuditReason::Changed);
+        assert_eq!(candidate.reason, AuditReason::Changed);
     }
 
     #[test]

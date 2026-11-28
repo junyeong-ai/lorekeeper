@@ -91,9 +91,8 @@ and CLI discovery, not a second graph authority.
   binds what the audit owns: the subject, its citations, its scoped reviews, each direct
   link with the verified owner it resolves to, its discovery queries and the read-scope
   constants. The receipt store keeps the key per subject (`currency`); a receipt is current
-  while the key matches, so an edit to a linked or matched page leaves it current while a
-  retargeted alias makes it due. A receipt without a recorded key (recorded before keys
-  were kept) is current while its read identity is.
+  only while its recorded key matches, so an edit to a linked or matched page leaves it
+  current while a retargeted alias makes it due, and a receipt without a key is due.
 - An audit's read scope is bounded by fixed policy constants, not the execution profile.
   Each query's discovery roster holds its identity matches and the first
   `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's
