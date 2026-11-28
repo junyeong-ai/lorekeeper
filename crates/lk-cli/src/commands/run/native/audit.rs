@@ -574,6 +574,7 @@ impl Runner<'_> {
             };
             let mut actions = lk_vault::MutationPlan::default();
             let mut held = 0;
+            let mut action_holds = Vec::new();
             let mut completed = Vec::new();
             // Whether a judgment answered inputs that changed while its host ran.
             let mut stale = false;
@@ -669,10 +670,7 @@ impl Runner<'_> {
                             return;
                         }
                         held += 1;
-                        self.deferred(
-                            "whole audit action",
-                            format!("{}: {reason}", candidate.path),
-                        );
+                        action_holds.push(format!("{}: {reason}", candidate.path));
                         for index in indices {
                             pending.remove(index);
                         }
@@ -686,6 +684,10 @@ impl Runner<'_> {
                 self.record_work_step(metrics);
                 self.failure("whole audit action publication", error);
                 return;
+            }
+            // A hold's stage is reported once its guarded plan published it.
+            for detail in action_holds {
+                self.deferred("whole audit action", detail);
             }
             drop(queue_claim);
             self.result.work_telemetry.retained_progress.action_receipts += held;

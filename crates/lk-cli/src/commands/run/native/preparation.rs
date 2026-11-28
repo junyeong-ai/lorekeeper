@@ -566,8 +566,13 @@ impl Runner<'_> {
                 lk_graph::audit::DiscoveryWrite::IfMissing,
                 self.supervisor.read_control(),
             ) {
+                // Counted as it is recorded, so a later subject's failure keeps the count.
                 Ok(changed) => {
                     recorded += usize::from(changed);
+                    self.result
+                        .work_telemetry
+                        .retained_progress
+                        .discovery_recipes += usize::from(changed);
                     usable = true;
                 }
                 Err(error) => {
@@ -576,10 +581,6 @@ impl Runner<'_> {
                 }
             }
         }
-        self.result
-            .work_telemetry
-            .retained_progress
-            .discovery_recipes += recorded;
         metrics.outcome = if recorded > 0 {
             WorkOutcome::Recorded
         } else {
