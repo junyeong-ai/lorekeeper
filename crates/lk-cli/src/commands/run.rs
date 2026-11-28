@@ -2082,8 +2082,12 @@ mod native {
                 Ok(state) => state,
                 Err(error) => return self.failure(name, error),
             };
-            if state.pending_mutation || state.unreadable != 0 || state.unparseable_lines != 0 {
-                return self.failure(name, miette::miette!("queue contains an interrupted mutation or unknown inputs; inspect `lore queue check`"));
+            if state.pending_mutation
+                || state.unreadable != 0
+                || state.unparseable_lines != 0
+                || state.invalid_target != 0
+            {
+                return self.failure(name, miette::miette!("queue contains an interrupted mutation, unknown inputs or a target that resolves to no page; inspect `lore queue check`"));
             }
             if !state.staged_results.is_empty()
                 && let Err(error) =
@@ -2100,9 +2104,8 @@ mod native {
             self.deferred(
                 name,
                 format!(
-                    "{} current tasks, {} invalid targets and {} staged results remain; inspect `lore queue check`",
+                    "{} current tasks and {} staged results remain; inspect `lore queue check`",
                     state.current,
-                    state.invalid_target,
                     state.staged_results.len()
                 ),
             )

@@ -145,7 +145,10 @@ paths:
   Classify retained rejected tasks before capturing current semantic scope. Done,
   stale and missing-target tasks receive no new host admission; deterministic apply
   still owns reapplication or retirement. Unreadable, ambiguous and corrupt state
-  remains fatal. A readable result whose exact request is absent from a fully parsed
+  remains fatal. A task whose target resolves to no page (`InvalidTarget`: an address
+  outside the vault, or a link at the address whose destination is gone, which is not a
+  removed page) is kept by pruning and refused by semantic selection and a native run's
+  queue check, so a scheduled operation pauses for its repair. A readable result whose exact request is absent from a fully parsed
   queue is an `orphaned` group, usually because its request was retired (by prune or
   regeneration) while a standalone session drafted it, which no lock spans; an invalid
   identity takes the same path. Apply quarantines it

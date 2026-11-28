@@ -160,11 +160,25 @@ pub enum TaskStatus {
     /// that re-renders it re-enqueues the work under the heading the page now has — the
     /// same self-healing an unparseable result file relies on.
     MissingTarget,
-    /// The task's target address does not resolve to a vault path, so no page can ever answer
-    /// it and nothing proved one absent. Neither work nor dead: no session can do it, and
-    /// dropping it would erase its retained input. Reported and retained until the queue line
-    /// is repaired, without blocking independent work.
+    /// The task's target address does not resolve to a vault path, or a link left at it names
+    /// an entry that is gone, so no page can answer it and nothing proved one absent. Neither
+    /// work nor dead: no session can do it, and dropping it would erase its retained input.
+    /// Reported and retained until the queue line or the link is repaired; semantic selection
+    /// and a native run's queue check refuse it, so a scheduled operation pauses for that
+    /// repair.
     InvalidTarget,
+}
+
+/// A target that reads as not found: `MissingTarget` when nothing is there, `InvalidTarget`
+/// when a link at the address still names an entry whose destination is gone.
+fn missing_or_dangling(root: &Path, target: &Path) -> TaskStatus {
+    if std::fs::symlink_metadata(root.join(target))
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
+        TaskStatus::InvalidTarget
+    } else {
+        TaskStatus::MissingTarget
+    }
 }
 
 /// Which queued artifact is being classified. They share every fact about the target page
@@ -471,10 +485,13 @@ pub(super) fn current_tasks_controlled(
                     task.task_id
                 ));
             }
-            TaskStatus::Done
-            | TaskStatus::Stale
-            | TaskStatus::MissingTarget
-            | TaskStatus::InvalidTarget => {}
+            TaskStatus::InvalidTarget => {
+                return Err(miette::miette!(
+                    "pending task {} names a target that resolves to no page; repair or retire it",
+                    task.task_id
+                ));
+            }
+            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget => {}
         }
     }
     read.check().into_diagnostic()?;
@@ -2391,10 +2408,12 @@ fn classify_with_reader_controlled(
         control.check().into_diagnostic()?;
         let raw = match captured {
             Ok(raw) => raw,
+            // A link left at the target whose destination is gone still names an entry, so the
+            // address resolves nowhere rather than being removed.
             Err(lk_vault::VaultError::Io(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return Ok(TaskStatus::MissingTarget);
+                return Ok(missing_or_dangling(root, &target));
             }
             Err(lk_vault::VaultError::Cancelled) => {
                 return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
@@ -2607,7 +2626,7 @@ fn classify_against_page_controlled(
     let content = match captured {
         Ok(c) => c,
         Err(lk_vault::VaultError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(TaskStatus::MissingTarget);
+            return Ok(missing_or_dangling(vault_root, rel_path));
         }
         Err(lk_vault::VaultError::Cancelled) => {
             return Err(lk_vault::VaultError::Cancelled).into_diagnostic();
@@ -3647,6 +3666,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_at_the_target_is_an_invalid_target() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
+        std::os::unix::fs::symlink(
+            dir.path().join("daily/s/gone.md"),
+            dir.path().join("daily/s/2026-05-23.md"),
+        )
+        .unwrap();
+        let t = task("daily/s/2026-05-23.md", "abc123");
+        assert_eq!(
+            classify_task(dir.path(), &t).unwrap(),
+            TaskStatus::InvalidTarget
+        );
+    }
+
     #[test]
     fn page_without_llm_inputs_is_stale() {
         let dir = TempDir::new().unwrap();
@@ -4100,7 +4136,7 @@ mod tests {
     }
 
     #[test]
-    fn an_invalid_target_address_stays_reported_without_blocking_independent_work() {
+    fn an_invalid_target_address_is_retained_and_refuses_semantic_selection() {
         let dir = TempDir::new().unwrap();
         let queue_dir = dir.path().join(".lorekeeper").join("queue");
         write_page(
@@ -4119,9 +4155,11 @@ mod tests {
         );
         let before = std::fs::read_to_string(&file).unwrap();
         let read = lk_vault::ReadControl::default();
-        let selected = current_tasks_controlled(dir.path(), &read).unwrap();
-        assert_eq!(selected.len(), 1, "planning skips the invalid row");
-        assert_eq!(selected[0].task_id, current.task_id);
+        let refused = current_tasks_controlled(dir.path(), &read).unwrap_err();
+        assert!(
+            refused.to_string().contains("resolves to no page"),
+            "a row no session can answer is repaired before semantic work: {refused}"
+        );
         let settlement = check::inspect(dir.path()).unwrap();
         assert_eq!(settlement.invalid_target, 2);
         assert!(!settlement.is_settled(), "check reports the row for repair");
