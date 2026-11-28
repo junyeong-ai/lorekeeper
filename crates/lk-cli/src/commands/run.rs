@@ -816,6 +816,10 @@ mod native {
         workflow_id: Option<lk_core::execution::WorkflowId>,
         semantic_calls: usize,
         recovered_section_proposals: usize,
+        /// Whether the batch deferred work whose inputs changed while it read them
+        /// (`Runner::defer_for_drift`).
+        #[serde(skip)]
+        drift_deferred: bool,
         budget_exhausted: bool,
         /// Every host configuration that answered nothing in this job reached
         /// `HOST_FAILURE_LIMIT`, so no host remains admissible; its campaign starts no later
@@ -871,6 +875,7 @@ mod native {
                 workflow_id: None,
                 semantic_calls: 0,
                 recovered_section_proposals: 0,
+                drift_deferred: false,
                 budget_exhausted: false,
                 host_fault: false,
                 yield_reason: None,
@@ -907,19 +912,24 @@ mod native {
             }
         }
 
-        /// The drift that stopped this job when it retained no semantic progress (no retained
-        /// progress and no recorded assessment): what `automation::Control::conclude` counts.
-        fn unproductive_drift(&self) -> Option<&automation::HaltCause> {
-            let progressed = self.work_telemetry.retained_progress.has_progress()
-                || self
-                    .audit
+        /// How this batch ended for the operation's repeated-drift count
+        /// (`automation::Control::conclude`).
+        fn batch_ending(&self) -> automation::BatchEnding<'_> {
+            automation::BatchEnding {
+                progressed: self.work_telemetry.retained_progress.has_progress()
+                    || self
+                        .audit
+                        .as_ref()
+                        .is_some_and(|completed| !completed.is_empty())
+                    || self.recovered_section_proposals != 0,
+                drift: self
+                    .halt
+                    .0
                     .as_ref()
-                    .is_some_and(|completed| !completed.is_empty());
-            self.halt
-                .0
-                .as_ref()
-                .filter(|halt| halt.kind == FailureKind::InputsChanged && !progressed)
-                .map(|halt| &halt.cause)
+                    .filter(|halt| halt.kind == FailureKind::InputsChanged)
+                    .map(|halt| &halt.cause),
+                drift_deferred: self.drift_deferred,
+            }
         }
 
         /// The cause a scheduled operation pauses on: a fault, never input drift.
@@ -1080,12 +1090,10 @@ mod native {
                     .expect("owned workflow")
                     .root_pin()
                     .root();
-                let pause = self.result.pause_cause().cloned();
-                let drift = self.result.unproductive_drift().cloned();
                 let control = self.automation.as_mut().expect("scheduled run");
-                let concluded = match pause {
-                    Some(cause) => control.pause(root, cause),
-                    None => control.conclude(root, drift.as_ref()),
+                let concluded = match self.result.pause_cause() {
+                    Some(cause) => control.pause(root, cause.clone()),
+                    None => control.conclude(root, self.result.batch_ending()),
                 };
                 if let Err(error) = concluded {
                     self.record(
@@ -1701,6 +1709,13 @@ mod native {
             self.record(name, StageState::Failed, Some(detail.to_string()))
         }
 
+        /// Defers work because a writer changed its inputs while the batch read them. Without
+        /// a halt such a deferral leaves the operation's repeated-drift count as it is.
+        fn defer_for_drift(&mut self, name: &str, detail: impl std::fmt::Display) -> bool {
+            self.result.drift_deferred = true;
+            self.deferred(name, detail)
+        }
+
         fn configuration_is_current(&mut self) -> bool {
             if self.supervisor.is_cancelled() {
                 if !self.result.cancelled {
@@ -2146,6 +2161,8 @@ mod native {
             self.result.queue_application.orphaned += report.orphaned;
             self.result.queue_application.superseded += report.superseded;
             self.result.queue_application.held += report.held;
+            // A superseded result answers inputs a writer changed; it is drafted again.
+            self.result.drift_deferred |= report.superseded != 0;
             for group in &report.groups {
                 if let (
                     crate::commands::queue::application::Outcome::Superseded { .. },
@@ -2155,7 +2172,10 @@ mod native {
                         .finalization_replans
                         .try_spend(&identity.target.vault_path, FINALIZATION_CHANGED_AGAIN)
                 {
-                    self.deferred("finalization inputs unstable", &identity.target.vault_path);
+                    self.defer_for_drift(
+                        "finalization inputs unstable",
+                        &identity.target.vault_path,
+                    );
                 }
             }
             let detail = format!(
@@ -3749,7 +3769,10 @@ mod native {
                                             .finalization_replans
                                             .try_spend(target, FINALIZATION_CHANGED_AGAIN)
                                     {
-                                        self.deferred("finalization inputs unstable", target);
+                                        self.defer_for_drift(
+                                            "finalization inputs unstable",
+                                            target,
+                                        );
                                     }
                                     if let Some(subject) = &turn.audit_subject {
                                         self.audit_wave_replans.insert(subject.clone());
@@ -4269,7 +4292,7 @@ mod native {
                     .finalization_replans
                     .try_spend(target, FINALIZATION_CHANGED_AGAIN)
                 {
-                    self.deferred("finalization inputs unstable", target);
+                    self.defer_for_drift("finalization inputs unstable", target);
                     replan = false;
                 }
             }
@@ -4298,7 +4321,7 @@ mod native {
             metrics.revalidation_record_duration_ms = Some(started.elapsed().as_millis() as u64);
             let step = match held {
                 Ok(reasons) if reasons.is_empty() => {
-                    self.deferred(
+                    self.defer_for_drift(
                         "native result inputs changed",
                         "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
                     );
@@ -4478,7 +4501,7 @@ mod native {
                             .finalization_replans
                             .try_spend(&target, FINALIZATION_CHANGED_AGAIN)
                         {
-                            self.deferred("finalization inputs unstable", &target);
+                            self.defer_for_drift("finalization inputs unstable", &target);
                         }
                     }
                     Ok(crate::commands::work::generation::SelectedFinish::Rejected(reason)) => {
@@ -4657,7 +4680,7 @@ mod native {
                             WorkStep::Deferred(reason)
                         }
                         Ok(None) => {
-                            self.deferred(
+                            self.defer_for_drift(
                                 "whole-section inputs changed",
                                 "inputs changed after the failed invocation; no hold was recorded and fresh preparation replaces the request",
                             );
@@ -5330,7 +5353,7 @@ mod native {
                                     .finalization_replans
                                     .try_spend(target, EVIDENCE_CHANGED_AGAIN)
                                 {
-                                    self.deferred("bounded work inputs unstable", target);
+                                    self.defer_for_drift("bounded work inputs unstable", target);
                                 }
                             }
                             self.queue_replan = QueueReplan::Invalidate;
@@ -7256,7 +7279,10 @@ mod native {
                         if selection.contains(&subject) =>
                     {
                         let reason = format!("its input {input} changed while it was planned");
-                        self.deferred("audit inputs changed", format!("{subject}: {reason}"));
+                        self.defer_for_drift(
+                            "audit inputs changed",
+                            format!("{subject}: {reason}"),
+                        );
                         self.audit_deferrals
                             .deferred
                             .insert(subject.clone(), reason);
@@ -7299,7 +7325,7 @@ mod native {
             planned: Option<&lk_graph::audit::AuditCandidate>,
         ) {
             self.audit_deferrals.removed.insert(path.to_owned());
-            self.deferred("audit subject removed", path);
+            self.defer_for_drift("audit subject removed", path);
             match planned {
                 Some(candidate) => self.count_deferred_audit(DeferredAudit {
                     kind: candidate.kind,
@@ -7378,7 +7404,7 @@ mod native {
             self.audit_deferrals
                 .deferred
                 .insert(candidate.path.clone(), reason.clone());
-            self.deferred(
+            self.defer_for_drift(
                 "audit inputs changed",
                 format!("{}: {reason}", candidate.path),
             );
@@ -7405,6 +7431,9 @@ mod native {
         /// Counts the subjects `plan` skipped because an input changed while it read them, and
         /// keeps them out of later plans of the invocation.
         fn count_input_changed(&mut self, plan: &lk_graph::audit::AuditPlan) {
+            if !plan.input_changed.is_empty() {
+                self.result.drift_deferred = true;
+            }
             for drift in &plan.input_changed {
                 let deferred = DeferredAudit {
                     kind: drift.kind,
@@ -8993,15 +9022,21 @@ mod native {
                     FailureKind::InputsChanged,
                     Some("removed"),
                 );
+                let ending = result.batch_ending();
                 assert_eq!(
-                    result
-                        .unproductive_drift()
-                        .map(|cause| cause.stage.as_str()),
+                    ending.drift.map(|cause| cause.stage.as_str()),
                     Some("audit fresh scope"),
-                    "drift without progress is what repeated-drift escalation counts"
+                    "the drift that halted the batch is what repeated-drift escalation counts"
                 );
+                assert!(!ending.progressed);
+                result.recovered_section_proposals = 1;
+                assert!(
+                    result.batch_ending().progressed,
+                    "a committed section-proposal recovery is progress"
+                );
+                result.recovered_section_proposals = 0;
                 result.work_telemetry.retained_progress.action_receipts = 1;
-                assert!(result.unproductive_drift().is_none());
+                assert!(result.batch_ending().progressed);
                 assert_eq!(result.campaign_stop(), CampaignStop::InputsChanged);
                 assert!(result.pause_cause().is_none());
                 let report = serde_json::to_value(&result).unwrap();

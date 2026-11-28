@@ -169,7 +169,21 @@ pub(super) struct Control {
     deadline: Option<Instant>,
     wait_remaining: Duration,
     turn_started: Option<Instant>,
+    /// Whether a batch of this invocation retained semantic progress (`BatchEnding`).
+    progressed: bool,
     pub report: Report,
+}
+
+/// How a scheduled batch that did not fault ended, for the operation's count of consecutive
+/// invocations that drift halted before any semantic progress (`Control::conclude`).
+pub(super) struct BatchEnding<'a> {
+    /// The batch retained semantic progress: retained progress, a recorded assessment or a
+    /// committed section-proposal recovery.
+    pub progressed: bool,
+    /// The input drift that halted the batch.
+    pub drift: Option<&'a HaltCause>,
+    /// Without a halt, the batch deferred work whose inputs changed while it read them.
+    pub drift_deferred: bool,
 }
 
 fn today() -> Date {
@@ -239,6 +253,7 @@ impl Control {
             deadline: None,
             wait_remaining,
             turn_started: None,
+            progressed: false,
         })
     }
 
@@ -441,17 +456,17 @@ impl Control {
         self.report.stop = Some(Stop::Paused);
     }
 
-    /// Records how a scheduled run that did not fault ended. `unproductive_drift` is the
-    /// drift that stopped it when it retained no semantic progress; any other ending resets
-    /// the operation's count. The `REPEATED_DRIFT_LIMIT`th consecutive such run pauses the
-    /// operation, naming `REPEATED_DRIFT_STAGE` and the last drift's detail.
-    pub fn conclude(
-        &mut self,
-        root: &Path,
-        unproductive_drift: Option<&HaltCause>,
-    ) -> miette::Result<()> {
+    /// Counts the invocation this batch belongs to: progress in any of its batches resets the
+    /// operation's count, a drift halt before any progress advances it, an ending that only
+    /// deferred drifted work leaves it, and any other ending resets it. A drift halt ends the
+    /// invocation and a batch that continues it has progressed, so this batch's conclusion is
+    /// the invocation's. The `REPEATED_DRIFT_LIMIT`th consecutive advance pauses the operation,
+    /// naming `REPEATED_DRIFT_STAGE` and the last drift's detail.
+    pub fn conclude(&mut self, root: &Path, ending: BatchEnding<'_>) -> miette::Result<()> {
+        self.progressed |= ending.progressed;
         let mut usage = Usage::load(root, today())?;
-        match unproductive_drift {
+        match ending.drift.filter(|_| !self.progressed) {
+            None if !self.progressed && ending.drift_deferred => return Ok(()),
             None => {
                 if usage.drift_runs.remove(&self.operation).is_none() {
                     return Ok(());
@@ -567,30 +582,83 @@ mod tests {
     }
 
     #[test]
-    fn repeated_unproductive_drift_pauses_at_its_limit_and_progress_resets_it() {
+    fn repeated_unproductive_drift_pauses_at_its_limit_and_invocation_progress_resets_it() {
         let root = fixture();
         let control = || Control::new(policy(10), ExecutionOperation::Knowledge, false, 4).unwrap();
         let drift = HaltCause::new("audit fresh scope", Some("wiki/concepts/a.md changed"));
         let paused = || Usage::load(root.path(), today()).unwrap().paused;
-        for _ in 1..REPEATED_DRIFT_LIMIT {
-            let mut run = control();
-            run.conclude(root.path(), Some(&drift)).unwrap();
-            assert!(run.report.stop.is_none());
-            assert!(paused().is_empty());
-        }
-        control().conclude(root.path(), None).unwrap();
-        assert!(
+        let halted = || BatchEnding {
+            progressed: false,
+            drift: Some(&drift),
+            drift_deferred: false,
+        };
+        let count = || {
             Usage::load(root.path(), today())
                 .unwrap()
                 .drift_runs
-                .is_empty(),
-            "progress or a clean run resets the count"
-        );
+                .get(&ExecutionOperation::Knowledge)
+                .copied()
+        };
         for _ in 1..REPEATED_DRIFT_LIMIT {
-            control().conclude(root.path(), Some(&drift)).unwrap();
+            let mut run = control();
+            run.conclude(root.path(), halted()).unwrap();
+            assert!(run.report.stop.is_none());
+            assert!(paused().is_empty());
+        }
+        let advanced = count();
+        let mut deferring = control();
+        deferring
+            .conclude(
+                root.path(),
+                BatchEnding {
+                    progressed: false,
+                    drift: None,
+                    drift_deferred: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            count(),
+            advanced,
+            "deferring drifted work alone leaves the count"
+        );
+        let mut invocation = control();
+        invocation
+            .conclude(
+                root.path(),
+                BatchEnding {
+                    progressed: true,
+                    drift: None,
+                    drift_deferred: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(count(), None, "progress resets the count");
+        for _ in 1..REPEATED_DRIFT_LIMIT {
+            control().conclude(root.path(), halted()).unwrap();
+        }
+        invocation.conclude(root.path(), halted()).unwrap();
+        assert_eq!(
+            count(),
+            None,
+            "a drift halt after progress earlier in the invocation counts as progress"
+        );
+        control()
+            .conclude(
+                root.path(),
+                BatchEnding {
+                    progressed: false,
+                    drift: None,
+                    drift_deferred: false,
+                },
+            )
+            .unwrap();
+        assert_eq!(count(), None, "a clean ending resets the count");
+        for _ in 1..REPEATED_DRIFT_LIMIT {
+            control().conclude(root.path(), halted()).unwrap();
         }
         let mut third = control();
-        third.conclude(root.path(), Some(&drift)).unwrap();
+        third.conclude(root.path(), halted()).unwrap();
         assert!(matches!(third.report.stop, Some(Stop::Paused)));
         let pause = &paused()[&ExecutionOperation::Knowledge];
         assert_eq!(pause.cause.stage, REPEATED_DRIFT_STAGE);

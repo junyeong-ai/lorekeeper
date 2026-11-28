@@ -117,7 +117,7 @@ impl Runner<'_> {
             }
             Ok(false) => {
                 metrics.outcome = WorkOutcome::InputsChanged;
-                self.deferred(
+                self.defer_for_drift(
                     "audit screening changed",
                     "the returned failure no longer names an unrecorded current packet",
                 );
@@ -253,7 +253,7 @@ impl Runner<'_> {
                 true
             }
             Ok(false) => {
-                self.deferred("discovery input changed", &subject.path);
+                self.defer_for_drift("discovery input changed", &subject.path);
                 false
             }
             Err(error) => self.failure("discovery attempt recording", error),
@@ -545,7 +545,7 @@ impl Runner<'_> {
             match subject.is_current(session.root(), self.supervisor.read_control()) {
                 Ok(true) => {}
                 Ok(false) => {
-                    self.deferred("audit discovery changed", &subject.path);
+                    self.defer_for_drift("audit discovery changed", &subject.path);
                     continue;
                 }
                 Err(error) => {

@@ -114,9 +114,11 @@ pause that operation's semantic phase across restarts and day rollover. A page, 
 or task that a writer edits or removes while a run reads it is not fatal: the run replans or
 defers only the subject or target that read it, and when it cannot confine the change it
 records the failed stage and ends its batch with unfinished work retained (`halt_kind:
-inputs-changed`) without pausing, so the next scheduled run plans from the current vault. Three consecutive scheduled runs of an operation that end this way without semantic
+inputs-changed`) without pausing, so the next scheduled run plans from the current vault. Three consecutive scheduled runs of an operation that end this way before any semantic
 progress pause it as `repeated input drift`, naming the last drift: recurring drift needs a
-look. An immutable capture that is missing or changed is an integrity failure and
+look. Progress anywhere in a run resets that count, and so does a run that meets no drift;
+a run that only defers the changed work without ending early, a cancelled run and one that
+never takes the workflow lease leave it unchanged. An immutable capture that is missing or changed is an integrity failure and
 still pauses. Daily source
 collection still runs before this pause check; process and knowledge report a known
 pause before waiting for the workflow lease. Reviews needing reassessment keep

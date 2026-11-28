@@ -204,11 +204,17 @@ paths:
   health and the queue check as a normal run does), so an unreadable page, a lint error, an
   invalid review, an interrupted mutation journal or an unreadable queue row replaces the
   drift as the pause cause. Drift that recurs
-  is bounded: the ledger counts per operation consecutive scheduled runs that ended on drift
-  with no semantic progress (no retained progress and no recorded assessment) in the
-  defaulted `drift_runs` field, any other ending resets it, and the
-  `automation::REPEATED_DRIFT_LIMIT`th (3) such run pauses the operation as `repeated input
-  drift` with the last drift's detail. Integrity faults
+  is bounded: the ledger counts per operation, in the defaulted `drift_runs` field,
+  consecutive scheduled invocations that a drift halt ended before semantic progress in any
+  of their batches (retained progress, a recorded assessment or a committed section-proposal
+  recovery; `automation::BatchEnding`), and the `automation::REPEATED_DRIFT_LIMIT`th (3)
+  such invocation pauses the operation as `repeated input drift` with the last drift's
+  detail. Progress in any batch of an invocation resets the count, as does an ending with
+  neither a halt nor a drift deferral; a fault pause clears it. An invocation that ended
+  without a halt but deferred or superseded work whose inputs changed
+  (`Runner::defer_for_drift`), a cancelled one and one that never held the lease leave it
+  as it is. A drift halt ends the invocation and a batch that continues it has progressed,
+  so each batch's conclusion is its invocation's. Integrity faults
   (an immutable capture missing or changed, corrupt state, an unreadable present page),
   host failures and configuration or root drift remain faults. Keep errors typed down to
   `Runner::failure` (`commands::typed_error`); a message is never classified. A child the
