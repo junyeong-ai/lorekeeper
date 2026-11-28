@@ -24,24 +24,35 @@ pub(in crate::commands) enum RejectionKind {
     InvalidSection,
 }
 
+/// What a refusal found: inputs a writer changed after the result was prepared, retained
+/// state that cannot prove the result, or a result that is invalid in itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum RejectionCause {
+    InputChange,
+    Integrity,
+    InvalidResult,
+}
+
 impl RejectionKind {
-    /// Whether the refusal found inputs a writer changed after the result was prepared, rather
-    /// than a result that is invalid in itself.
-    pub(in crate::commands) fn is_input_change(self) -> bool {
+    pub(in crate::commands) fn cause(self) -> RejectionCause {
         match self {
             Self::SelectionInventoryChanged
             | Self::SelectionDecisionsChanged
             | Self::SemanticContextChanged
             | Self::CitationsChanged
             | Self::EvidenceScopeChanged
-            | Self::TargetChanged => true,
-            Self::RetainedWorkInvalid
-            | Self::ConflictingProposals
+            | Self::TargetChanged => RejectionCause::InputChange,
+            Self::RetainedWorkInvalid => RejectionCause::Integrity,
+            Self::ConflictingProposals
             | Self::InvalidProposalIdentity
             | Self::InvalidProposal
             | Self::InvalidResultLink
-            | Self::InvalidSection => false,
+            | Self::InvalidSection => RejectionCause::InvalidResult,
         }
+    }
+
+    pub(in crate::commands) fn is_input_change(self) -> bool {
+        self.cause() == RejectionCause::InputChange
     }
 }
 
@@ -425,10 +436,19 @@ impl Report {
         }
     }
 
+    /// Whether independent work may continue past everything but a fatal failure. A rejection
+    /// of retained state (`RejectionCause::Integrity`) is damage the operator repairs, so it
+    /// stops like a fatal failure rather than leaving its group held.
     fn continues_without_fatal(&self) -> bool {
         !self.dry_run
             && self.unreadable == 0
             && self.quarantined == 0
+            && !self.groups.iter().any(|group| {
+                matches!(
+                    &group.outcome,
+                    Outcome::Rejected { kind, .. } if kind.cause() == RejectionCause::Integrity
+                )
+            })
             && self.applied
                 == self
                     .groups
@@ -1196,7 +1216,7 @@ mod tests {
     fn application_report_continues_only_with_complete_trusted_rejection_metadata() {
         assert!(Report::new(false).can_continue());
         assert!(rejected().can_continue());
-        let mutations: [fn(&mut Report); 9] = [
+        let mutations: [fn(&mut Report); 10] = [
             |report| report.groups[0].identity = None,
             |report| report.groups[0].identity.as_mut().unwrap().owner = "../outside.md".into(),
             |report| report.groups[0].identity.as_mut().unwrap().task_id.clear(),
@@ -1210,11 +1230,20 @@ mod tests {
             |report| report.rejected += 1,
             |report| report.dry_run = true,
             |report| report.fail(miette::miette!("IO failure")),
+            |report| {
+                if let Outcome::Rejected { kind, .. } = &mut report.groups[0].outcome {
+                    *kind = RejectionKind::RetainedWorkInvalid
+                }
+            },
         ];
         for mutate in mutations {
             let mut report = rejected();
             mutate(&mut report);
             assert!(!report.can_continue());
+            assert_eq!(
+                report.failure_kind(),
+                crate::commands::drift::FailureKind::Fault
+            );
         }
     }
 

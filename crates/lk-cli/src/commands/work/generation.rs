@@ -717,8 +717,13 @@ pub(in crate::commands) fn finish_selected_controlled(
                 {
                     return Ok(SelectedFinish::ScopeChanged);
                 }
+                // Damaged retained state is the operator's to repair, never a held proposal.
                 let Some(refusal) = error
                     .downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+                    .filter(|refusal| {
+                        refusal.kind.cause()
+                            != crate::commands::queue::application::RejectionCause::Integrity
+                    })
                 else {
                     return Err(error);
                 };
