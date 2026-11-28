@@ -48,7 +48,10 @@ pub(super) enum CompletionRefusal {
     IncompleteReduction,
     UnsealedResult,
     ChangedResult,
+    /// An observation the frontier seal rests on was recorded again: the evidence changed.
     ChangedObservations,
+    /// An observation the frontier seal names is gone: the retained Work is damaged.
+    MissingObservation,
 }
 
 impl std::fmt::Display for CompletionRefusal {
@@ -59,6 +62,9 @@ impl std::fmt::Display for CompletionRefusal {
             Self::ChangedResult => "sealed result or completed reduction changed",
             Self::ChangedObservations => {
                 "sealed frontier observations changed; a fresh final result is required"
+            }
+            Self::MissingObservation => {
+                "an observation the frontier seal names is missing from its Work"
             }
         })
     }
@@ -4315,6 +4321,21 @@ mod tests {
         seal_frontier(&work, &session, &source, &second);
         work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &second)
             .unwrap();
+        let sealed_output = root
+            .path()
+            .join(output_path(&work.plan.id, &part.id).unwrap());
+        let sealed_raw = std::fs::read_to_string(&sealed_output).unwrap();
+        std::fs::remove_file(&sealed_output).unwrap();
+        assert!(
+            matches!(
+                work.guard_completion(&mut MutationPlan::default(), root.path(), &source, &second)
+                    .unwrap_err()
+                    .downcast_ref::<CompletionRefusal>(),
+                Some(CompletionRefusal::MissingObservation)
+            ),
+            "a sealed observation that is gone is damage, not a re-recorded observation"
+        );
+        std::fs::write(&sealed_output, sealed_raw).unwrap();
         let mut forged = second.clone();
         forged["synthesis"] = json!("changed without a seal");
         assert!(matches!(

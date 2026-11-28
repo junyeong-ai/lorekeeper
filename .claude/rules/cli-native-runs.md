@@ -192,8 +192,9 @@ paths:
   keeps the full detail. A failure caused by input drift is not fatal. One typed
   predicate (`drift::is_input_drift`) decides it: `SourceChanged`, a publication rejection
   whose kind is an input change (`RejectionKind::is_input_change`, exhaustive; a missing,
-  incomplete or disagreeing seal and a lost sealed roster are `RetainedWorkInvalid`, and a
-  result invalid in itself is `InvalidProposal`), a `TaskNotCurrent` whose status means its inputs moved on
+  incomplete or disagreeing seal, an observation a frontier seal names that is gone and a
+  lost sealed roster are `RetainedWorkInvalid`, while an observation recorded again after
+  its seal is `EvidenceScopeChanged`; a result invalid in itself is `InvalidProposal`), a `TaskNotCurrent` whose status means its inputs moved on
   (`TaskStatus::is_input_change`; an unreadable or unresolvable target is a fault), the audit drift variants of
   `GraphError`, `VaultError::{MutationConflict, RssOriginChanged}`. Such a failure records
   its failed stage and ends the batch with unfinished work retained (`halt_kind:

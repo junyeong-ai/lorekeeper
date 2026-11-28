@@ -461,14 +461,16 @@ fn guard_prepared(
         .map_err(
             |error| match error.downcast_ref::<state::CompletionRefusal>() {
                 // Observations re-recorded after the seal answer changed evidence; a seal that is
-                // missing, incomplete or disagrees with the result is damaged retained Work.
+                // missing, incomplete or disagrees with the result, or an observation it names
+                // that is gone, is damaged retained Work.
                 Some(state::CompletionRefusal::ChangedObservations) => {
                     publication_rejection(RejectionKind::EvidenceScopeChanged, error.to_string())
                 }
                 Some(
                     state::CompletionRefusal::IncompleteReduction
                     | state::CompletionRefusal::UnsealedResult
-                    | state::CompletionRefusal::ChangedResult,
+                    | state::CompletionRefusal::ChangedResult
+                    | state::CompletionRefusal::MissingObservation,
                 ) => publication_rejection(RejectionKind::RetainedWorkInvalid, error.to_string()),
                 None => error,
             },

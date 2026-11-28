@@ -355,6 +355,16 @@ impl Work {
         if seal.final_result_revision != revision(final_result)? {
             return Err(miette::Report::new(CompletionRefusal::ChangedResult));
         }
+        // A sealed node whose output is gone is lost evidence, which no writer's re-recording
+        // explains; one recorded again reads as changed observations below.
+        for node in &seal.proof.nodes {
+            if !evaluated
+                .raw
+                .contains_key(&output_path(&self.plan.id, &node.node_id)?)
+            {
+                return Err(miette::Report::new(CompletionRefusal::MissingObservation));
+            }
+        }
         let completed = self
             .capture_evaluated_frontier(evaluated)?
             .into_completion()
