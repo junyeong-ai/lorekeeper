@@ -386,7 +386,8 @@ paths:
   reading that Work, so repeated edits defer those targets while their peers proceed.
   Replies to one Work share its fresh validation, which spends the allowance once, not once
   per reply. A bounded audit reply whose Work's inputs changed replans its subject through
-  the bounded route (`audit_wave_replans`), spending that subject's slot once.
+  the bounded route (`audit_wave_replans`), spending that subject's slot once; the route
+  takes that replan before its call budget can end the batch, so a checkpoint never drops it.
   Queue finalizers follow the same rule per target: a fresh guard that finds changed
   inputs before or after the host discards that step without relabeling its answer,
   allows one replan per target per run and then defers the target. A publication guard

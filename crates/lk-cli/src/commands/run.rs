@@ -8416,7 +8416,18 @@ mod native {
                     if jobs.is_empty() {
                         break;
                     }
-                    if !self.call_budget_available() {
+                    // A wave reply that found a subject's Work inputs changed replans that
+                    // subject, spending its allowance once, as its own step would. Its replan
+                    // makes no call, so it is taken before the budget can end the batch: a
+                    // checkpoint never drops the charge (or the deferral it owes).
+                    let wave_replan = loop {
+                        match self.audit_wave_replans.pop_first() {
+                            Some(subject) if jobs.contains_key(&subject) => break Some(subject),
+                            Some(_) => continue,
+                            None => break None,
+                        }
+                    };
+                    if wave_replan.is_none() && !self.call_budget_available() {
                         return false;
                     }
                     // A released probe's subject takes its turn alone, outside the round-robin
@@ -8430,15 +8441,6 @@ mod native {
                     };
                     // The turn is chosen without writing the cursor; it is reserved only once
                     // its calls are prepared and admitted.
-                    // A wave reply that found a subject's Work inputs changed replans that
-                    // subject, spending its allowance once, as its own step would.
-                    let wave_replan = loop {
-                        match self.audit_wave_replans.pop_first() {
-                            Some(subject) if jobs.contains_key(&subject) => break Some(subject),
-                            Some(_) => continue,
-                            None => break None,
-                        }
-                    };
                     let (selected, step) = if let Some(subject) = wave_replan {
                         (subject, WorkStep::Replan)
                     } else {
