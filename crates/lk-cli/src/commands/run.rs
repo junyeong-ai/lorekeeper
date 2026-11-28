@@ -8233,17 +8233,39 @@ mod native {
                                 jobs.remove(&selected);
                                 continue;
                             }
-                            let pending = jobs
+                            let mut pending = jobs
                                 .keys()
                                 .flat_map(|path| originals[path].iter().cloned())
                                 .collect::<Vec<_>>();
-                            let current = match self.current_audit_subjects(&pending) {
-                                Ok(current) => current,
-                                Err(error) => {
+                            // A subject a writer removed outside the workflow is deferred and
+                            // leaves the batch; its peers are resolved again without it.
+                            let current = loop {
+                                let error = match self.current_audit_subjects(&pending) {
+                                    Ok(current) => break current,
+                                    Err(error) => error,
+                                };
+                                let Some(lk_graph::GraphError::AuditSubjectRemoved(path)) =
+                                    error.downcast_ref::<lk_graph::GraphError>()
+                                else {
                                     self.failure("bounded audit fresh scope", error);
                                     return false;
-                                }
+                                };
+                                let Some(removed) = pending
+                                    .iter()
+                                    .find(|original| original.path == *path)
+                                    .cloned()
+                                else {
+                                    self.failure("bounded audit fresh scope", error);
+                                    return false;
+                                };
+                                self.defer_audit_inputs(&removed, error.to_string());
+                                deferred_subjects.insert(removed.path.clone());
+                                pending.retain(|original| original.path != removed.path);
                             };
+                            if pending.is_empty() {
+                                jobs.clear();
+                                continue;
+                            }
                             let mut current_originals = std::collections::BTreeMap::<
                                 String,
                                 Vec<lk_graph::audit::AuditCandidate>,
