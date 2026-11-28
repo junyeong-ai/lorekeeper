@@ -419,30 +419,32 @@ fn resolve_subject_path(
             }
             return Ok(path);
         }
+        let present = match std::fs::symlink_metadata(
+            lk_vault::page_path(root, Path::new(&path)).map_err(error)?,
+        ) {
+            Ok(_) => true,
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => false,
+            Err(failure) => return Err(error(failure)),
+        };
         if original.kind != AuditSubjectKind::Concept {
+            if !present {
+                return Err(GraphError::AuditSubjectRemoved(original.path.clone()));
+            }
             return Err(error(format!(
                 "audit document is no longer a current document: {path}"
             )));
         }
-        match std::fs::symlink_metadata(lk_vault::page_path(root, Path::new(&path)).map_err(error)?)
-        {
-            Ok(_) => {
-                return Err(error(format!(
-                    "audit concept is no longer a valid concept: {path}"
-                )));
-            }
-            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {}
-            Err(failure) => return Err(error(failure)),
+        if present {
+            return Err(error(format!(
+                "audit concept is no longer a valid concept: {path}"
+            )));
         }
-        path = merges
-            .and_then(|merges| merges.concepts.get(&path))
-            .ok_or_else(|| {
-                error(format!(
-                    "audit concept disappeared without this workflow's guarded merge: {path}"
-                ))
-            })?
-            .into
-            .clone();
+        // A concept this workflow merged continues as its successor; one a writer removed
+        // outside the workflow left the vault.
+        path = match merges.and_then(|merges| merges.concepts.get(&path)) {
+            Some(retirement) => retirement.into.clone(),
+            None => return Err(GraphError::AuditSubjectRemoved(original.path.clone())),
+        };
     }
 }
 
@@ -5559,8 +5561,8 @@ mod tests {
         assert_eq!(completion.completed[0].requested_path, path);
         assert_eq!(completion.completed[0].assessed_path, path);
         for replacement in [Some(body.replace("type: document", "type: concept")), None] {
-            match replacement {
-                Some(replacement) => write(root.path(), path, &replacement),
+            match &replacement {
+                Some(replacement) => write(root.path(), path, replacement),
                 None => std::fs::remove_file(root.path().join(path)).unwrap(),
             }
             let failure = verify_batch(
@@ -5573,8 +5575,43 @@ mod tests {
             )
             .err()
             .unwrap();
-            assert!(failure.to_string().contains("no longer a current document"));
+            match replacement {
+                Some(_) => assert!(failure.to_string().contains("no longer a current document")),
+                None => assert!(
+                    matches!(&failure, GraphError::AuditSubjectRemoved(removed) if removed == path),
+                    "{failure}"
+                ),
+            }
         }
+    }
+
+    #[test]
+    fn a_concept_removed_outside_the_workflow_resolves_as_a_removed_subject() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/concepts/a.md";
+        write(
+            root.path(),
+            path,
+            "---\ntype: concept\n---\nA scoped claim.\n",
+        );
+        let planned = plan_selected(
+            root.path(),
+            &dirs,
+            *ALL,
+            &scan(root.path()),
+            1,
+            &[path.into()],
+            u64::MAX,
+        )
+        .unwrap()
+        .candidates;
+        std::fs::remove_file(root.path().join(path)).unwrap();
+        let workflow = lk_core::execution::WorkflowId::from_bytes([5; 16]);
+        assert!(matches!(
+            resolve_batch_subjects(root.path(), &dirs, &scan(root.path()), &planned, &workflow),
+            Err(GraphError::AuditSubjectRemoved(removed)) if removed == path
+        ));
     }
 
     #[test]

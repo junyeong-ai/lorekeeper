@@ -29,9 +29,10 @@ pub enum GraphError {
     /// inputs.
     #[error("audit read dependency changed: {0}")]
     AuditInputChanged(String),
-    /// A screening reply's subject is no longer an audit subject of the vault: a writer
-    /// removed it (or retyped it) after its packet was issued.
-    #[error("audit subject left the vault after its screening packet: {0}")]
+    /// An audit subject a writer removed from the vault after it was planned: a screening
+    /// reply's subject (removed or retyped after its packet was issued) or a batch slot whose
+    /// page is gone. The path is the subject as it was planned.
+    #[error("audit subject left the vault after it was planned: {0}")]
     AuditSubjectRemoved(String),
     #[error(
         "audit screening requires {required} {boundary} bytes, above the complete configured bound {maximum}"

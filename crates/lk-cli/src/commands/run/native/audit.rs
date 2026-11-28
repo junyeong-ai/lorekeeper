@@ -23,7 +23,7 @@ impl Runner<'_> {
             workflow.id(),
             self.supervisor.read_control(),
         )
-        .map_err(|error| miette::miette!("{error}"))?;
+        .into_diagnostic()?;
         for (original, subject) in batch.iter().zip(&current) {
             self.audit_replans.inherit(&original.path, &subject.path);
         }
@@ -50,10 +50,20 @@ impl Runner<'_> {
                 .collect::<Vec<_>>();
             let current = match self.current_audit_subjects(&originals) {
                 Ok(current) => current,
-                Err(error) => {
-                    self.failure("audit fresh scope", error);
-                    return;
-                }
+                Err(error) => match error.downcast_ref::<lk_graph::GraphError>() {
+                    // A subject a writer removed since it was planned leaves the batch; its
+                    // peers are resolved again without it.
+                    Some(lk_graph::GraphError::AuditSubjectRemoved(path)) => {
+                        let path = path.clone();
+                        self.deferred("audit subject removed", &path);
+                        pending.retain(|index| batch[*index].path != path);
+                        continue;
+                    }
+                    _ => {
+                        self.failure("audit fresh scope", error);
+                        return;
+                    }
+                },
             };
             let mut readiness = match InputAvailability::load_controlled(
                 &self.root,
@@ -113,6 +123,11 @@ impl Runner<'_> {
                     self.supervisor.read_control(),
                 ) {
                     Ok(subject) => subject,
+                    Err(error) if is_semantic_context_changed(&error) => {
+                        self.defer_audit_inputs(&candidate, error.to_string());
+                        pending.remove(&index);
+                        continue;
+                    }
                     Err(error) => {
                         self.failure("audit input capture", error);
                         return;
@@ -178,26 +193,36 @@ impl Runner<'_> {
                 // Another writer ran; the subjects captured above may be stale.
                 continue;
             }
-            let required = subjects
-                .iter()
-                .map(|subject| {
-                    crate::commands::work::audit_needs_work_controlled(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        &subject.candidate,
-                        self.supervisor.read_control(),
-                    )
-                })
-                .collect::<miette::Result<Vec<_>>>();
-            drop(session);
-            let required = match required {
-                Ok(required) => required,
-                Err(error) => {
-                    self.failure("audit request planning", error);
-                    return;
+            let mut required = Vec::with_capacity(subjects.len());
+            let mut drifted = false;
+            for (subject, indexes) in subjects.iter().zip(&slots) {
+                match crate::commands::work::audit_needs_work_controlled(
+                    &session,
+                    &self.config,
+                    &self.config_revision,
+                    &subject.candidate,
+                    self.supervisor.read_control(),
+                ) {
+                    Ok(needed) => required.push(needed),
+                    // That subject is deferred; the rest are captured and measured again.
+                    Err(error) if is_semantic_context_changed(&error) => {
+                        self.defer_audit_inputs(&subject.candidate, error.to_string());
+                        for index in indexes {
+                            pending.remove(index);
+                        }
+                        drifted = true;
+                    }
+                    Err(error) => {
+                        drop(session);
+                        self.failure("audit request planning", error);
+                        return;
+                    }
                 }
-            };
+            }
+            drop(session);
+            if drifted {
+                continue;
+            }
             bounded |= required[0];
             if bounded {
                 let Some(jobs) = self

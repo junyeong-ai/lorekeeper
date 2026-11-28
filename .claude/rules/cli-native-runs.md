@@ -352,7 +352,10 @@ paths:
 - Whole-input audit judgments carry unique complete subject references. Rust supplies
   assessment metadata and records current inputs through the shared audit owner.
   Replan original slots through this workflow's guarded concept merges; documents
-  retain exact addresses. Isolate known blocked peers from publication readiness.
+  retain exact addresses. A slot whose subject a writer removed outside the workflow
+  (`GraphError::AuditSubjectRemoved`, the planned path) leaves the batch, and a subject
+  whose capture or request planning drifted is deferred like any late drift; their peers
+  are resolved and captured again. Isolate known blocked peers from publication readiness.
   A candidate edited while a whole assessment ran reopens its subject's screening: the
   judgment is stale like any changed input (spending the subject's replan), is never held
   on a failed invocation, and the subject is screened again before its next capture; a
