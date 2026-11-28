@@ -117,18 +117,14 @@ completion nonzero without pausing automation; invalid reviews and failed reads 
 fatal. Daily checks reviews before and after period publication.
 `lore status --json` reports the current UTC-day reservations, remaining configured
 allowance and paused operations without changing the ledger. Each pause names the
-failed stage that stopped its job and a bounded detail; the job's `--json` report keeps
+failed stage that stopped its job and, when one was recorded, a bounded detail; the job's `--json` report keeps
 the complete stage list. Read that cause before `--resume`. Unreadable accounting
 is unavailable, never a zero-use success. This snapshot does not verify OS registration
 or guarantee progress while the computer is off, asleep or out of agent allowance.
 After repairing the cause, explicit `lore run OPERATION --scheduled --resume --json`
 clears only its pause; it preserves usage, rejected proposals and exact semantic holds.
-An upgrade clears no pause an earlier version recorded, except a `host environment`
-pause (below): a stage name alone cannot tell a host failure from an integrity
-failure, so a host that failed under another stage (an unsupported CLI version at its
-first call, for example) stays paused under that stage. After upgrading, read each
-remaining pause's recorded stage and detail in `lore status`, repair its cause, then
-resume only that operation with `--resume`.
+An upgrade clears no pause: a stage name alone cannot tell a host failure from an
+integrity failure.
 Unchanged holds spend no calls. A failed invocation of one request holds only that
 exact input, without pausing the operation or earning semantic progress;
 [bounded work](../../lore-process/references/bounded-work.md#native-holds-and-retries)
@@ -222,8 +218,7 @@ scheduled run checks again, so restoring the executable or directory needs no
 `--resume`. A host that passes this check but cannot start at its first call (its
 `--version` fails, for example through a missing interpreter, or reports a version
 outside the supported range) is handled the same way in a scheduled run; an attended run
-reports the error and stops. When every profile the operation needs fails, the run spends no call. A
-`host environment` pause recorded by 0.163 is dropped when the ledger is next read.
+reports the error and stops. When every profile the operation needs fails, the run spends no call.
 
 ## Timing and notifications
 

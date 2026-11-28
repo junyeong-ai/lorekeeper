@@ -186,8 +186,10 @@ With `execution.automation`, queue processing gets its own schedule and every sc
 and per-run duration limit. It requires `process_schedule`, `max_run_seconds` and `max_calls_per_day` (`null` for no daily cap).
 
 When an agent call fails in a way that cannot be confined to one input, such as a signal exit or an unknown host error,
-scheduled runs of that operation pause. `lore status` names the stage that stopped it;
-fix that cause and continue with `lore run OPERATION --scheduled --resume`.
+scheduled runs of that operation pause. `lore status` names the stage that stopped it, and `lore status --json`
+adds its recorded detail when there is one; fix that cause and continue only that operation with
+`lore run OPERATION --scheduled --resume`. An upgrade clears no pause: a stage name alone cannot tell a host failure
+from an integrity failure.
 A call that keeps timing out or exits with an error on one input holds only that input:
 completed results stay saved, independent work continues, and the held input is not called again until you release it or it changes.
 Likewise, a concept page the backlink sweep cannot update and a `lore graph lint` violation name the pages to fix:
