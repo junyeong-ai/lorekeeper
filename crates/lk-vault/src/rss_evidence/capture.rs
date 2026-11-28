@@ -178,7 +178,7 @@ impl RssEvidenceCapture {
     fn origin(&mut self, address: &str, raw: Option<&str>) -> Result<(), VaultError> {
         let removed = |error: VaultError| match error {
             VaultError::Io(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
-                VaultError::PageRemoved(address.into())
+                VaultError::RssOriginChanged(address.into())
             }
             error => error,
         };
@@ -310,7 +310,7 @@ impl RssEvidenceCapture {
         citation: &Citation,
     ) -> Result<(), VaultError> {
         if !self.has_citation(concept, citation)? {
-            return Err(err("RSS concept evidence membership changed"));
+            return Err(VaultError::RssOriginChanged(citation.path.clone()));
         }
         Ok(())
     }
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_origin_is_a_removed_page_and_a_missing_payload_is_not() {
+    fn a_removed_or_unbound_origin_is_a_changed_origin_and_a_missing_payload_is_not() {
         let (root, _, citations, _) = fixture();
         let concept = Path::new("wiki/concepts/topic.md");
         let read = crate::ReadControl::default();
@@ -652,14 +652,21 @@ mod tests {
         std::fs::remove_file(&payload).unwrap();
         let lost = load();
         assert!(
-            lost.is_err() && !matches!(lost, Err(VaultError::PageRemoved(_))),
+            lost.is_err() && !matches!(lost, Err(VaultError::RssOriginChanged(_))),
             "a missing immutable payload is lost evidence: {lost:?}"
         );
         std::fs::write(&payload, bytes).unwrap();
-        std::fs::remove_file(root.path().join(&citations[0].path)).unwrap();
+        let origin = root.path().join(&citations[0].path);
+        let raw = std::fs::read_to_string(&origin).unwrap();
+        std::fs::write(&origin, write_bindings(&raw, &[]).unwrap()).unwrap();
         assert!(matches!(
             load(),
-            Err(VaultError::PageRemoved(path)) if path == citations[0].path
+            Err(VaultError::RssOriginChanged(path)) if path == citations[0].path
+        ));
+        std::fs::remove_file(&origin).unwrap();
+        assert!(matches!(
+            load(),
+            Err(VaultError::RssOriginChanged(path)) if path == citations[0].path
         ));
     }
 

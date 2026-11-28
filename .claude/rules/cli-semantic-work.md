@@ -20,7 +20,8 @@ paths:
   differently, or an editable page it expected that is gone. A page is expected when the
   capture pins its revision or when earlier evidence placed it (a selected extraction
   owner, the target its audit candidate describes); an RSS citation whose origin page was
-  removed is the same drift (`lk_vault::VaultError::PageRemoved`). A missing retained
+  removed, or edited to drop that event's binding, is the same drift
+  (`lk_vault::VaultError::RssOriginChanged`). A missing retained
   capture (an RSS payload or manifest, an archive, a retained input) is lost evidence, an
   unreadable present page is a fault, and a page nothing expected keeps its read error.
   Drift is a semantic context change (`is_semantic_context_changed`), never a fault.

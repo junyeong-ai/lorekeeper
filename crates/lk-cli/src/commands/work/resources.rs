@@ -619,9 +619,9 @@ impl<'a> Capture<'a> {
                 .load_citation(Path::new(subject), citation)
             {
                 Ok(input) => input,
-                Err(lk_vault::VaultError::PageRemoved(path)) => {
+                Err(lk_vault::VaultError::RssOriginChanged(path)) => {
                     return Err(miette::Report::new(SourceChanged(format!(
-                        "semantic source removed: {path}"
+                        "semantic source changed: {path} no longer carries the cited event"
                     ))));
                 }
                 Err(error) => return Err(error).into_diagnostic(),

@@ -3539,11 +3539,12 @@ fn guard_review_dependency_controlled(
     Ok(())
 }
 
-/// An RSS citation's capture failure as the audit reads it: an origin page a writer removed
-/// after the citation was derived is that input's drift; anything else stays a failure.
+/// An RSS citation's capture failure as the audit reads it: an origin page a writer removed,
+/// or edited to drop the binding, after the citation was derived is that input's drift;
+/// anything else stays a failure.
 fn rss_citation_failure(failure: lk_vault::VaultError, citation: &Citation) -> GraphError {
     match failure {
-        lk_vault::VaultError::PageRemoved(_) => {
+        lk_vault::VaultError::RssOriginChanged(_) => {
             GraphError::AuditInputChanged(citation.path.clone())
         }
         failure => GraphError::from(failure),
@@ -6647,18 +6648,27 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_rss_origin_is_input_drift_while_measuring_and_guarding() {
+    fn an_unbound_or_removed_rss_origin_is_input_drift_while_measuring_and_guarding() {
         let root = tempfile::tempdir().unwrap();
-        let (candidate, _) = rss_cited_concept(root.path());
+        let (candidate, source) = rss_cited_concept(root.path());
+        let drifted = |root: &Path| {
+            assert!(matches!(
+                measure_inputs(root, std::slice::from_ref(&candidate), u64::MAX),
+                Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
+            ));
+            assert!(matches!(
+                guard_candidate(&mut MutationPlan::default(), root, &candidate),
+                Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
+            ));
+        };
+        write(
+            root.path(),
+            "daily/report.md",
+            &lk_vault::write_bindings(&source, &[]).unwrap(),
+        );
+        drifted(root.path());
         std::fs::remove_file(root.path().join("daily/report.md")).unwrap();
-        assert!(matches!(
-            measure_inputs(root.path(), std::slice::from_ref(&candidate), u64::MAX),
-            Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
-        ));
-        assert!(matches!(
-            guard_candidate(&mut MutationPlan::default(), root.path(), &candidate),
-            Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
-        ));
+        drifted(root.path());
     }
 
     #[test]
