@@ -442,9 +442,11 @@ struct Capture<'a> {
     absent: BTreeSet<PathBuf>,
 }
 
-/// A page a capture expected at a revision read differently: a writer edited it after the
-/// inputs naming that revision were derived. The capture describes nothing current; callers
-/// that can wait treat it as drift, never as a fault of the vault.
+/// A page a capture expected at a revision read differently, or an editable page it expected
+/// no longer exists: a writer edited or removed it after the inputs naming that revision were
+/// derived. The capture describes nothing current; callers that can wait treat it as drift,
+/// never as a fault of the vault. A retained capture (an RSS payload, an archive, a retained
+/// input) that disappears, and any other failure to read a page, are not drift.
 #[derive(Debug)]
 pub(in crate::commands) struct SourceChanged(String);
 
@@ -504,13 +506,37 @@ impl<'a> Capture<'a> {
         authority: SemanticAuthority,
     ) -> miette::Result<String> {
         self.read.check().into_diagnostic()?;
+        let removal_is_drift = (expected_file.is_some() || expected_authored.is_some())
+            && matches!(
+                authority,
+                SemanticAuthority::Subject
+                    | SemanticAuthority::Context
+                    | SemanticAuthority::Page
+                    | SemanticAuthority::Review
+            );
+        let removed =
+            || miette::Report::new(SourceChanged(format!("semantic source removed: {path}")));
         let absolute = lk_vault::page_path(self.root, Path::new(path)).into_diagnostic()?;
-        let canonical = absolute.canonicalize().into_diagnostic()?;
+        let canonical = match absolute.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(error) if removal_is_drift && error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(removed());
+            }
+            Err(error) => return Err(error).into_diagnostic(),
+        };
         let relative = canonical
             .strip_prefix(self.root)
             .into_diagnostic()?
             .to_path_buf();
-        let raw = self.read.read_to_string(&absolute).into_diagnostic()?;
+        let raw = match self.read.read_to_string(&absolute) {
+            Ok(raw) => raw,
+            Err(lk_vault::VaultError::Io(error))
+                if removal_is_drift && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Err(removed());
+            }
+            Err(error) => return Err(error).into_diagnostic(),
+        };
         let exact = file_revision(&raw);
         if expected_file.is_some_and(|expected| expected != exact) {
             return Err(miette::Report::new(SourceChanged(format!(
@@ -2522,25 +2548,49 @@ mod tests {
     }
 
     #[test]
-    fn a_page_edited_after_its_audit_candidate_was_derived_is_typed_source_drift() {
+    fn a_page_edited_or_removed_after_its_audit_candidate_was_derived_is_typed_source_drift() {
         let (directory, config, _, candidates) = synthesis_batch_fixture();
         let root = directory.path().canonicalize().unwrap();
         let candidate = &candidates[0];
+        let capture = || {
+            audit_candidate_controlled(&root, &config, candidate, &lk_vault::ReadControl::default())
+        };
         let raw = std::fs::read_to_string(root.join(&candidate.path)).unwrap();
         write(
             &root,
             &candidate.path,
             &format!("{raw}\nAn authored addition.\n"),
         );
-        let Err(error) = audit_candidate_controlled(
-            &root,
-            &config,
-            candidate,
-            &lk_vault::ReadControl::default(),
-        ) else {
+        let Err(error) = capture() else {
             panic!("an edited subject captures nothing current");
         };
         assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
+        std::fs::write(root.join(&candidate.path), [0xff, 0xfe]).unwrap();
+        let Err(error) = capture() else {
+            panic!("an unreadable subject captures nothing");
+        };
+        assert!(
+            error.downcast_ref::<SourceChanged>().is_none(),
+            "a page that is present but unreadable is a fault, not drift: {error}"
+        );
+        std::fs::remove_file(root.join(&candidate.path)).unwrap();
+        let Err(error) = capture() else {
+            panic!("a removed subject captures nothing current");
+        };
+        assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
+        let read = lk_vault::ReadControl::default();
+        let Err(error) = Capture::new(&root, &read).page(
+            &candidate.path,
+            Some(&candidate.file_revision),
+            None,
+            SemanticAuthority::Archive,
+        ) else {
+            panic!("a removed archive captures nothing");
+        };
+        assert!(
+            error.downcast_ref::<SourceChanged>().is_none(),
+            "a retained capture that disappears is lost evidence, not drift: {error}"
+        );
     }
 
     #[cfg(unix)]
