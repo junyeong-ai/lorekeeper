@@ -2868,8 +2868,7 @@ fn select_candidates(
 }
 
 /// Whether `receipt` still answers its subject: it was recorded under the current currency
-/// key (`recorded_currency`), or, recorded before currency was kept, for these exact reads;
-/// and every scoped review it depends on is settled.
+/// key (`recorded_currency`), and every scoped review it depends on is settled.
 fn receipt_is_current(
     receipt: &AuditAssessment,
     recorded_currency: Option<&str>,
