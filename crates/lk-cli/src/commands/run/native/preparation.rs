@@ -109,7 +109,8 @@ impl Runner<'_> {
                     }
                     Err(error) => return self.failure("audit attempt verification", error),
                 };
-                self.audit_screening_deferred
+                self.audit_deferrals
+                    .deferred
                     .insert(path.into(), reason.clone());
                 self.deferred("audit screening input held", reason);
                 true
@@ -241,7 +242,8 @@ impl Runner<'_> {
                     Err(error) => return self.failure("discovery attempt verification", error),
                 };
                 if task.is_none() {
-                    self.audit_screening_deferred
+                    self.audit_deferrals
+                        .deferred
                         .insert(subject.path.clone(), reason.clone());
                 }
                 self.deferred(
@@ -411,7 +413,8 @@ impl Runner<'_> {
             };
             match binding.held(&self.root) {
                 Ok(Some(reason)) => {
-                    self.audit_screening_deferred
+                    self.audit_deferrals
+                        .deferred
                         .insert(subject.path.clone(), reason.clone());
                     self.deferred("audit discovery held", reason);
                 }
@@ -440,7 +443,8 @@ impl Runner<'_> {
         );
         if count == 0 {
             let reason = "one complete discovery subject or its minimum response exceeds the configured byte allowance".to_string();
-            self.audit_screening_deferred
+            self.audit_deferrals
+                .deferred
                 .insert(subjects[0].path.clone(), reason.clone());
             self.deferred(
                 "audit discovery capacity",

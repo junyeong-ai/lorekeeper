@@ -88,8 +88,8 @@ impl Runner<'_> {
             {
                 // A selected replan (`audit_plan`) that deferred or removed the subject left
                 // its discovery missing; the run already counted it, and it is not planned again.
-                if self.audit_screening_deferred.contains_key(&candidate.path)
-                    || self.audit_removed.contains(&candidate.path)
+                if self.audit_deferrals.deferred.contains_key(&candidate.path)
+                    || self.audit_deferrals.removed.contains(&candidate.path)
                 {
                     pending.remove(&index);
                     continue;

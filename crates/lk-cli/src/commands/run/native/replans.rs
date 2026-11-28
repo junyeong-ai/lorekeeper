@@ -1,5 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Audit subjects a scheduled invocation deferred, with why, and those it found removed from
+/// the vault. Each checkpoint starts a fresh `Runner`, so these live with the campaign, as the
+/// replan allowances do: no later batch of the invocation admits or plans them again.
+#[derive(Default)]
+pub(super) struct AuditDeferrals {
+    pub(super) deferred: BTreeMap<String, String>,
+    pub(super) removed: BTreeSet<String>,
+}
+
 #[derive(Default)]
 pub(super) struct AuditReplans {
     spent: BTreeSet<String>,

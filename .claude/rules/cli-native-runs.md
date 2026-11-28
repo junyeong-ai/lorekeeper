@@ -95,6 +95,8 @@ paths:
   keep their existing checks. Cached holds cannot cause zero-progress handoff loops.
   Original-subject replan allowances also survive checkpoints and proven merges;
   inherited budget groups never resolve subjects or authorize captured-input reuse.
+  Subjects the invocation deferred or found removed survive checkpoints as well
+  (`AuditDeferrals`): admission and every selected plan of a later batch keep them out.
 - A newly retained semantic audit action or other verified progress can advance the
   next knowledge batch while the overall result stays incomplete. Operational
   rejections and cached refusals earn no progress and cannot sustain continuation.

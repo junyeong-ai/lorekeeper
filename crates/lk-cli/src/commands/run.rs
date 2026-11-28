@@ -97,7 +97,7 @@ mod native {
     mod audit;
     mod preparation;
     mod replans;
-    use replans::{AuditReplans, FinalizationReplans};
+    use replans::{AuditDeferrals, AuditReplans, FinalizationReplans};
 
     use super::*;
     use super::{automation, scheduler};
@@ -1063,6 +1063,8 @@ mod native {
         automation: Option<&'a mut automation::Control>,
         audit_replans: &'a mut AuditReplans,
         finalization_replans: &'a mut FinalizationReplans,
+        /// Subjects this scheduled invocation deferred or found removed (`AuditDeferrals`).
+        audit_deferrals: &'a mut AuditDeferrals,
         lease: Option<workflow::WorkflowLease>,
         agents: std::collections::BTreeMap<String, PreparedAgent>,
         project_protection: Option<crate::commands::installation::Protection>,
@@ -1083,10 +1085,6 @@ mod native {
         host_probes: HostProbes,
         /// The drains whose first turn this run already decided (`take_recovery_turn`).
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
-        audit_screening_deferred: std::collections::BTreeMap<String, String>,
-        /// Selected audit subjects this run found removed from the vault; no later plan of
-        /// the run selects them.
-        audit_removed: std::collections::BTreeSet<String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
@@ -1715,7 +1713,8 @@ mod native {
         ) {
             let paths = paths.into_iter().collect::<Vec<_>>();
             for path in &paths {
-                self.audit_screening_deferred
+                self.audit_deferrals
+                    .deferred
                     .insert((*path).to_owned(), reason.to_owned());
             }
             self.deferred(
@@ -7188,7 +7187,7 @@ mod native {
             let (plan, readiness, checked_paths, deferred_paths) = loop {
                 let selection = paths
                     .iter()
-                    .filter(|path| !self.audit_removed.contains(*path))
+                    .filter(|path| !self.audit_deferrals.removed.contains(*path))
                     .cloned()
                     .collect::<Vec<_>>();
                 if selection.is_empty() {
@@ -7222,7 +7221,7 @@ mod native {
                     &mut |candidate| {
                         checked_paths.insert(candidate.path.clone());
                         let available = if let Some(reason) =
-                            self.audit_screening_deferred.get(&candidate.path)
+                            self.audit_deferrals.deferred.get(&candidate.path)
                         {
                             readiness.defer(candidate, vec![reason.clone()])
                         } else {
@@ -7240,11 +7239,11 @@ mod native {
                 match planned {
                     Ok(plan) => break (plan, readiness, checked_paths, deferred_paths),
                     Err(lk_graph::GraphError::AuditSubjectInputChanged { subject, input })
-                        if !self.audit_screening_deferred.contains_key(&subject) =>
+                        if !self.audit_deferrals.deferred.contains_key(&subject) =>
                     {
                         let reason = format!("its input {input} changed while it was planned");
                         self.deferred("audit inputs changed", format!("{subject}: {reason}"));
-                        self.audit_screening_deferred.insert(subject, reason);
+                        self.audit_deferrals.deferred.insert(subject, reason);
                     }
                     Err(lk_graph::GraphError::AuditSubjectRemoved(path))
                         if selection.contains(&path) =>
@@ -7281,7 +7280,7 @@ mod native {
             path: &str,
             planned: Option<&lk_graph::audit::AuditCandidate>,
         ) {
-            self.audit_removed.insert(path.to_owned());
+            self.audit_deferrals.removed.insert(path.to_owned());
             self.deferred("audit subject removed", path);
             match planned {
                 Some(candidate) => self.count_deferred_audit(DeferredAudit {
@@ -7358,7 +7357,8 @@ mod native {
             candidate: &lk_graph::audit::AuditCandidate,
             reason: String,
         ) {
-            self.audit_screening_deferred
+            self.audit_deferrals
+                .deferred
                 .insert(candidate.path.clone(), reason.clone());
             self.deferred(
                 "audit inputs changed",
@@ -7405,7 +7405,8 @@ mod native {
             candidate: &lk_graph::audit::AuditCandidate,
             reason: String,
         ) {
-            self.audit_screening_deferred
+            self.audit_deferrals
+                .deferred
                 .insert(candidate.path.clone(), reason.clone());
             self.deferred(
                 "audit candidate selection",
@@ -7929,7 +7930,20 @@ mod native {
                     if focus.as_ref().is_some_and(|focus| *focus != candidate.path) {
                         return Ok(false);
                     }
-                    let available = readiness.check(candidate)?;
+                    // A subject an earlier batch of this invocation deferred, or found removed
+                    // before a page reappeared at its path, waits for a later invocation.
+                    let available = if let Some(reason) =
+                        self.audit_deferrals.deferred.get(&candidate.path)
+                    {
+                        readiness.defer(candidate, vec![reason.clone()])
+                    } else if self.audit_deferrals.removed.contains(&candidate.path) {
+                        readiness.defer(
+                            candidate,
+                            vec!["the subject left the vault earlier in this invocation".into()],
+                        )
+                    } else {
+                        readiness.check(candidate)?
+                    };
                     if !available {
                         input_deferred_paths.insert(candidate.path.clone());
                     }
@@ -8560,6 +8574,7 @@ mod native {
         automation: Option<automation::Control>,
         audit_replans: AuditReplans,
         finalization_replans: FinalizationReplans,
+        audit_deferrals: AuditDeferrals,
     }
 
     pub(super) async fn run(
@@ -8648,6 +8663,7 @@ mod native {
             automation,
             audit_replans: AuditReplans::default(),
             finalization_replans: FinalizationReplans::default(),
+            audit_deferrals: AuditDeferrals::default(),
         };
         let mut outcomes = Vec::new();
         let mut stop_reason = CampaignStop::BatchLimit;
@@ -8721,6 +8737,7 @@ mod native {
             automation,
             audit_replans,
             finalization_replans,
+            audit_deferrals,
         } = campaign;
         let (config, config_revision) = configuration;
         let board = config
@@ -8747,6 +8764,7 @@ mod native {
             automation: automation.as_mut(),
             audit_replans,
             finalization_replans,
+            audit_deferrals,
             lease: None,
             agents: std::collections::BTreeMap::new(),
             project_protection: None,
@@ -8759,8 +8777,6 @@ mod native {
             hosts_invoked: crate::commands::work::host::InvokedHosts::default(),
             host_probes: HostProbes::default(),
             recovery_turns: std::collections::BTreeSet::new(),
-            audit_screening_deferred: std::collections::BTreeMap::new(),
-            audit_removed: std::collections::BTreeSet::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,
