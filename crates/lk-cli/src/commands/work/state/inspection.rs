@@ -285,7 +285,7 @@ impl Work {
         let rejected = evaluated
             .raw
             .get(&rejection::path(self)?)
-            .map(|raw| ObservationRejections::decode(raw, self, &evaluated.nodes))
+            .map(|pinned| ObservationRejections::decode(&pinned.raw, self, &evaluated.nodes))
             .transpose()?;
         let progress = evaluated.progress()?;
         let timeouts = super::attempts::InspectionAttempts::load(root, self, &evaluated.nodes)?;
@@ -460,7 +460,7 @@ impl Work {
             plan.require_absent(output);
         }
         for (path, raw) in evaluated.raw {
-            plan.require_unchanged(path, raw);
+            plan.require_pinned(path, raw);
         }
         plan.publish_expected(root, path, before, encoded(&actions)?)
             .map_err(fail)?;

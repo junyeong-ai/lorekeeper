@@ -563,7 +563,11 @@ fn retained_work_manifest_and_audit_root_guards_precede_retention_replay() {
         let (fixture, _, _, _) = retained_generations();
         fixture.write("work-reference.json", "Original retained manifest.");
         let mut guards = MutationPlan::default();
-        guards.require_unchanged("work-reference.json", "Original retained manifest.".into());
+        guards.require(
+            "work-reference.json",
+            "Original retained manifest.".into(),
+            lk_vault::Pin::Editable,
+        );
         let planned = super::retention::plan_prune(
             &fixture.root,
             &BTreeSet::new(),

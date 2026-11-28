@@ -200,7 +200,7 @@ pub(super) fn observe_scope(
     config_revision: &str,
     task: &lk_queue::QueueTask,
     snapshots: &[ProposalSnapshot],
-) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, String>)> {
+) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, lk_vault::Pinned>)> {
     observe_scope_controlled(
         root,
         config,
@@ -218,7 +218,7 @@ fn observe_scope_controlled(
     task: &lk_queue::QueueTask,
     snapshots: &[ProposalSnapshot],
     read: &lk_vault::ReadControl,
-) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, String>)> {
+) -> miette::Result<(RejectionScope, BTreeMap<PathBuf, lk_vault::Pinned>)> {
     read.check().into_diagnostic()?;
     let canonical_root = root.canonicalize().into_diagnostic()?;
     let root = canonical_root.as_path();
@@ -372,10 +372,14 @@ pub(super) fn record(
     decode(&path, &after)?;
     let mut plan = lk_vault::MutationPlan::default();
     for (path, raw) in pages {
-        plan.require_unchanged(path, raw);
+        plan.require_pinned(path, raw);
     }
     for snapshot in snapshots {
-        plan.require_unchanged(&snapshot.proposal.path, snapshot.raw.clone());
+        plan.require(
+            &snapshot.proposal.path,
+            snapshot.raw.clone(),
+            lk_vault::Pin::Editable,
+        );
     }
     plan.publish_expected(root, &path, before, after)
         .into_diagnostic()?;
@@ -430,14 +434,19 @@ pub(super) fn plan_prune(
         {
             identities.insert(history::reference(line)?);
         }
-        plan.require_unchanged(
+        plan.require(
             path.strip_prefix(&root).into_diagnostic()?.to_path_buf(),
             raw,
+            lk_vault::Pin::Editable,
         );
     }
     for snapshots in active.values() {
         for snapshot in snapshots {
-            plan.require_unchanged(&snapshot.proposal.path, snapshot.raw.clone());
+            plan.require(
+                &snapshot.proposal.path,
+                snapshot.raw.clone(),
+                lk_vault::Pin::Editable,
+            );
         }
     }
     let mut removed = recovery::plan_prune(&root, &identities, &active, &mut plan)?;
@@ -447,7 +456,7 @@ pub(super) fn plan_prune(
             plan.remove(path, raw);
             removed += 1;
         } else {
-            plan.require_unchanged(path, raw);
+            plan.require(path, raw, lk_vault::Pin::Editable);
         }
     }
     if removed != 0 {
@@ -474,9 +483,10 @@ fn prune(root: &Path, session: Option<&lk_vault::MutationSession>) -> miette::Re
                 .map_err(|error| miette::miette!("{error}"))?;
             retained.insert((task.task_id, task.cache_hash));
         }
-        plan.require_unchanged(
+        plan.require(
             path.strip_prefix(root).into_diagnostic()?.to_path_buf(),
             String::from_utf8(raw).into_diagnostic()?,
+            lk_vault::Pin::Editable,
         );
     }
     let removed = plan_prune(root, Some(&retained), &mut plan)?;

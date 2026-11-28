@@ -434,11 +434,11 @@ impl RssEvidenceCapture {
         self.originals.read.check()?;
         for (path, raw) in &self.dependencies {
             self.originals.read.check()?;
-            plan.require_unchanged(path, raw.as_str().to_owned());
+            plan.require(path, raw.as_str().to_owned(), crate::Pin::Editable);
         }
         for (path, raw) in &self.retained {
             self.originals.read.check()?;
-            plan.require_retained(path, raw.as_str().to_owned());
+            plan.require(path, raw.as_str().to_owned(), crate::Pin::Retained);
         }
         self.originals.read.check()?;
         Ok(())

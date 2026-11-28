@@ -204,7 +204,7 @@ impl Runner<'_> {
             if lk_core::concept::file_revision(&raw) != subject.revision {
                 return Ok(false);
             }
-            plan.require_unchanged(Path::new(&subject.path), raw);
+            plan.require(Path::new(&subject.path), raw, lk_vault::Pin::Editable);
             if let Some(task) = task {
                 crate::commands::queue::guard_current_task(session.root(), task, &mut plan)?;
             }

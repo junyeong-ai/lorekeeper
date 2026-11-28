@@ -463,8 +463,10 @@ fn review_callouts(
                 Err(error) => return Err(format!("{review}: {error}")),
             }
         }
-        let open = super::work::open_reviews(&rc.root, &address, "", &scoped, &reviews)
-            .map_err(|e| format!("{address}: {e}"))?;
+        let open = super::work::open_reviews(&rc.root, &address, "", &scoped, |path| {
+            reviews.get(path).map(String::as_str)
+        })
+        .map_err(|e| format!("{address}: {e}"))?;
         match super::work::published_state(&raw, &open) {
             super::work::PublishedState::Current => {}
             super::work::PublishedState::Unrecorded => callouts.unrecorded.push(path),

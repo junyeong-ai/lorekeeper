@@ -329,7 +329,7 @@ impl Work {
         };
         let node_id = node.id.clone();
         let target = path(self)?;
-        let before = evaluated.raw.get(&target).cloned();
+        let before = evaluated.raw.get(&target).map(|pinned| pinned.raw.clone());
         let mut records = match &before {
             Some(raw) => ObservationRejections::decode(raw, self, &evaluated.nodes)?,
             None => ObservationRejections {
@@ -379,7 +379,7 @@ impl Work {
         }
         for (path, raw) in evaluated.raw {
             if path != target {
-                mutation.require_unchanged(path, raw);
+                mutation.require_pinned(path, raw);
             }
         }
         mutation

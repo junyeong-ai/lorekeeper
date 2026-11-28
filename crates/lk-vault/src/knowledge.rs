@@ -589,7 +589,7 @@ pub fn plan_curation(
                             &citation.revision,
                         ));
                         if archive_paths.insert(retained.clone()) {
-                            plan.require_unchanged(retained, payload);
+                            plan.require(retained, payload, crate::Pin::Retained);
                         }
                         continue;
                     }
@@ -644,10 +644,11 @@ pub fn plan_curation(
             let archive = crate::review::evidence_archive_path(&citation.revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &citation.revision)? {
-                    Some(page) => plan.require_unchanged(
+                    Some(page) => plan.require(
                         archive,
                         page.original
                             .ok_or_else(|| invalid("archive must retain its bytes"))?,
+                        crate::Pin::Retained,
                     ),
                     None => plan.create(archive, raw),
                 }
@@ -666,22 +667,23 @@ pub fn plan_curation(
         }
     }
     for (owner, raw) in read_owners {
-        plan.require_unchanged(owner, raw);
+        plan.require(owner, raw, crate::Pin::Editable);
     }
     for (path, (before, after)) in &staged {
         if let Some(before) = before {
             if before == after {
-                plan.require_unchanged(path, before.clone());
+                plan.require(path, before.clone(), crate::Pin::Editable);
                 continue;
             }
             let revision = source_revision(&crate::parse_page(before).map_err(invalid)?);
             let archive = crate::review::evidence_archive_path(&revision)?;
             if archive_paths.insert(archive.clone()) {
                 match crate::load_archived_evidence(root, &revision)? {
-                    Some(page) => plan.require_unchanged(
+                    Some(page) => plan.require(
                         archive,
                         page.original
                             .ok_or_else(|| invalid("archive must retain its bytes"))?,
+                        crate::Pin::Retained,
                     ),
                     None => plan.create(archive, before.clone()),
                 }

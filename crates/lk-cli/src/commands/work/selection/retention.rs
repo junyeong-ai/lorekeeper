@@ -208,7 +208,7 @@ pub(in crate::commands::work) fn plan_prune(
     let mut mutation = MutationPlan::default();
     for (path, raw) in snapshots {
         if !changed_queue_files.contains(&path) {
-            mutation.require_unchanged(path, raw);
+            mutation.require(path, raw, lk_vault::Pin::Editable);
         }
     }
     let mut removed = 0;

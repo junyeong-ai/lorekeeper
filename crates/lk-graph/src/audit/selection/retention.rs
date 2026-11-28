@@ -178,7 +178,7 @@ pub(super) fn plan_prune(
         }
     }
     match before {
-        Some(raw) => guards.require_unchanged(super::super::STATE, raw),
+        Some(raw) => guards.require(super::super::STATE, raw, lk_vault::Pin::Editable),
         None => guards.require_absent(super::super::STATE),
     }
     retained.extend(
@@ -191,7 +191,11 @@ pub(super) fn plan_prune(
     let mut retained_packets = BTreeSet::new();
     for reference in &retained {
         let state = &inventory.states[reference];
-        guards.require_unchanged(&state.path, state.raw.as_ref().clone());
+        guards.require(
+            &state.path,
+            state.raw.as_ref().clone(),
+            lk_vault::Pin::Retained,
+        );
         for row in &state.value.rows {
             if let Some(reference) = &row.decision {
                 retained_packets.insert((
@@ -210,7 +214,11 @@ pub(super) fn plan_prune(
     );
     for reference in &retained_packets {
         let packet = &inventory.packets[reference];
-        guards.require_unchanged(&packet.path, packet.raw.as_ref().clone());
+        guards.require(
+            &packet.path,
+            packet.raw.as_ref().clone(),
+            lk_vault::Pin::Retained,
+        );
     }
     let mut report = PruneReport::default();
     for (reference, state) in &inventory.states {

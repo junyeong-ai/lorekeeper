@@ -65,7 +65,7 @@ impl CapturedClassification {
         let mut plan = lk_vault::MutationPlan::default();
         for (path, raw) in self.pages {
             match raw {
-                Some(raw) => plan.require_unchanged(path, raw),
+                Some(raw) => plan.require(path, raw, lk_vault::Pin::Editable),
                 None => plan.require_absent(path),
             }
         }

@@ -97,7 +97,7 @@ fn prepare(
     let mut plan = MutationPlan::default();
     plan.edit(origin.to_path_buf(), before, after);
     if origin != to {
-        plan.require_unchanged(to.to_path_buf(), target);
+        plan.require(to.to_path_buf(), target, lk_vault::Pin::Editable);
     }
     plan.require_absent(from.to_path_buf());
     Ok((plan, report))

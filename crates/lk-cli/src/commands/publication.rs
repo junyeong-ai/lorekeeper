@@ -156,7 +156,11 @@ impl<'a> Publication<'a> {
                 if output.expected_original.as_ref().and_then(Option::as_ref)
                     == Some(&output.content)
                 {
-                    plan.require_unchanged(output.path.as_ref(), output.content.clone());
+                    plan.require(
+                        output.path.as_ref(),
+                        output.content.clone(),
+                        lk_vault::Pin::Editable,
+                    );
                 }
             }
         }

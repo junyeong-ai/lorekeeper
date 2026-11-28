@@ -180,7 +180,7 @@ pub fn apply_in_session(
 
         if has_association && content == updated && !renamed_paths.contains_key(page.path.as_path())
         {
-            plan.require_unchanged(rel_path, content);
+            plan.require(rel_path, content, lk_vault::Pin::Editable);
         } else {
             plan.edit(rel_path, content, updated);
         }

@@ -188,7 +188,7 @@ pub(super) fn request_selected(
         // This existing publisher archives the exact inspected evidence before its
         // journaled edit, checks archive/current byte identity and refuses stale writes.
         let mut plan = lk_vault::MutationPlan::default();
-        plan.require_unchanged(concept, target_raw);
+        plan.require(concept, target_raw, lk_vault::Pin::Editable);
         lk_vault::guard_rss_evidence(&mut plan, &config.root, origin, &before)
             .map_err(|e| e.to_string())?;
         lk_vault::publish_document_expected_with_plan(

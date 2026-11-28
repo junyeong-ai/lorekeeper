@@ -1152,7 +1152,7 @@ fn plan_concept_backlinks_inner(
     }
     for (path, (before, after)) in targets {
         if before == after {
-            plan.require_unchanged(path, before);
+            plan.require(path, before, lk_vault::Pin::Editable);
         } else {
             plan.edit(path, before, after);
         }
@@ -1192,7 +1192,7 @@ fn guard_backlink_sources(
             lk_vault::guard_rss_evidence(plan, root, &source.page.path, &raw)
                 .map_err(|error| GraphError::Io(error.to_string()))?;
         }
-        plan.require_unchanged(owner, raw);
+        plan.require(owner, raw, lk_vault::Pin::Editable);
     }
     Ok(())
 }

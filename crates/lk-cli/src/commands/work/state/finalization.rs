@@ -202,19 +202,19 @@ impl Work {
             );
             let after = encoded(&history)?;
             if captured.history.as_deref() == Some(after.as_str()) {
-                plan.require_unchanged(history_path, after);
+                plan.require(history_path, after, lk_vault::Pin::Editable);
             } else {
                 plan.publish_expected(root, history_path, captured.history, after)
                     .map_err(fail)?;
             }
         } else {
             match captured.history {
-                Some(raw) => plan.require_unchanged(history_path, raw),
+                Some(raw) => plan.require(history_path, raw, lk_vault::Pin::Editable),
                 None => plan.require_absent(history_path),
             }
         }
         if captured.active.as_deref() == Some(raw.as_str()) {
-            plan.require_unchanged(path, raw);
+            plan.require(path, raw, lk_vault::Pin::Editable);
         } else {
             plan.publish_expected(root, path, captured.active, raw)
                 .map_err(fail)?;

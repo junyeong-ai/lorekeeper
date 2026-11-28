@@ -266,7 +266,7 @@ fn plan_record(
     if lk_core::concept::file_revision(&target) != *target_revision {
         return Err(miette::miette!("discovery recovery target changed"));
     }
-    plan.require_unchanged(target_path, target);
+    plan.require(target_path, target, lk_vault::Pin::Editable);
     let old_queries = binding.prepared.result_binding()?.discovery;
     let recipe_path = super::path(&task.task_id);
     let recipe_before = super::super::state::read_optional(root, &recipe_path)?;
@@ -310,8 +310,8 @@ fn plan_record(
     }
     for (path, content) in &binding.prepared.pages {
         if *path != recipe_path {
-            plan.require_unchanged(path, content.clone());
-        } else if recipe_before.as_ref() != Some(content) {
+            plan.require_pinned(path, content.clone());
+        } else if recipe_before.as_ref() != Some(&content.raw) {
             return Err(miette::miette!("captured discovery recipe changed"));
         }
     }
@@ -350,7 +350,7 @@ fn plan_record(
         )
         .into_diagnostic()?;
     } else if let Some(before) = recipe_before {
-        plan.require_unchanged(recipe_path, before);
+        plan.require(recipe_path, before, lk_vault::Pin::Editable);
     } else {
         plan.require_absent(recipe_path);
     }

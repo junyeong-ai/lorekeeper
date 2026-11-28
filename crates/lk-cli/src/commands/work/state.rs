@@ -6,7 +6,7 @@ use lk_core::semantic::{
     SemanticInputs, SemanticPartInput, SemanticPlan, SemanticRange, SemanticResource,
     SemanticResourceGuard,
 };
-use lk_vault::{MutationPlan, MutationSession};
+use lk_vault::{MutationPlan, MutationSession, Pin, Pinned};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -329,7 +329,9 @@ struct Evaluation<'a> {
     resources: &'a [SemanticResourceGuard],
     nodes: Vec<Node>,
     current: BTreeMap<String, StoredOutput>,
-    raw: BTreeMap<PathBuf, String>,
+    /// Every Work file the evaluation read, by what it pins: the manifest, outputs and
+    /// refinement sidecars are retained, the observation-rejection holds are editable.
+    raw: BTreeMap<PathBuf, Pinned>,
     ready: Vec<String>,
     refinements: Option<refinement::Refinements>,
 }
@@ -339,7 +341,7 @@ pub(super) struct CompletedWork {
     root_node: String,
     authority: CompletionAuthority,
     result: Value,
-    guards: BTreeMap<PathBuf, String>,
+    guards: BTreeMap<PathBuf, Pinned>,
     absent: BTreeSet<PathBuf>,
     nodes: Vec<Node>,
 }
@@ -441,7 +443,7 @@ impl CompletedWork {
 
     pub fn plan_read_guards(self, mutation: &mut MutationPlan) {
         for (path, raw) in self.guards {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         for path in self.absent {
             mutation.require_absent(path);
@@ -508,7 +510,7 @@ impl CompletedWork {
                     "published completion authority and result cannot be replaced",
                 ));
             }
-            mutation.require_unchanged(publication_path, raw);
+            mutation.require(publication_path, raw, lk_vault::Pin::Retained);
         } else {
             mutation.require_absent(publication_path);
         }
@@ -553,10 +555,14 @@ impl CompletedWork {
             mutation.require_absent(path);
         }
         for (path, raw) in self.guards {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         if unchanged {
-            mutation.require_unchanged(path, before.expect("unchanged seal was captured"));
+            mutation.require(
+                path,
+                before.expect("unchanged seal was captured"),
+                lk_vault::Pin::Editable,
+            );
         } else {
             mutation
                 .publish_expected(root, path, before, after)
@@ -1477,11 +1483,12 @@ impl Work {
             refinements.validate_inputs(self, &inputs, &nodes)?;
         }
         let mut current: BTreeMap<String, StoredOutput> = BTreeMap::new();
-        let mut raw = BTreeMap::from([manifest]);
+        let (manifest_path, manifest_raw) = manifest;
+        let mut raw = BTreeMap::from([(manifest_path, Pinned::new(manifest_raw, Pin::Retained))]);
         raw.extend(captured.files);
         if let Some((path, text, _)) = inspection::ObservationRejections::load(root, self, &nodes)?
         {
-            raw.insert(path, text);
+            raw.insert(path, Pinned::new(text, Pin::Editable));
         }
         let mut ready = Vec::new();
         for node in &nodes {
@@ -1503,7 +1510,7 @@ impl Work {
                     ));
                 }
                 stored.validate_bounds(self)?;
-                raw.insert(path, stored_raw.clone());
+                raw.insert(path, Pinned::new(stored_raw.clone(), Pin::Retained));
             }
             let children = match &node.kind {
                 NodeKind::Inspect { .. } => Some(Vec::new()),
@@ -1647,7 +1654,7 @@ impl Work {
         &self,
         root: &Path,
         resources: &[SemanticResource],
-    ) -> miette::Result<(Value, BTreeMap<PathBuf, String>)> {
+    ) -> miette::Result<(Value, BTreeMap<PathBuf, Pinned>)> {
         let completed = self.capture_completion(root, resources)?;
         Ok((completed.result, completed.guards))
     }
@@ -1656,7 +1663,7 @@ impl Work {
         &self,
         root: &Path,
         resources: &[SemanticResource],
-    ) -> miette::Result<Option<(Value, BTreeMap<PathBuf, String>)>> {
+    ) -> miette::Result<Option<(Value, BTreeMap<PathBuf, Pinned>)>> {
         let evaluated = self.evaluate(root, resources)?;
         if !evaluated.progress()?.complete {
             return Ok(None);
@@ -1805,7 +1812,7 @@ impl Work {
         stored.validate_bounds(self)?;
         stored.validate_inheritance(&children)?;
         let path = output_path(&self.plan.id, &node.id)?;
-        let before = evaluated.raw.get(&path).cloned();
+        let before = evaluated.raw.get(&path).map(|pinned| pinned.raw.clone());
         let mut mutation = MutationPlan::default();
         let closed = self.guard_closed_observations(root, &evaluated, &mut mutation)?;
         let unchanged = evaluated.current.get(&node.id).is_some_and(|prior| {
@@ -1832,18 +1839,19 @@ impl Work {
         // would reject our own replacement when an interrupted journal resumes.
         for (dependency, raw) in evaluated.raw {
             if dependency != path {
-                mutation.require_unchanged(dependency, raw);
+                mutation.require_pinned(dependency, raw);
             }
         }
         for (dependency, raw) in additional_guards {
             if dependency != path {
-                mutation.require_unchanged(dependency, raw);
+                mutation.require(dependency, raw, lk_vault::Pin::Retained);
             }
         }
         if unchanged {
-            mutation.require_unchanged(
+            mutation.require(
                 path,
                 before.ok_or_else(|| fail("recorded observation snapshot is missing"))?,
+                lk_vault::Pin::Editable,
             );
         } else {
             mutation
@@ -1887,9 +1895,9 @@ impl Work {
                     CompletionAuthority::Frontier(_) => "seal.json",
                 };
                 mutation.require_absent(work_path(&self.plan.id, other)?);
-                mutation.require_unchanged(seal.path, seal.raw);
-                mutation.require_unchanged(final_path, final_raw);
-                mutation.require_unchanged(publication_path, raw);
+                mutation.require(seal.path, seal.raw, lk_vault::Pin::Retained);
+                mutation.require(final_path, final_raw, lk_vault::Pin::Retained);
+                mutation.require(publication_path, raw, lk_vault::Pin::Retained);
                 mutation.require_absent(consumption_path);
                 Ok(true)
             }
@@ -1902,7 +1910,7 @@ impl Work {
                 }
                 mutation.require_absent(frontier);
                 mutation.require_absent(publication_path);
-                mutation.require_unchanged(consumption_path, raw);
+                mutation.require(consumption_path, raw, lk_vault::Pin::Retained);
                 Ok(true)
             }
             (None, None) => {
@@ -2053,7 +2061,7 @@ impl Work {
             mutation.require_absent(refinement::path(prior)?);
         }
         for (path, raw) in prior_captured.files {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         Ok(mutation)
     }
@@ -2114,9 +2122,9 @@ impl Work {
             return Err(miette::Report::new(CompletionRefusal::ChangedResult));
         }
         for (path, raw) in evaluated.raw {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
-        mutation.require_unchanged(seal_path, raw);
+        mutation.require(seal_path, raw, lk_vault::Pin::Retained);
         mutation.require_absent(work_path(&self.plan.id, "frontier-seal.json")?);
         Ok(())
     }
@@ -2136,7 +2144,7 @@ impl Work {
                     "work publication receipt differs from the sealed result",
                 ));
             }
-            mutation.require_unchanged(path, raw);
+            mutation.require(path, raw, lk_vault::Pin::Retained);
         } else {
             let receipt = Publication {
                 work_id: self.plan.id.clone(),
@@ -2213,7 +2221,7 @@ impl Work {
             consumed_at: jiff::Timestamp::now(),
         };
         for (path, raw) in evaluated.raw {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         if let Some(raw) = read_optional(root, &path)? {
             let prior: Consumption = serde_json::from_str(&raw).map_err(fail)?;
@@ -2230,7 +2238,7 @@ impl Work {
                     "source observation consumption differs from the extraction",
                 ));
             }
-            mutation.require_unchanged(path, raw);
+            mutation.require(path, raw, lk_vault::Pin::Retained);
         } else {
             mutation
                 .publish_expected(root, path, None, encoded(&receipt)?)
@@ -2997,18 +3005,24 @@ mod tests {
 
         let guarded = || {
             let mut mutation = MutationPlan::default();
-            for (path, raw) in &guards {
-                mutation.require_unchanged(path, raw.clone());
+            for (path, pinned) in &guards {
+                mutation.require_pinned(path, pinned.clone());
             }
             mutation
         };
         session.apply(guarded()).unwrap();
         for path in [&node, &manifest] {
-            let raw = guards.get(path).unwrap();
+            let raw = &guards.get(path).unwrap().raw;
             std::fs::write(root.path().join(path), format!("{raw}\n")).unwrap();
             let mut mutation = guarded();
             mutation.create("guarded-publication.md", "must not publish".into());
-            assert!(session.apply(mutation).is_err());
+            assert!(
+                matches!(
+                    session.apply(mutation),
+                    Err(lk_vault::VaultError::RetainedCaptureChanged(changed)) if changed == *path
+                ),
+                "a Work's manifest and observations are retained captures"
+            );
             assert!(!root.path().join("guarded-publication.md").exists());
             assert_eq!(
                 std::fs::read_to_string(root.path().join(path)).unwrap(),

@@ -134,7 +134,7 @@ fn prepare_with_classifier(
             summary.kept_unparseable += read.unparseable;
             summary.kept_blocked += read.tasks.len();
             if let Ok(raw) = String::from_utf8(raw) {
-                plan.require_unchanged(relative, raw);
+                plan.require(relative, raw, lk_vault::Pin::Editable);
             }
             continue;
         }
@@ -272,13 +272,13 @@ fn prepare_with_classifier(
             changed.insert(relative.clone());
             plan.edit(relative, raw, remaining);
         } else {
-            plan.require_unchanged(relative, raw);
+            plan.require(relative, raw, lk_vault::Pin::Editable);
         }
     }
     let mut guarded = MutationPlan::default();
     for (path, raw) in pages {
         match raw {
-            Some(raw) => guarded.require_unchanged(path, raw),
+            Some(raw) => guarded.require(path, raw, lk_vault::Pin::Editable),
             None => guarded.require_absent(path),
         }
     }

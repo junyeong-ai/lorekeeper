@@ -483,7 +483,7 @@ fn guard_prepared(
 
 pub(super) struct QueuePublicationGuard {
     work: lk_vault::MutationPlan,
-    pages: std::collections::BTreeMap<PathBuf, String>,
+    pages: std::collections::BTreeMap<PathBuf, lk_vault::Pinned>,
     owned_pages: std::collections::BTreeSet<PathBuf>,
     bounded: bool,
     /// The review callouts a synthesis publishes beneath its body, and their record.
@@ -498,7 +498,7 @@ impl QueuePublicationGuard {
     ) -> miette::Result<bool> {
         for (path, captured) in self.pages {
             if let Some(original) = owned.get(&path) {
-                if original != &captured {
+                if original != &captured.raw {
                     return Err(publication_rejection(
                         RejectionKind::EvidenceScopeChanged,
                         format!(
@@ -508,7 +508,7 @@ impl QueuePublicationGuard {
                     ));
                 }
             } else {
-                mutation.require_unchanged(path, captured);
+                mutation.require_pinned(path, captured);
             }
         }
         mutation.extend(self.work);
@@ -532,7 +532,7 @@ pub(super) fn guard_queue(
         .pages
         .iter()
         .filter(|(path, _)| guard.owned_pages.contains(*path))
-        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .map(|(path, page)| (path.clone(), page.raw.clone()))
         .collect();
     guard.append_to(mutation, &owned)?;
     Ok(reviews)
@@ -567,7 +567,7 @@ fn guard_queue_controlled(
         .pages
         .iter()
         .filter(|(path, _)| guard.owned_pages.contains(*path))
-        .map(|(path, raw)| (path.clone(), raw.clone()))
+        .map(|(path, page)| (path.clone(), page.raw.clone()))
         .collect();
     guard.append_to(mutation, &owned)
 }
@@ -871,7 +871,7 @@ pub(super) fn plan_section_recovery(
         for name in ["final.json", "seal.json", "frontier-seal.json"] {
             let path = directory.join(name);
             if let Some(raw) = state::read_optional(root, &path)? {
-                mutation.require_unchanged(&path, raw.clone());
+                mutation.require(&path, raw.clone(), lk_vault::Pin::Retained);
                 completions.insert(path, raw);
             }
         }
@@ -1702,7 +1702,7 @@ fn completed_source_observation(
     config: &lk_core::config::Config,
     config_revision: &str,
     source: &Prepared,
-) -> miette::Result<Option<(Value, std::collections::BTreeMap<PathBuf, String>)>> {
+) -> miette::Result<Option<(Value, std::collections::BTreeMap<PathBuf, lk_vault::Pinned>)>> {
     let mut source = source.clone();
     let work = expected(root, &mut source, config, config_revision)?;
     if !work.is_planned(root)? {
@@ -1842,7 +1842,7 @@ struct SealedEvidence {
     prepared: Prepared,
     roster: selection::SealedRoster,
     /// The source-observation Work files read to rebuild an observed source.
-    observation_guards: std::collections::BTreeMap<PathBuf, String>,
+    observation_guards: std::collections::BTreeMap<PathBuf, lk_vault::Pinned>,
 }
 
 /// Rebuild a staged result's evidence from its sealed roster. The roster's rows are
@@ -1989,8 +1989,12 @@ pub(super) fn record_audit_controlled(
         },
         |_, mutation| {
             prepared.guard_pages(mutation);
-            mutation.require_unchanged(final_path.clone(), final_raw.clone());
-            mutation.require_unchanged(path.clone(), raw.clone());
+            mutation.require(
+                final_path.clone(),
+                final_raw.clone(),
+                lk_vault::Pin::Retained,
+            );
+            mutation.require(path.clone(), raw.clone(), lk_vault::Pin::Editable);
             Ok(())
         },
         read,
@@ -3586,6 +3590,7 @@ fn refinement_events(
     let raw = prepared
         .pages
         .get(owner)
+        .map(|page| &page.raw)
         .ok_or_else(|| miette::miette!("refinement target is absent from the captured scope"))?;
     let anchor = task
         .target
@@ -4375,7 +4380,7 @@ pub(super) fn restage_finished(
         &mut mutation,
     )?;
     prepared.guard_pages(&mut mutation);
-    mutation.require_unchanged(final_path, final_raw);
+    mutation.require(final_path, final_raw, lk_vault::Pin::Retained);
     let path = match &prepared.subject {
         Subject::Queue { task_id, .. } => {
             queue_result_path(super::queue::current_task(root, task_id)?.kind, &result)?
@@ -5213,7 +5218,7 @@ fn plan_finish_completion(
             _ => raw.clone(),
         };
         if before.as_ref() == Some(&after) {
-            mutation.require_unchanged(path, after);
+            mutation.require(path, after, lk_vault::Pin::Editable);
         } else {
             mutation
                 .publish_expected(session.root(), path, before, after)

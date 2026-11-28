@@ -362,9 +362,10 @@ pub fn guard_rss_original(
         if read_bytes(&path(root, &relative, false)?, MAX_RSS_EVENT_BYTES)? != *expected {
             return Err(err("RSS original changed before page publication"));
         }
-        plan.require_unchanged(
+        plan.require(
             PathBuf::from(relative),
             String::from_utf8(expected.clone()).map_err(err)?,
+            crate::Pin::Retained,
         );
     }
     if read_bytes(
@@ -374,9 +375,10 @@ pub fn guard_rss_original(
     {
         return Err(err("RSS manifest changed before page publication"));
     }
-    plan.require_unchanged(
+    plan.require(
         PathBuf::from(reference.manifest_path),
         String::from_utf8(manifest).map_err(err)?,
+        crate::Pin::Retained,
     );
     Ok(())
 }

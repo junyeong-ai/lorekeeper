@@ -311,7 +311,7 @@ fn publish_artifact<T: Serialize>(
             if before != raw {
                 return Err(error("immutable audit selection artifact differs"));
             }
-            mutation.require_unchanged(path, before);
+            mutation.require(path, before, lk_vault::Pin::Editable);
         }
         Ok(_) => {
             return Err(error(
@@ -647,7 +647,7 @@ impl CardCapture {
         read: &ReadControl,
     ) -> Result<(), GraphError> {
         for (path, raw) in &self.pages {
-            mutation.require_unchanged(path, raw.as_ref().clone());
+            mutation.require(path, raw.as_ref().clone(), lk_vault::Pin::Editable);
         }
         for review in &self.reviews {
             super::guard_review_dependency_controlled(mutation, root, review, read)?;
@@ -1074,7 +1074,7 @@ fn capture_packet_status(
             captured.guard(root, mutation, read)?;
             super::guard_candidate_controlled(mutation, root, candidate, read)?;
             for (path, raw) in &progress.guards {
-                mutation.require_unchanged(path, raw.as_ref().clone());
+                mutation.require(path, raw.as_ref().clone(), lk_vault::Pin::Editable);
             }
         }
         Ok(PacketStatus::Unrecorded)
@@ -1099,7 +1099,7 @@ pub fn guard_ready(
         .and_then(|discovery| discovery.selection.as_ref())
         .expect("screened discovery");
     for (path, raw) in &progress.guards {
-        mutation.require_unchanged(path, raw.as_ref().clone());
+        mutation.require(path, raw.as_ref().clone(), lk_vault::Pin::Editable);
     }
     Ok(())
 }

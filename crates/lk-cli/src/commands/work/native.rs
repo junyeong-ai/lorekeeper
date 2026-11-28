@@ -253,6 +253,7 @@ pub(super) fn selected_task(
     let target = prepared
         .pages
         .get(target_owner)
+        .map(|page| &page.raw)
         .ok_or_else(|| miette::miette!("selected target owner is absent from captured pages"))?;
     selected_task_value(
         config,

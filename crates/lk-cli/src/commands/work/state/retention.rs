@@ -199,11 +199,9 @@ fn capture_retention(root: &Path, id: &str, cutoff: i64) -> miette::Result<Reten
         }
         let raw = read_optional(root, &path)?
             .ok_or_else(|| fail("work artifact disappeared during retention capture"))?;
-        if (path == super::refinement::path(&work)? && captured.files.get(&path) != Some(&raw))
-            || captured
-                .files
-                .get(&path)
-                .is_some_and(|expected| expected != &raw)
+        let captured_raw = captured.files.get(&path).map(|pinned| &pinned.raw);
+        if (path == super::refinement::path(&work)? && captured_raw != Some(&raw))
+            || captured_raw.is_some_and(|expected| expected != &raw)
         {
             return Err(fail("refinement changed during retention capture"));
         }
@@ -431,7 +429,7 @@ pub(crate) fn prune_published(
     }
     let mut mutation = MutationPlan::default();
     for (path, raw) in &queue.snapshots {
-        mutation.require_unchanged(path, raw.clone());
+        mutation.require(path, raw.clone(), lk_vault::Pin::Editable);
     }
     for work in captures.values() {
         if retained.contains(&work.id) {
@@ -442,9 +440,11 @@ pub(crate) fn prune_published(
             for (path, digest) in &work.revisions {
                 let raw = read_captured(root, path, digest)?;
                 if path.file_name().is_some_and(|name| name == "plan.json") {
-                    report.selection_guards.require_unchanged(path, raw.clone());
+                    report
+                        .selection_guards
+                        .require(path, raw.clone(), lk_vault::Pin::Retained);
                 }
-                mutation.require_unchanged(path, raw);
+                mutation.require(path, raw, lk_vault::Pin::Retained);
             }
             continue;
         }
@@ -1441,9 +1441,10 @@ mod tests {
             .unwrap();
         work.plan_publication(&mut plan, root.path(), &result)
             .unwrap();
-        plan.require_unchanged(
+        plan.require(
             "wiki/documents/changed.md",
             "expected prior evidence".into(),
+            lk_vault::Pin::Editable,
         );
         assert!(session.apply(plan).is_err());
         assert!(
@@ -1517,7 +1518,11 @@ mod tests {
         let mut blocked = MutationPlan::default();
         work.plan_consumption(&mut blocked, root.path(), &source, &result)
             .unwrap();
-        blocked.require_unchanged("wiki/documents/changed.md", "expected".into());
+        blocked.require(
+            "wiki/documents/changed.md",
+            "expected".into(),
+            lk_vault::Pin::Editable,
+        );
         assert!(session.apply(blocked).is_err());
         assert!(!root.path().join(&receipt).exists());
         let node = &work.plan.parts[0].id;

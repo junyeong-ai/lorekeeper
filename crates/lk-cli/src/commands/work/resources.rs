@@ -126,7 +126,10 @@ pub(super) struct Prepared {
     pub subject: Subject,
     pub context: Value,
     pub resources: Vec<SemanticResource>,
-    pub pages: BTreeMap<PathBuf, String>,
+    /// Every file the preparation read, by what it pins: an immutable capture
+    /// (`SemanticAuthority::is_editable` false) is retained, so a change to it at publication
+    /// is an integrity failure rather than a writer's conflict.
+    pub pages: BTreeMap<PathBuf, lk_vault::Pinned>,
     /// Addresses read under an authority other than context: a subject, citation or review
     /// evidence stays a current read even where the same page is also context.
     strict_reads: BTreeSet<String>,
@@ -298,7 +301,7 @@ impl Prepared {
         self.pages
             .iter()
             .find(|(path, _)| lk_core::vault_path::address(path) == address)
-            .map(|(_, raw)| raw.as_str())
+            .map(|(_, page)| page.raw.as_str())
     }
 
     pub(super) fn reading(&self) -> ContextReading {
@@ -411,22 +414,11 @@ impl Prepared {
         Ok(lk_core::rss_original::digest(&bytes))
     }
 
-    /// Guards every captured page and the context snapshot the preparation read. An immutable
-    /// capture (`SemanticAuthority::is_editable` false) is pinned as retained, so a change to
-    /// it at publication is an integrity failure rather than a writer's conflict.
+    /// Guards every captured page, each by what it pins, and the context snapshot the
+    /// preparation read.
     pub fn guard_pages(&self, plan: &mut lk_vault::MutationPlan) {
-        let retained = self
-            .resources
-            .iter()
-            .filter(|resource| !resource.authority.is_editable())
-            .map(|resource| resource.address.as_str())
-            .collect::<BTreeSet<_>>();
-        for (path, content) in &self.pages {
-            if retained.contains(lk_core::vault_path::address(path).as_str()) {
-                plan.require_retained(path, content.clone());
-            } else {
-                plan.require_unchanged(path, content.clone());
-            }
+        for (path, page) in &self.pages {
+            plan.require_pinned(path, page.clone());
         }
         self.guard_beyond_pages(plan);
     }
@@ -448,7 +440,7 @@ struct Capture<'a> {
     read: lk_vault::ReadControl,
     reading: ContextReading,
     root: &'a Path,
-    pages: BTreeMap<PathBuf, String>,
+    pages: BTreeMap<PathBuf, lk_vault::Pinned>,
     resources: BTreeMap<String, SemanticResource>,
     strict_reads: BTreeSet<String>,
     absent: BTreeSet<PathBuf>,
@@ -595,7 +587,11 @@ impl<'a> Capture<'a> {
         raw: String,
         authority: SemanticAuthority,
     ) -> miette::Result<()> {
-        if self.pages.get(&relative).is_some_and(|prior| prior != &raw) {
+        if self
+            .pages
+            .get(&relative)
+            .is_some_and(|prior| prior.raw != raw)
+        {
             return Err(changed(
                 authority,
                 format!(
@@ -612,7 +608,12 @@ impl<'a> Capture<'a> {
             SemanticAuthority::Context => self.reading.text(&raw),
             _ => raw.clone(),
         };
-        self.pages.insert(relative, raw);
+        let pin = if authority.is_editable() {
+            lk_vault::Pin::Editable
+        } else {
+            lk_vault::Pin::Retained
+        };
+        self.pages.insert(relative, lk_vault::Pinned::new(raw, pin));
         self.resources
             .entry(address.clone())
             .or_insert_with(|| SemanticResource {
@@ -782,6 +783,7 @@ pub(super) fn section_task_controlled(
     let raw = prepared
         .pages
         .get(&owner)
+        .map(|page| &page.raw)
         .ok_or_else(|| miette::miette!("section owner is absent from its scope"))?;
     let subjects = BTreeMap::from([(
         target.clone(),
@@ -1022,6 +1024,7 @@ fn review_subjects(
         let raw = prepared
             .pages
             .get(&owner)
+            .map(|page| &page.raw)
             .ok_or_else(|| miette::miette!("captured extraction page is missing: {address}"))?;
         subjects.insert(
             address.clone(),
@@ -1185,6 +1188,7 @@ pub(super) fn with_discovery_controlled(
             captured
                 .pages
                 .get(target.strip_prefix(root).into_diagnostic()?)
+                .map(|page| &page.raw)
                 .ok_or_else(|| miette::miette!("captured extraction target is missing"))?,
         )
         .map_err(|error| miette::miette!("extraction target: {error}"))?,
@@ -1350,7 +1354,7 @@ fn capture_task_with_audit_controlled(
             &task.target.vault_path,
             &task.cache_hash,
             &scoped_reviews,
-            &captured.pages,
+            |path| captured.pages.get(path).map(|page| page.raw.as_str()),
         )?;
         purpose.insert("knowledge_scope".into(), scoped.context["purpose"].clone());
         if !reviews.is_empty() {
@@ -1664,7 +1668,11 @@ mod tests {
                 &prepared.subject,
                 &prepared.context,
                 &prepared.resources,
-                &prepared.pages,
+                prepared
+                    .pages
+                    .iter()
+                    .map(|(path, page)| (path, &page.raw, page.pin == lk_vault::Pin::Retained))
+                    .collect::<Vec<_>>(),
             ))
             .unwrap()
         };
@@ -2080,6 +2088,23 @@ mod tests {
                 Err(lk_vault::VaultError::RetainedCaptureChanged(path)) if path == archived
             ),
             "a rewritten archive is an integrity failure at publication, never a conflict"
+        );
+        let mut queued = lk_vault::MutationPlan::default();
+        super::super::QueuePublicationGuard {
+            work: lk_vault::MutationPlan::default(),
+            pages: shared.source.pages.clone(),
+            owned_pages: BTreeSet::new(),
+            bounded: false,
+            reviews: Default::default(),
+        }
+        .append_to(&mut queued, &BTreeMap::new())
+        .unwrap();
+        assert!(
+            matches!(
+                session.apply(queued),
+                Err(lk_vault::VaultError::RetainedCaptureChanged(path)) if path == archived
+            ),
+            "queue publication guards the archive it captured as retained too"
         );
         drop(session);
         std::fs::write(root.join(&archived), archive_raw).unwrap();
@@ -3111,7 +3136,7 @@ mod tests {
                 .iter()
                 .any(|resource| resource.address == discovered)
         );
-        assert_eq!(before.pages[Path::new(discovered)], discovered_raw);
+        assert_eq!(before.pages[Path::new(discovered)].raw, discovered_raw);
         assert!(
             before.context["purpose"]["parameters"]["knowledge_scope"]
                 .get("audit_selection")

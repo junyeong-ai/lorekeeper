@@ -9,7 +9,7 @@
 //! from that record, never from prose whose author Rust cannot establish.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use lk_core::i18n::Locale;
 use lk_vault::ReviewKind;
@@ -52,14 +52,14 @@ impl OpenReview {
 
 /// The open reviews of `concept` among a synthesis capture's scoped `reviews`, for a request
 /// answering the citations `citation_digest` names, each once under its verified owner's
-/// address and read from the bytes that capture stored there. A review names the concept when
+/// address and read from the bytes that capture stored there (`page`). A review names the concept when
 /// one of its subjects has the concept's owner. A resolved, unreadable or other-subject review is not one.
-pub(in crate::commands) fn open_reviews(
+pub(in crate::commands) fn open_reviews<'p>(
     root: &Path,
     concept: &str,
     citation_digest: &str,
     reviews: &[String],
-    pages: &BTreeMap<PathBuf, String>,
+    page: impl Fn(&Path) -> Option<&'p str>,
 ) -> miette::Result<Vec<OpenReview>> {
     let owner = |address: &str| lk_vault::resolve_page_owner(root, Path::new(address)).ok();
     let Some(concept_owner) = owner(concept) else {
@@ -72,9 +72,7 @@ pub(in crate::commands) fn open_reviews(
             continue;
         };
         let address = lk_core::vault_path::address(&stored);
-        let Some(page) = pages
-            .get(&stored)
-            .and_then(|raw| lk_core::frontmatter::parse_page(raw).ok())
+        let Some(page) = page(&stored).and_then(|raw| lk_core::frontmatter::parse_page(raw).ok())
         else {
             continue;
         };
@@ -331,6 +329,7 @@ pub(in crate::commands) fn published_state(raw: &str, open: &[OpenReview]) -> Pu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn review(kind: &str, status: &str, subject: &str) -> String {
         format!(
@@ -517,7 +516,10 @@ mod tests {
         }
         let root = root.path().canonicalize().unwrap();
         let digest = "0123456789abcdef0123456789abcdef";
-        let open = open_reviews(&root, concept, digest, &scoped, &pages).unwrap();
+        let open = open_reviews(&root, concept, digest, &scoped, |path| {
+            pages.get(path).map(String::as_str)
+        })
+        .unwrap();
         assert_eq!(
             open.iter()
                 .map(|review| review.path.as_str())
@@ -541,7 +543,7 @@ mod tests {
             concept,
             digest,
             &[path.to_string_lossy().into_owned()],
-            &BTreeMap::from([(path, judged)]),
+            |read| (read == path).then_some(judged.as_str()),
         )
         .unwrap();
         assert!(!unchanged[0].citations_changed);

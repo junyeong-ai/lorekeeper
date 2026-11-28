@@ -81,7 +81,7 @@ pub use self::manual_original::{
     OriginalOptions, OriginalView, inspect_original, is_manual_original,
     load_manual_original_manifest, publish_manual_original,
 };
-pub use self::mutation::{MutationClaim, MutationPlan, MutationSession};
+pub use self::mutation::{MutationClaim, MutationPlan, MutationSession, Pin, Pinned};
 pub use self::navigation::{NAVIGATION_ENTRY_MARKER, plan_navigation_entry};
 pub use self::neighbors::{
     IndexedNeighbor, IndexedNeighborOptions, IndexedNeighbors, NeighborDirection,
@@ -151,7 +151,7 @@ pub enum VaultError {
         .0.display()
     )]
     MutationConflict(std::path::PathBuf),
-    /// An immutable capture a plan pins (`MutationPlan::require_retained`) differs from its
+    /// An immutable capture a plan pins (`Pin::Retained`) differs from its
     /// pinned bytes or is gone. No writer edits a capture, so this is an integrity failure to
     /// repair, never a conflict with a writer.
     #[error(

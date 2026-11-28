@@ -406,9 +406,10 @@ pub(super) fn guard_current_task(
                 ));
             }
             found = true;
-            plan.require_unchanged(
+            plan.require(
                 path.strip_prefix(root).into_diagnostic()?,
                 String::from_utf8(raw).into_diagnostic()?,
+                lk_vault::Pin::Editable,
             );
         }
     }
@@ -1392,7 +1393,11 @@ async fn apply_into(
             register_publication_owner(&vault_root, &mut owned, page.path.as_ref(), original)?;
         }
         if page.expected_original.as_ref().and_then(Option::as_ref) == Some(&page.content) {
-            publications.require_unchanged(page.path.as_ref(), page.content.clone());
+            publications.require(
+                page.path.as_ref(),
+                page.content.clone(),
+                lk_vault::Pin::Editable,
+            );
         }
     }
     let mut committed_results = Vec::new();
@@ -1406,7 +1411,7 @@ async fn apply_into(
                     .map_err(|e| miette::miette!("RSS evidence: {e}"))?;
                 register_publication_owner(&vault_root, &mut owned, rel_path, &current)?;
                 if current == *content {
-                    publications.require_unchanged(rel_path.clone(), current);
+                    publications.require(rel_path.clone(), current, lk_vault::Pin::Editable);
                 } else {
                     publications.edit(rel_path.clone(), current, content.clone());
                 }

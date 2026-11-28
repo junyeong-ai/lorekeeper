@@ -118,7 +118,7 @@ pub(super) fn plan_prune(
             mutation.remove(path, raw);
             removed += 1;
         } else {
-            mutation.require_unchanged(path, raw);
+            mutation.require(path, raw, lk_vault::Pin::Editable);
         }
     }
     Ok(removed)
@@ -322,9 +322,10 @@ fn plan_recovery_controlled(
                 }
             }
             if referenced {
-                guarded.require_unchanged(
+                guarded.require(
                     path.strip_prefix(root).into_diagnostic()?,
                     String::from_utf8(raw).into_diagnostic()?,
+                    lk_vault::Pin::Editable,
                 );
             }
         }
@@ -332,7 +333,7 @@ fn plan_recovery_controlled(
             return Err(miette::miette!("section recovery task disappeared"));
         }
         for (path, raw) in guards {
-            guarded.require_unchanged(path, raw);
+            guarded.require_pinned(path, raw);
         }
         read.check().into_diagnostic()?;
         guarded.extend(plan);

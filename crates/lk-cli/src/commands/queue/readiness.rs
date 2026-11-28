@@ -298,7 +298,7 @@ impl InputReadiness {
             if lk_core::concept::file_revision(&raw) != approved.revision {
                 return Err(changed());
             }
-            plan.require_unchanged(relative, raw);
+            plan.require(relative, raw, lk_vault::Pin::Editable);
         }
         self.read.check().into_diagnostic()?;
         Ok(())

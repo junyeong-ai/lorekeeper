@@ -1025,7 +1025,9 @@ impl IntentPlane {
                 .strip_prefix(&self.vault_root)
                 .map_err(|e| miette::miette!("{e}"))?;
             match update.before {
-                Some(before) if before == update.after => plan.require_unchanged(path, before),
+                Some(before) if before == update.after => {
+                    plan.require(path, before, lk_vault::Pin::Editable)
+                }
                 Some(before) => plan.edit(path, before, update.after),
                 None => plan.create(path, update.after),
             }
@@ -1038,7 +1040,7 @@ impl IntentPlane {
             .transpose()
             .map_err(|e| miette::miette!("read {}: {e}", self.board_path.display()))?;
         if before.as_deref() == Some(page.as_str()) {
-            plan.require_unchanged(&self.board_path, page.clone());
+            plan.require(&self.board_path, page.clone(), lk_vault::Pin::Editable);
         }
         plan.publish_expected(session.root(), &self.board_path, before, page)
             .map_err(|e| miette::miette!("{e}"))?;

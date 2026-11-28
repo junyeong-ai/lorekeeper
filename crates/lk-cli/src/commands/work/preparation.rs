@@ -477,7 +477,7 @@ pub(in crate::commands) fn plan_retry(
         ));
     }
     let mut plan = MutationPlan::default();
-    plan.require_unchanged(Path::new(&receipt.subject), bytes);
+    plan.require(Path::new(&receipt.subject), bytes, lk_vault::Pin::Editable);
     plan.remove(path, raw);
     Ok(plan)
 }
@@ -521,7 +521,7 @@ pub(in crate::commands) fn plan_prune_queue(
             plan.remove(path, raw);
             removed += 1;
         } else {
-            plan.require_unchanged(path, raw);
+            plan.require(path, raw, lk_vault::Pin::Editable);
         }
     }
     Ok(removed)

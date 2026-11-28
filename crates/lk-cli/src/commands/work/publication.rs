@@ -13,7 +13,8 @@ use crate::commands::queue::application::PublicationRejection;
 pub(in crate::commands) struct PublicationScope {
     pub revision: String,
     pub owners: BTreeSet<PathBuf>,
-    pub pages: BTreeMap<PathBuf, String>,
+    /// What application reads, each file by what it pins.
+    pub pages: BTreeMap<PathBuf, lk_vault::Pinned>,
 }
 
 #[cfg(test)]
@@ -39,7 +40,7 @@ pub(in crate::commands) fn publication_scope(
 struct Evidence {
     prepared: Prepared,
     owners: BTreeSet<PathBuf>,
-    pages: BTreeMap<PathBuf, String>,
+    pages: BTreeMap<PathBuf, lk_vault::Pinned>,
     phase: serde_json::Value,
 }
 
@@ -79,7 +80,10 @@ fn sealed_evidence(
     merge_pages(&mut pages, observation_guards)?;
     let mut state = Vec::with_capacity(stored.len());
     for (path, raw) in stored {
-        state.push((path.clone(), raw.as_deref().map(file_revision)));
+        state.push((
+            path.clone(),
+            raw.as_ref().map(|stored| file_revision(&stored.raw)),
+        ));
         if let Some(raw) = raw {
             merge_pages(&mut pages, BTreeMap::from([(path, raw)]))?;
         }
@@ -169,7 +173,7 @@ pub(in crate::commands) fn publication_scope_controlled(
     read.check().into_diagnostic()?;
     let guards = pages
         .iter()
-        .map(|(path, raw)| (path, file_revision(raw)))
+        .map(|(path, page)| (path, file_revision(&page.raw)))
         .collect::<Vec<_>>();
     let revision = lk_core::rss_original::digest(
         &serde_json::to_vec(&(
@@ -193,8 +197,8 @@ pub(in crate::commands) fn publication_scope_controlled(
 }
 
 fn merge_pages(
-    pages: &mut BTreeMap<PathBuf, String>,
-    additional: BTreeMap<PathBuf, String>,
+    pages: &mut BTreeMap<PathBuf, lk_vault::Pinned>,
+    additional: BTreeMap<PathBuf, lk_vault::Pinned>,
 ) -> miette::Result<()> {
     for (path, raw) in additional {
         if pages
@@ -629,7 +633,7 @@ mod tests {
             task_id: fixture.task.task_id.clone(),
             cache_hash: fixture.task.cache_hash.clone(),
             target_revision: file_revision(
-                &before.pages[Path::new(&fixture.task.target.vault_path)],
+                &before.pages[Path::new(&fixture.task.target.vault_path)].raw,
             ),
             context_revision: prepared.revision(&fixture.config_revision).unwrap(),
             selection: None,

@@ -130,7 +130,7 @@ impl Store {
                 plan.remove(path, raw);
                 removed += 1;
             } else {
-                plan.require_unchanged(path, raw);
+                plan.require(path, raw, lk_vault::Pin::Editable);
             }
         }
         if removed != 0 {

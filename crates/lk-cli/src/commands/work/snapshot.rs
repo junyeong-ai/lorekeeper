@@ -101,7 +101,7 @@ impl ContextSnapshot {
     pub(super) fn guard(&self, plan: &mut lk_vault::MutationPlan) {
         let path = path(&self.task_id, &self.cache_hash);
         match &self.stored {
-            Some((raw, _)) => plan.require_unchanged(path, raw.clone()),
+            Some((raw, _)) => plan.require(path, raw.clone(), lk_vault::Pin::Editable),
             None => plan.require_absent(path),
         }
     }

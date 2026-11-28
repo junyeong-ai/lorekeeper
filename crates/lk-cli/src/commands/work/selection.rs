@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use lk_core::discovery::DiscoveryQuery;
-use lk_vault::MutationPlan;
+use lk_vault::{MutationPlan, Pin, Pinned};
 use miette::IntoDiagnostic;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -590,13 +590,13 @@ impl CapturedLedger {
     }
 
     /// The ledger bytes or absence that were read, and every packet a decision came from.
-    fn guards(&self) -> Vec<(PathBuf, Option<String>)> {
-        std::iter::once((self.path.clone(), self.raw.clone()))
-            .chain(
-                self.packets
-                    .values()
-                    .map(|(path, raw, _)| (path.clone(), Some(raw.clone()))),
-            )
+    /// The ledger is rewritten as decisions are recorded; a packet never is.
+    fn guards(&self) -> Vec<(PathBuf, Option<Pinned>)> {
+        let ledger = self.raw.clone().map(|raw| Pinned::new(raw, Pin::Editable));
+        std::iter::once((self.path.clone(), ledger))
+            .chain(self.packets.values().map(|(path, raw, _)| {
+                (path.clone(), Some(Pinned::new(raw.clone(), Pin::Retained)))
+            }))
             .collect()
     }
 
@@ -605,10 +605,10 @@ impl CapturedLedger {
     }
 }
 
-fn plan_guards(guards: Vec<(PathBuf, Option<String>)>, plan: &mut MutationPlan) {
+fn plan_guards(guards: Vec<(PathBuf, Option<Pinned>)>, plan: &mut MutationPlan) {
     for (path, raw) in guards {
         match raw {
-            Some(raw) => plan.require_unchanged(path, raw),
+            Some(raw) => plan.require_pinned(path, raw),
             None => plan.require_absent(path),
         }
     }
@@ -1262,7 +1262,7 @@ impl Selection {
 pub(super) struct RosterSeal {
     path: PathBuf,
     raw: String,
-    guards: Vec<(PathBuf, Option<String>)>,
+    guards: Vec<(PathBuf, Option<Pinned>)>,
 }
 
 impl RosterSeal {
@@ -1277,7 +1277,7 @@ impl RosterSeal {
 
     pub fn plan(&self, root: &Path, plan: &mut MutationPlan) -> miette::Result<()> {
         if self.is_published(root)? {
-            plan.require_unchanged(&self.path, self.raw.clone());
+            plan.require(&self.path, self.raw.clone(), lk_vault::Pin::Retained);
         } else {
             plan.create(&self.path, self.raw.clone());
         }
@@ -1291,7 +1291,7 @@ pub(super) struct SealedRoster {
     pub selected: BTreeSet<String>,
     pub queries: Vec<DiscoveryQuery>,
     pub source_revision: String,
-    guards: Vec<(PathBuf, Option<String>)>,
+    guards: Vec<(PathBuf, Option<Pinned>)>,
 }
 
 impl SealedRoster {
@@ -1406,13 +1406,15 @@ pub(super) fn plan_record(
         return Ok(plan);
     }
     for (path, raw, _) in ledger.packets.values() {
-        plan.require_unchanged(path, raw.clone());
+        plan.require(path, raw.clone(), lk_vault::Pin::Retained);
     }
     let packet_path = directory
         .join("packets")
         .join(format!("{packet_revision}.json"));
     match read_optional(root, &packet_path)? {
-        Some(before) if before == packet_raw => plan.require_unchanged(packet_path, before),
+        Some(before) if before == packet_raw => {
+            plan.require(packet_path, before, lk_vault::Pin::Retained)
+        }
         Some(_) => return Err(fail("screening packet differs from its revision")),
         None => plan.create(packet_path, packet_raw),
     }
@@ -1438,17 +1440,20 @@ pub(super) fn sealed_inputs(
     task_id: &str,
     cache_hash: &str,
     binding: &lk_queue::ExtractionSelection,
-) -> miette::Result<Vec<(PathBuf, Option<String>)>> {
+) -> miette::Result<Vec<(PathBuf, Option<Pinned>)>> {
     let directory = directory(task_id, cache_hash)?;
-    let mut paths = vec![directory.join("ledger.json")];
+    let mut paths = vec![(directory.join("ledger.json"), Pin::Editable)];
     if is_revision(&binding.inventory_revision) {
-        paths.push(roster_path(&directory, &binding.inventory_revision));
+        paths.push((
+            roster_path(&directory, &binding.inventory_revision),
+            Pin::Retained,
+        ));
     }
     paths
         .into_iter()
-        .map(|path| {
+        .map(|(path, pin)| {
             let raw = read_optional(root, &path)?;
-            Ok((path, raw))
+            Ok((path, raw.map(|raw| Pinned::new(raw, pin))))
         })
         .collect()
 }
@@ -1533,7 +1538,7 @@ pub(super) fn load_sealed(
     }
     let mut guards = ledger.guards();
     if stored {
-        guards.push((path, Some(raw)));
+        guards.push((path, Some(Pinned::new(raw, Pin::Retained))));
     }
     Ok(SealedRoster {
         selected,

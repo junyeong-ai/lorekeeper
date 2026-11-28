@@ -280,7 +280,7 @@ fn record_discovery_guarded(
     {
         let mut plan = MutationPlan::default();
         if let Some(before) = before {
-            plan.require_unchanged(STATE, before);
+            plan.require(STATE, before, lk_vault::Pin::Editable);
         }
         guard(&mut plan)?;
         if plan.has_changes() {
@@ -306,7 +306,7 @@ fn record_discovery_guarded(
         },
     );
     let mut plan = MutationPlan::default();
-    plan.require_unchanged(&request.path, raw);
+    plan.require(&request.path, raw, lk_vault::Pin::Editable);
     plan.publish_expected(
         root,
         STATE,
@@ -3604,11 +3604,11 @@ fn guard_page_input_controlled(
     read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
     let (direct, raw) = pinned_page_input(root, input, read)?;
-    plan.require_unchanged(direct, raw);
+    plan.require(direct, raw, lk_vault::Pin::Editable);
     Ok(())
 }
 
-/// Guards an immutable capture a scoped review cites (`MutationPlan::require_retained`): one
+/// Guards an immutable capture a scoped review cites (`lk_vault::Pin::Retained`): one
 /// missing or changed now, or at publication, is an integrity failure.
 fn guard_retained_input_controlled(
     plan: &mut MutationPlan,
@@ -3617,7 +3617,7 @@ fn guard_retained_input_controlled(
     read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
     let (direct, raw) = pinned_page_input(root, input, read).map_err(immutable_capture_failure)?;
-    plan.require_retained(direct, raw);
+    plan.require(direct, raw, lk_vault::Pin::Retained);
     Ok(())
 }
 
@@ -3725,7 +3725,7 @@ fn guard_candidate_controlled(
         .and_then(|discovery| discovery.selection.as_ref())
     {
         for (path, raw) in &progress.guards {
-            plan.require_unchanged(path, raw.as_ref().clone());
+            plan.require(path, raw.as_ref().clone(), lk_vault::Pin::Retained);
         }
     }
     for review in &candidate.reviews {
@@ -5065,7 +5065,11 @@ mod tests {
         };
         let coverage = |assessment: &AuditAssessment, plan: &mut MutationPlan| {
             if assessment.path == large {
-                plan.require_unchanged(proof, "Completed work bytes.".into());
+                plan.require(
+                    proof,
+                    "Completed work bytes.".into(),
+                    lk_vault::Pin::Editable,
+                );
                 Ok(AuditReadCoverage::CompletedWork)
             } else {
                 Ok(AuditReadCoverage::WholeInput)
@@ -5102,7 +5106,11 @@ mod tests {
             small.len() as u64,
             |assessment, plan| {
                 if assessment.path == large {
-                    plan.require_unchanged(proof, "Wrong completed work bytes.".into());
+                    plan.require(
+                        proof,
+                        "Wrong completed work bytes.".into(),
+                        lk_vault::Pin::Editable,
+                    );
                     Ok(AuditReadCoverage::CompletedWork)
                 } else {
                     Ok(AuditReadCoverage::WholeInput)
@@ -6898,7 +6906,11 @@ mod tests {
             },
             u64::MAX,
             |_, mutation| {
-                mutation.require_unchanged(guarded, "Bytes the guard read.\n".into());
+                mutation.require(
+                    guarded,
+                    "Bytes the guard read.\n".into(),
+                    lk_vault::Pin::Editable,
+                );
                 Ok(AuditReadCoverage::WholeInput)
             },
         )

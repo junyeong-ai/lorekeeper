@@ -493,7 +493,7 @@ fn guard_citations(
                     path.display()
                 ));
             }
-            plan.require_unchanged(path, content);
+            plan.require(path, content, lk_vault::Pin::Editable);
         }
     }
     if let Some(rss) = rss {

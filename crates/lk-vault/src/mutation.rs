@@ -13,6 +13,34 @@ pub struct MutationPlan {
     steps: Vec<Step>,
 }
 
+/// What a guard pins, which decides what a difference found at preflight or recovery means.
+/// Every guard names one (`MutationPlan::require`), so no dependency is guarded without it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pin {
+    /// A file a writer may change: a page, a queue file or Lore state that is rewritten in
+    /// place. Finding it different or gone is that writer's `VaultError::MutationConflict`.
+    Editable,
+    /// A capture its store never rewrites while a plan depends on it: an evidence archive, an
+    /// RSS original's payload or manifest, a retained input, a screening packet or sealed
+    /// roster, an audit screening state or packet, or a Work's manifest, observations, seal
+    /// and publication receipts. Finding it different or gone is the integrity failure
+    /// `VaultError::RetainedCaptureChanged`.
+    Retained,
+}
+
+/// Bytes a capture read, with what they pin once a plan guards them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Pinned {
+    pub raw: String,
+    pub pin: Pin,
+}
+
+impl Pinned {
+    pub fn new(raw: String, pin: Pin) -> Self {
+        Self { raw, pin }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 enum Step {
@@ -158,24 +186,25 @@ impl MutationPlan {
         }
     }
 
-    /// Pin an existing dependency even when no replacement is needed. Unlike `edit`,
-    /// this retains an equal-before/after step for preflight and journal replay.
-    /// The dependency must remain unchanged through the rest of the plan and recovery.
-    pub fn require_unchanged(&mut self, path: impl Into<PathBuf>, expected: String) {
-        self.steps.push(Step::Edit {
-            path: path.into(),
-            before: expected.clone(),
-            after: expected,
+    /// Pin an existing dependency even when no replacement is needed: it must hold `expected`
+    /// through the rest of the plan and recovery. An editable file is an equal-before/after
+    /// edit, so a difference is a writer's conflict; a retained capture is
+    /// `Step::RequireRetained`, so a difference is an integrity failure.
+    pub fn require(&mut self, path: impl Into<PathBuf>, expected: String, pin: Pin) {
+        let path = path.into();
+        self.steps.push(match pin {
+            Pin::Editable => Step::Edit {
+                path,
+                before: expected.clone(),
+                after: expected,
+            },
+            Pin::Retained => Step::RequireRetained { path, expected },
         });
     }
 
-    /// Pin an immutable capture (`Step::RequireRetained`): a preflight or recovery that finds
-    /// it different is an integrity failure, where `require_unchanged` is a writer's conflict.
-    pub fn require_retained(&mut self, path: impl Into<PathBuf>, expected: String) {
-        self.steps.push(Step::RequireRetained {
-            path: path.into(),
-            expected,
-        });
+    /// `require` with bytes a capture read and what they pin.
+    pub fn require_pinned(&mut self, path: impl Into<PathBuf>, pinned: Pinned) {
+        self.require(path, pinned.raw, pinned.pin);
     }
 
     pub fn rename(&mut self, from: impl Into<PathBuf>, to: impl Into<PathBuf>, expected: String) {
@@ -866,7 +895,7 @@ mod tests {
                     plan.edit("real/page.md", "before".into(), "second".into());
                 }
                 "guard-edit" => {
-                    plan.require_unchanged("alias/page.md", "before".into());
+                    plan.require("alias/page.md", "before".into(), crate::Pin::Editable);
                     plan.edit("real/page.md", "before".into(), "after".into());
                 }
                 "create" => {
@@ -874,8 +903,8 @@ mod tests {
                     plan.create("real/new/deep.md", "second".into());
                 }
                 "guards" => {
-                    plan.require_unchanged("alias/page.md", "before".into());
-                    plan.require_unchanged("real/page.md", "before".into());
+                    plan.require("alias/page.md", "before".into(), crate::Pin::Editable);
+                    plan.require("real/page.md", "before".into(), crate::Pin::Editable);
                 }
                 _ => unreachable!(),
             }
@@ -904,11 +933,11 @@ mod tests {
         plan.edit("Old.md", "before".into(), "first".into());
         plan.rename("Old.md", "old.md", "first".into());
         plan.edit("old.md", "first".into(), "second".into());
-        plan.require_unchanged("old.md", "second".into());
+        plan.require("old.md", "second".into(), crate::Pin::Editable);
         plan.rename("old.md", "old.md", "second".into());
         plan.edit("hard.md", "before".into(), "independent".into());
         plan.create("new.md", "retained".into());
-        plan.require_unchanged("new.md", "retained".into());
+        plan.require("new.md", "retained".into(), crate::Pin::Editable);
         session.apply(plan).unwrap();
         assert_eq!(
             fs::read_to_string(root.path().join("old.md")).unwrap(),
@@ -990,7 +1019,7 @@ mod tests {
             let mut plan = MutationPlan::default();
             if scenario != "create" {
                 fs::write(root.path().join("page.md"), "before").unwrap();
-                plan.require_unchanged("page.md", "before".into());
+                plan.require("page.md", "before".into(), crate::Pin::Editable);
                 plan.edit("page.md", "before".into(), "after".into());
                 if scenario == "restore" {
                     plan.edit("page.md", "after".into(), "before".into());
@@ -1020,7 +1049,7 @@ mod tests {
         fs::write(root.path().join("page.md"), "before").unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut plan = MutationPlan::default();
-        plan.require_unchanged("page.md", "before".into());
+        plan.require("page.md", "before".into(), crate::Pin::Editable);
         plan.edit("page.md", "before".into(), "after".into());
         session.save(&Journal { version: 1, plan }).unwrap();
         let path = session.journal.clone();
@@ -1111,9 +1140,9 @@ mod tests {
         fs::write(root.path().join("gate.md"), "expected").unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut plan = MutationPlan::default();
-        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
         plan.require_absent("missing.md");
-        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
         plan.edit("gate.md", "expected".into(), "done".into());
         session.preflight(&plan).unwrap();
         let journal = Journal { version: 1, plan };
@@ -1147,11 +1176,11 @@ mod tests {
         fs::write(root.path().join("gate.md"), "expected").unwrap();
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut plan = MutationPlan::default();
-        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
         plan.require_absent("missing.md");
         plan.create("published.md", "published".into());
-        plan.require_unchanged("published.md", "published".into());
-        plan.require_unchanged("dependency.md", "retained".into());
+        plan.require("published.md", "published".into(), crate::Pin::Editable);
+        plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
         plan.edit("gate.md", "expected".into(), "done".into());
         let journal = Journal { version: 1, plan };
         session.save(&journal).unwrap();
@@ -1199,11 +1228,11 @@ mod tests {
             fs::write(root.path().join("gate.md"), "expected").unwrap();
             let session = MutationSession::acquire(root.path()).unwrap();
             let mut plan = MutationPlan::default();
-            plan.require_unchanged("dependency.md", "retained".into());
+            plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
             plan.require_absent("missing.md");
             plan.create("published.md", "published".into());
-            plan.require_unchanged("published.md", "published".into());
-            plan.require_unchanged("dependency.md", "retained".into());
+            plan.require("published.md", "published".into(), crate::Pin::Editable);
+            plan.require("dependency.md", "retained".into(), crate::Pin::Editable);
             plan.edit("gate.md", "expected".into(), "done".into());
             let revision = lk_core::concept::file_revision(&serde_json::to_string(&plan).unwrap());
             session.save(&Journal { version: 1, plan }).unwrap();
@@ -1246,7 +1275,7 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let mut plan = MutationPlan::default();
         plan.edit("page.md", "before".into(), "after".into());
-        plan.require_unchanged("page.md", "after".into());
+        plan.require("page.md", "after".into(), crate::Pin::Editable);
         plan.require_absent("missing.md");
         let revision = lk_core::concept::file_revision(&serde_json::to_string(&plan).unwrap());
         session.save(&Journal { version: 1, plan }).unwrap();
@@ -1289,7 +1318,7 @@ mod tests {
                 let mut plan = MutationPlan::default();
                 for path in ["archive.md", "receipt.json"] {
                     plan.create(path, "preserved".into());
-                    plan.require_unchanged(path, "preserved".into());
+                    plan.require(path, "preserved".into(), crate::Pin::Editable);
                 }
                 plan.edit("sentinel.md", "expected".into(), "done".into());
                 plan.remove("original.md", "original".into());
@@ -1541,8 +1570,8 @@ mod tests {
         let session = MutationSession::acquire(root.path()).unwrap();
         let plan = || {
             let mut plan = MutationPlan::default();
-            plan.require_unchanged("page.md", "page".into());
-            plan.require_retained("capture.json", "capture".into());
+            plan.require("page.md", "page".into(), crate::Pin::Editable);
+            plan.require("capture.json", "capture".into(), crate::Pin::Retained);
             plan.create("result.md", "result".into());
             plan
         };

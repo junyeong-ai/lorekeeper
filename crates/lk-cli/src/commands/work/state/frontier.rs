@@ -366,13 +366,17 @@ impl Work {
             return Err(miette::Report::new(CompletionRefusal::ChangedObservations));
         }
         for (path, raw) in completed.guards {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         for path in completed.absent {
             mutation.require_absent(path);
         }
         mutation.require_absent(work_path(&self.plan.id, "seal.json")?);
-        mutation.require_unchanged(work_path(&self.plan.id, "frontier-seal.json")?, raw);
+        mutation.require(
+            work_path(&self.plan.id, "frontier-seal.json")?,
+            raw,
+            lk_vault::Pin::Retained,
+        );
         Ok(())
     }
 }

@@ -1711,12 +1711,13 @@ async fn input_pages(
                         .unwrap_or(WorkLogInput::Unbound),
                 );
             }
-            guards.require_unchanged(
+            guards.require(
                 &path,
                 source
                     .original
                     .clone()
                     .ok_or_else(|| miette::miette!("period input snapshot missing"))?,
+                lk_vault::Pin::Editable,
             );
             result.push(InputPage {
                 path,
@@ -2037,11 +2038,12 @@ async fn process(
         && lk_pipeline::completed_input(&target_page, intent.period.kind.target_kind())
             == Some(input)
     {
-        guards.require_unchanged(
+        guards.require(
             target.as_ref(),
             target_page
                 .original
                 .ok_or_else(|| miette::miette!("period target snapshot missing"))?,
+            lk_vault::Pin::Editable,
         );
         publisher
             .publish_with_plan(std::iter::empty::<&RenderResult>(), guards)

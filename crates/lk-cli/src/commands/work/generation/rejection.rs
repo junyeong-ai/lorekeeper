@@ -450,7 +450,7 @@ pub(super) fn plan_prune(
             miette::miette!("native generation rejection disappeared during retention")
         })?;
         if pending.contains(&(receipt.task_id, receipt.cache_hash)) {
-            plan.require_unchanged(destination, raw);
+            plan.require(destination, raw, lk_vault::Pin::Editable);
         } else {
             plan.remove(destination, raw);
             removed += 1;

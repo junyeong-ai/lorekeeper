@@ -235,7 +235,7 @@ pub(super) fn run(
         let relative = retained_path
             .strip_prefix(&root)
             .map_err(|error| miette::miette!("{error}"))?;
-        plan.require_unchanged(relative, retained_raw);
+        plan.require(relative, retained_raw, lk_vault::Pin::Editable);
     }
     // Invalidate before publishing: the new request must never be visible while
     // its old completion marker still says done, including during recovery.
@@ -266,7 +266,7 @@ fn plan_target_invalidation(
     after: String,
 ) {
     if before == after {
-        plan.require_unchanged(target, before);
+        plan.require(target, before, lk_vault::Pin::Editable);
     } else {
         plan.edit(target, before, after);
     }
@@ -305,7 +305,7 @@ fn plan_pending_retirement(
     // Archive exact historical bytes before withdrawing the superseded request.
     // Keep them guarded after retirement and throughout interrupted publication.
     plan.create(&archive_path, archived.clone());
-    plan.require_unchanged(archive_path, archived);
+    plan.require(archive_path, archived, lk_vault::Pin::Retained);
     let relative = retained_path
         .strip_prefix(root)
         .map_err(|error| miette::miette!("{error}"))?;

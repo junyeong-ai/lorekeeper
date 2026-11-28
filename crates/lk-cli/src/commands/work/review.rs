@@ -459,6 +459,7 @@ fn page_evidence(
     let raw = prepared
         .pages
         .get(&source)
+        .map(|page| &page.raw)
         .filter(|_| !source.starts_with(concepts))
         .ok_or_else(|| format!("review evidence {address} is not a source page this Work read"))?;
     let page = lk_core::frontmatter::parse_page(raw)
@@ -478,7 +479,7 @@ fn page_evidence(
 fn rss_evidence(
     root: &Path,
     cited: &[lk_core::concept::Citation],
-    pages: &std::collections::BTreeMap<PathBuf, String>,
+    pages: &std::collections::BTreeMap<PathBuf, lk_vault::Pinned>,
     address: &str,
 ) -> miette::Result<Result<(Value, lk_vault::PageRevision), String>> {
     let Some(citation) = Path::new(address)
@@ -502,7 +503,7 @@ fn rss_evidence(
     };
     let guard = lk_vault::PageRevision {
         path: lk_core::vault_path::address(owner),
-        revision: lk_core::concept::file_revision(origin),
+        revision: lk_core::concept::file_revision(&origin.raw),
     };
     Ok(Ok((
         serde_json::to_value(citation).into_diagnostic()?,
@@ -634,8 +635,10 @@ mod tests {
         };
         let page = lk_core::concept::Citation::at_revision(Path::new(cited), "b".repeat(32));
         let payload = lk_core::rss_original::event_payload_path(&revision);
-        let pages =
-            std::collections::BTreeMap::from([(PathBuf::from(owner), "origin bytes".to_owned())]);
+        let pages = std::collections::BTreeMap::from([(
+            PathBuf::from(owner),
+            lk_vault::Pinned::new("origin bytes".to_owned(), lk_vault::Pin::Editable),
+        )]);
         let (mapped, guard) =
             rss_evidence(&root, &[page.clone(), citation.clone()], &pages, &payload)
                 .unwrap()

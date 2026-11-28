@@ -240,7 +240,11 @@ impl Acquisition {
         let inbox = self.state.inbox().to_owned();
         let ownership = load_ownership(context).await?;
         let mut plan = lk_vault::MutationPlan::default();
-        plan.require_unchanged(&self.marker_path, self.marker.clone());
+        plan.require(
+            &self.marker_path,
+            self.marker.clone(),
+            lk_vault::Pin::Editable,
+        );
         let entries = lk_source::manual_entry_names(&source.params, context)?;
         let mut verified = BTreeSet::new();
         let mut manifests = Vec::new();
@@ -273,7 +277,7 @@ impl Acquisition {
             {
                 continue;
             }
-            plan.require_unchanged(&receipt.target, raw);
+            plan.require(&receipt.target, raw, lk_vault::Pin::Editable);
             verified.insert(manifest.entry.clone());
             manifests.push(manifest.clone());
         }
@@ -348,7 +352,7 @@ impl Acquisition {
         self.manifests = manifests;
         let after = serde_json::to_string(&self.state).map_err(error)?;
         if after == self.before {
-            plan.require_unchanged(&self.path, self.before.clone());
+            plan.require(&self.path, self.before.clone(), lk_vault::Pin::Editable);
         } else {
             plan.publish_expected(root, &self.path, Some(self.before.clone()), after)
                 .map_err(error)?;
@@ -571,13 +575,13 @@ pub(super) async fn acquire(
         plan.publish_expected(root, &path, before.clone(), reserved.clone())
             .map_err(error)?;
         if let Some(known) = known {
-            plan.require_unchanged(&marker_path, known);
+            plan.require(&marker_path, known, lk_vault::Pin::Editable);
         } else {
             plan.create(&marker_path, marker.clone());
         }
         // Even an unchanged state must guard against a competing collector.
         if before.as_deref() == Some(&reserved) {
-            plan.require_unchanged(&path, reserved.clone());
+            plan.require(&path, reserved.clone(), lk_vault::Pin::Editable);
         }
         session.apply(plan).map_err(error)?;
     } else {

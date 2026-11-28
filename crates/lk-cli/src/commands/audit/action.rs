@@ -182,7 +182,11 @@ pub(in crate::commands) fn plan_hold(
     if let Some(before) = before
         && before.reason(&binding) == Some(reason.as_str())
     {
-        mutation.require_unchanged(path(binding.path), before.raw.clone());
+        mutation.require(
+            path(binding.path),
+            before.raw.clone(),
+            lk_vault::Pin::Editable,
+        );
         return Ok(());
     }
     let receipt = receipt(&binding, reason, jiff::Timestamp::now().as_second());

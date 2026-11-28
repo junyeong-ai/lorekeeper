@@ -33,7 +33,8 @@ pub(super) struct Refinements {
 pub(super) struct CapturedRefinements {
     pub nodes: Vec<Node>,
     pub state: Option<Refinements>,
-    pub files: BTreeMap<PathBuf, String>,
+    /// The refinement sidecar and the original actions it expands, both retained.
+    pub files: BTreeMap<PathBuf, lk_vault::Pinned>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -370,7 +371,7 @@ impl Refinements {
         let after = self.encode(work)?;
         let target = path(work)?;
         let mut mutation = MutationPlan::default();
-        let before = evaluated.raw.get(&target).cloned();
+        let before = evaluated.raw.get(&target).map(|pinned| pinned.raw.clone());
         let output = output_path(
             &work.plan.id,
             request["node_id"].as_str().expect("validated node"),
@@ -380,7 +381,7 @@ impl Refinements {
         }
         for (dependency, raw) in evaluated.raw {
             if dependency != target {
-                mutation.require_unchanged(dependency, raw);
+                mutation.require_pinned(dependency, raw);
             }
         }
         mutation
@@ -415,7 +416,16 @@ impl Work {
                 Ok(CapturedRefinements {
                     nodes,
                     state: Some(state),
-                    files: BTreeMap::from([(path(self)?, raw), (legacy_path, legacy_raw)]),
+                    files: BTreeMap::from([
+                        (
+                            path(self)?,
+                            lk_vault::Pinned::new(raw, lk_vault::Pin::Retained),
+                        ),
+                        (
+                            legacy_path,
+                            lk_vault::Pinned::new(legacy_raw, lk_vault::Pin::Retained),
+                        ),
+                    ]),
                 })
             }
         }
@@ -498,7 +508,7 @@ impl Work {
             .ok_or_else(|| fail("unknown inspection node"))?;
         let legacy_path = work_path(&self.plan.id, "inspection-actions.json")?;
         let mut legacy_raw = match evaluated.raw.get(&legacy_path) {
-            Some(raw) => Some(raw.clone()),
+            Some(pinned) => Some(pinned.raw.clone()),
             None => read_optional(root, &legacy_path)?,
         };
         let legacy_before = legacy_raw.clone();
@@ -659,25 +669,29 @@ impl Work {
             },
         };
         let target = path(self)?;
-        let before = evaluated.raw.get(&target).cloned();
+        let before = evaluated.raw.get(&target).map(|pinned| pinned.raw.clone());
         for (dependency, raw) in evaluated.raw {
             if dependency != target {
-                mutation.require_unchanged(dependency, raw);
+                mutation.require_pinned(dependency, raw);
             }
         }
         match legacy_before {
-            Some(raw) => mutation.require_unchanged(legacy_path, raw),
+            Some(raw) => mutation.require(legacy_path, raw, lk_vault::Pin::Retained),
             None => {
                 let raw =
                     legacy_raw.ok_or_else(|| fail("refinement originating receipt is missing"))?;
                 mutation
                     .publish_expected(root, legacy_path.clone(), None, raw.clone())
                     .map_err(fail)?;
-                mutation.require_unchanged(legacy_path, raw);
+                mutation.require(legacy_path, raw, lk_vault::Pin::Retained);
             }
         };
         if already_refined {
-            mutation.require_unchanged(target, before.expect("existing refinement"));
+            mutation.require(
+                target,
+                before.expect("existing refinement"),
+                lk_vault::Pin::Editable,
+            );
         } else {
             mutation
                 .publish_expected(root, target, before, state.encode(self)?)

@@ -369,7 +369,7 @@ fn plan_merge(
         let mut guarded = lk_vault::MutationPlan::default();
         for (owner, raw) in source_inputs {
             if !publication_owners.contains(&owner) {
-                guarded.require_unchanged(owner, raw);
+                guarded.require(owner, raw, lk_vault::Pin::Editable);
             }
         }
         guarded.extend(plan);

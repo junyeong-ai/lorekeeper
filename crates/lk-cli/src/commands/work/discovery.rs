@@ -251,9 +251,9 @@ fn record_selected(
         let receipt_path = recovery::path(task_id);
         let raw = super::state::read_optional(root, &receipt_path)?
             .ok_or_else(|| miette::miette!("discovery recovery history disappeared"))?;
-        plan.require_unchanged(receipt_path, raw);
+        plan.require(receipt_path, raw, lk_vault::Pin::Editable);
     }
-    plan.require_unchanged(target_path, target);
+    plan.require(target_path, target, lk_vault::Pin::Editable);
     match std::fs::read_to_string(lk_vault::page_path(root, &path).into_diagnostic()?) {
         Ok(before) => plan.edit(path, before, after),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => plan.create(path, after),

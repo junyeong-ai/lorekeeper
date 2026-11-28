@@ -600,7 +600,7 @@ impl Work {
             mutation.require_absent(refinement::path(self)?);
         }
         for (path, raw) in evaluated.raw {
-            mutation.require_unchanged(path, raw);
+            mutation.require_pinned(path, raw);
         }
         mutation
             .publish_expected(root, path, before, after)

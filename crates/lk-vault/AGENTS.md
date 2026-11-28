@@ -56,10 +56,15 @@ canonical; SQLite navigation is derived.
   A session's `with_precondition` check runs under the lock before each plan is
   journaled; `PublicationRefused` publishes nothing. A holder writing outside the
   journal runs the same check with `validate` immediately before that write.
-  A guard names what it pins: `require_unchanged` an editable page, whose difference is
-  a writer's `MutationConflict`; `require_retained` an immutable capture (an archive, an
-  RSS manifest or payload, a retained input), whose difference or absence in preflight or
-  recovery is the integrity failure `RetainedCaptureChanged`.
+  Every guard names what it pins (`MutationPlan::require(path, bytes, Pin)`): `Pin::Editable`
+  a file a writer may change (a page, a queue file, Lore state rewritten in place), whose
+  difference is a writer's `MutationConflict`; `Pin::Retained` a capture its store never
+  rewrites while the plan depends on it (an archive, an RSS manifest or payload, a retained
+  input, a screening packet or sealed roster, an audit screening state or packet, a Work's
+  manifest, observations, seal and publication receipts), whose difference or absence in
+  preflight or recovery is the integrity failure `RetainedCaptureChanged`. A capture that
+  collects bytes for later guards keeps each entry's pin with it (`Pinned`), so whoever
+  guards them cannot choose another; the file a plan itself writes stays editable.
 - `MutationClaim` acquires the same writer boundary without reading or recovering
   journals. Installation uses it for settlement inspection and replacement; it is
   not a publication session and must be released before schema publication.

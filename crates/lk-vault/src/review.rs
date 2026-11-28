@@ -537,9 +537,10 @@ pub fn plan_review_repointing(
         let archive = evidence_archive_path(&authored_revision)?;
         if archives.insert(archive.clone()) {
             match load_archived_evidence(root, &authored_revision)? {
-                Some(page) => plan.require_unchanged(
+                Some(page) => plan.require(
                     archive,
                     page.original.expect("parsed archive retains exact bytes"),
+                    crate::Pin::Retained,
                 ),
                 None => plan.create(archive, raw.clone()),
             }
@@ -975,7 +976,7 @@ pub fn plan_document_publication(
     match current {
         Some(before) => {
             if before == content {
-                plan.require_unchanged(path, before);
+                plan.require(path, before, crate::Pin::Editable);
                 return Ok(());
             }
             let old = parse_page(&before).map_err(VaultError::Frontmatter)?;
@@ -1000,7 +1001,11 @@ pub fn plan_document_publication(
                     .ok_or_else(|| {
                         VaultError::Frontmatter("archived evidence disappeared".into())
                     })?;
-                plan.require_unchanged(evidence_archive_path(&revision)?, archived);
+                plan.require(
+                    evidence_archive_path(&revision)?,
+                    archived,
+                    crate::Pin::Retained,
+                );
             }
             // MutationPlan compares the exact captured bytes again before writing.
             plan.edit(path, before, content.to_owned());
