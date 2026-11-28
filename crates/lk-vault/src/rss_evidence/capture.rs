@@ -176,9 +176,16 @@ impl RssEvidenceCapture {
     }
 
     fn origin(&mut self, address: &str, raw: Option<&str>) -> Result<(), VaultError> {
+        let removed = |error: VaultError| match error {
+            VaultError::Io(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+                VaultError::PageRemoved(address.into())
+            }
+            error => error,
+        };
         let read = &self.originals.read;
         read.check()?;
-        let owner = crate::resolve_page_owner(&self.originals.root, Path::new(address))?;
+        let owner =
+            crate::resolve_page_owner(&self.originals.root, Path::new(address)).map_err(removed)?;
         read.check()?;
         if let Some(origin) = self.origins.get(address) {
             if origin.owner != owner || raw.is_some_and(|raw| raw != origin.raw.as_str()) {
@@ -188,9 +195,9 @@ impl RssEvidenceCapture {
         }
         let raw = match raw {
             Some(raw) => raw.to_owned(),
-            None => {
-                read.read_to_string(&crate::page_path(&self.originals.root, Path::new(address))?)?
-            }
+            None => read
+                .read_to_string(&crate::page_path(&self.originals.root, Path::new(address))?)
+                .map_err(removed)?,
         };
         let page = crate::parse_page(&raw).map_err(err)?;
         let mut entries = crate::ExistingEntryResolver::new(&self.originals.root);
@@ -623,6 +630,37 @@ mod tests {
                 .has_citation_in_page(concept, &citations[0], &invalid)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn a_removed_origin_is_a_removed_page_and_a_missing_payload_is_not() {
+        let (root, _, citations, _) = fixture();
+        let concept = Path::new("wiki/concepts/topic.md");
+        let read = crate::ReadControl::default();
+        let load = || {
+            RssEvidenceCapture::build(root.path(), &read)
+                .unwrap()
+                .load_citation(concept, &citations[0])
+                .map(|_| ())
+        };
+        load().unwrap();
+        let payload = root.path().join(format!(
+            "{RSS_ORIGINAL_STORE}/events/{}.json",
+            citations[0].revision
+        ));
+        let bytes = std::fs::read(&payload).unwrap();
+        std::fs::remove_file(&payload).unwrap();
+        let lost = load();
+        assert!(
+            lost.is_err() && !matches!(lost, Err(VaultError::PageRemoved(_))),
+            "a missing immutable payload is lost evidence: {lost:?}"
+        );
+        std::fs::write(&payload, bytes).unwrap();
+        std::fs::remove_file(root.path().join(&citations[0].path)).unwrap();
+        assert!(matches!(
+            load(),
+            Err(VaultError::PageRemoved(path)) if path == citations[0].path
+        ));
     }
 
     #[cfg(unix)]

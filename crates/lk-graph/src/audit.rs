@@ -3480,10 +3480,16 @@ fn guard_page_input_controlled(
         return Err(GraphError::AuditInputChanged(input.path.clone()));
     }
     let canonical_root = root.canonicalize().map_err(error)?;
-    let canonical = lk_vault::page_path(root, Path::new(&input.path))
+    let canonical = match lk_vault::page_path(root, Path::new(&input.path))
         .map_err(error)?
         .canonicalize()
-        .map_err(error)?;
+    {
+        Ok(canonical) => canonical,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+            return Err(GraphError::AuditInputChanged(input.path.clone()));
+        }
+        Err(failure) => return Err(error(failure)),
+    };
     let direct = canonical.strip_prefix(&canonical_root).map_err(error)?;
     plan.require_unchanged(direct, raw);
     Ok(())
@@ -3569,7 +3575,12 @@ fn guard_candidate_controlled(
             rss.as_mut()
                 .expect("RSS capture initialized")
                 .load_citation(Path::new(&candidate.path), citation)
-                .map_err(GraphError::from)?;
+                .map_err(|failure| match failure {
+                    lk_vault::VaultError::PageRemoved(_) => {
+                        GraphError::AuditInputChanged(citation.path.clone())
+                    }
+                    failure => GraphError::from(failure),
+                })?;
             read.check().map_err(GraphError::from)?;
         } else {
             let raw = match read.read_to_string(

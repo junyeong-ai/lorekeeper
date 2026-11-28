@@ -158,6 +158,11 @@ pub enum VaultError {
     SectionBody(#[from] lk_core::markdown::SectionBodyError),
     #[error("missing or duplicate section: {0}")]
     MissingSection(String),
+    /// A page a capture expected, an RSS citation's origin, is no longer in the vault: a
+    /// writer removed it after the citation was derived. Immutable originals that are missing
+    /// are I/O failures, never this.
+    #[error("page removed after its citation was derived: {0}")]
+    PageRemoved(String),
     #[error("original: {0}")]
     Original(String),
     #[error("search index: {0}")]

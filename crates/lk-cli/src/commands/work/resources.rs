@@ -443,8 +443,7 @@ struct Capture<'a> {
 }
 
 /// A page a capture expected at a revision read differently, or an editable page it expected
-/// no longer exists: a writer edited or removed it after the inputs naming that revision were
-/// derived. The capture describes nothing current; callers that can wait treat it as drift,
+/// no longer exists: a writer edited or removed it after the inputs naming it were derived. The capture describes nothing current; callers that can wait treat it as drift,
 /// never as a fault of the vault. A retained capture (an RSS payload, an archive, a retained
 /// input) that disappears, and any other failure to read a page, are not drift.
 #[derive(Debug)]
@@ -505,8 +504,26 @@ impl<'a> Capture<'a> {
         expected_authored: Option<&str>,
         authority: SemanticAuthority,
     ) -> miette::Result<String> {
+        let pinned = expected_file.is_some() || expected_authored.is_some();
+        self.read_page(path, expected_file, expected_authored, pinned, authority)
+    }
+
+    /// Reads a page whose presence earlier evidence established (a selected owner, a target
+    /// its audit candidate describes) without pinning its bytes: its removal is drift.
+    fn present_page(&mut self, path: &str, authority: SemanticAuthority) -> miette::Result<String> {
+        self.read_page(path, None, None, true, authority)
+    }
+
+    fn read_page(
+        &mut self,
+        path: &str,
+        expected_file: Option<&str>,
+        expected_authored: Option<&str>,
+        expected_present: bool,
+        authority: SemanticAuthority,
+    ) -> miette::Result<String> {
         self.read.check().into_diagnostic()?;
-        let removal_is_drift = (expected_file.is_some() || expected_authored.is_some())
+        let removal_is_drift = expected_present
             && matches!(
                 authority,
                 SemanticAuthority::Subject
@@ -595,12 +612,20 @@ impl<'a> Capture<'a> {
                     lk_vault::RssEvidenceCapture::build(self.root, &self.read).into_diagnostic()?,
                 );
             }
-            let input = self
+            let input = match self
                 .rss
                 .as_mut()
                 .expect("RSS capture initialized")
                 .load_citation(Path::new(subject), citation)
-                .into_diagnostic()?;
+            {
+                Ok(input) => input,
+                Err(lk_vault::VaultError::PageRemoved(path)) => {
+                    return Err(miette::Report::new(SourceChanged(format!(
+                        "semantic source removed: {path}"
+                    ))));
+                }
+                Err(error) => return Err(error).into_diagnostic(),
+            };
             self.insert_page(
                 input.origin_owner,
                 input.origin.as_str().to_owned(),
@@ -1008,7 +1033,7 @@ pub(super) fn task_with_selected(
                 "a selected candidate owner is missing or was retargeted; rescreen and regenerate the extraction result",
             ));
         }
-        captured.page(owner, None, None, SemanticAuthority::Context)?;
+        captured.present_page(owner, SemanticAuthority::Context)?;
     }
     let mut prepared = captured.finish(source.subject.clone(), source.context.clone(), config);
     let (_, subjects) = review_subjects(root, &prepared, selected)?;
@@ -1195,12 +1220,16 @@ fn capture_task_with_audit_controlled(
     }
     let mut captured = Capture::new(root, read);
     let mut graph_citations = None;
-    let target = captured.page(
-        &task.target.vault_path,
-        None,
-        None,
-        SemanticAuthority::Subject,
-    )?;
+    let target = if audit_input.is_some() {
+        captured.present_page(&task.target.vault_path, SemanticAuthority::Subject)?
+    } else {
+        captured.page(
+            &task.target.vault_path,
+            None,
+            None,
+            SemanticAuthority::Subject,
+        )?
+    };
     if task.kind != lk_queue::TaskKind::SynthesizeConcept {
         captured.resources.clear();
     }
@@ -2590,6 +2619,29 @@ mod tests {
         assert!(
             error.downcast_ref::<SourceChanged>().is_none(),
             "a retained capture that disappears is lost evidence, not drift: {error}"
+        );
+    }
+
+    #[test]
+    fn a_removed_page_earlier_evidence_placed_is_drift_and_an_unexpected_one_is_not() {
+        let (directory, _, _, candidates) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let path = &candidates[0].path;
+        std::fs::remove_file(root.join(path)).unwrap();
+        let read = lk_vault::ReadControl::default();
+        let Err(error) = Capture::new(&root, &read).present_page(path, SemanticAuthority::Context)
+        else {
+            panic!("a removed page captures nothing");
+        };
+        assert!(error.downcast_ref::<SourceChanged>().is_some(), "{error}");
+        let Err(error) =
+            Capture::new(&root, &read).page(path, None, None, SemanticAuthority::Context)
+        else {
+            panic!("a removed page captures nothing");
+        };
+        assert!(
+            error.downcast_ref::<SourceChanged>().is_none(),
+            "a read nothing placed keeps its error: {error}"
         );
     }
 

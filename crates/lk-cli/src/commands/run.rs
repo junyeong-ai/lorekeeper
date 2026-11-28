@@ -7574,6 +7574,13 @@ mod native {
                             format!("{}: {error}", candidate.path),
                         );
                     }
+                    // A page a writer edited or removed since the subject was planned.
+                    Err(error) if is_semantic_context_changed(&error) => {
+                        self.deferred(
+                            "audit inputs changed",
+                            format!("{}: {error}", candidate.path),
+                        );
+                    }
                     Err(error) => {
                         self.failure("bounded audit planning", error);
                         return None;
@@ -8022,6 +8029,7 @@ mod native {
             let Some((session, _)) = self.mutation_session("audit request planning").await else {
                 return false;
             };
+            let mut drifted = std::collections::BTreeSet::new();
             for candidate in &plan.candidates {
                 match crate::commands::work::audit_needs_work_controlled(
                     &session,
@@ -8031,6 +8039,15 @@ mod native {
                     self.supervisor.read_control(),
                 ) {
                     Ok(required) => bounded |= required,
+                    // A page a writer edited or removed since the replan: that subject waits
+                    // for a later run.
+                    Err(error) if is_semantic_context_changed(&error) => {
+                        self.deferred(
+                            "audit inputs changed",
+                            format!("{}: {error}", candidate.path),
+                        );
+                        drifted.insert(candidate.path.clone());
+                    }
                     Err(error) => {
                         self.failure("audit request planning", error);
                         return false;
@@ -8038,6 +8055,11 @@ mod native {
                 }
             }
             drop(session);
+            plan.candidates
+                .retain(|candidate| !drifted.contains(&candidate.path));
+            if plan.candidates.is_empty() {
+                return false;
+            }
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
                 let bindings = plan

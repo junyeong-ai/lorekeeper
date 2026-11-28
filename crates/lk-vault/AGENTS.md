@@ -112,7 +112,8 @@ canonical; SQLite navigation is derived.
   in the original store is its archive. Curation guards the origin page with the manifests
   and payload that proved the binding, and archives nothing; a removed origin's retained
   payload stands in only for a pin the review already recorded, because the payload proves
-  the event, not its binding. A retained payload counts only as the selected event's
+  the event, not its binding. Loading a citation whose origin page is gone is
+  `VaultError::PageRemoved`; a missing manifest or payload stays an I/O failure. A retained payload counts only as the selected event's
   canonical bytes. Evidence identity is the path with its selected event; one
   review cites an origin either as a page or by its events, never both, because review
   reports name evidence by path. Audit supplies the payload as the review's archived input.

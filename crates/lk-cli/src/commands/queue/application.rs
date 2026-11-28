@@ -49,6 +49,9 @@ pub(in crate::commands) fn rejection(
 /// including a synthesis whose own audit records became unreadable: replanning holds it.
 pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -> bool {
     error.downcast_ref::<super::SynthesisHeld>().is_some()
+        || error
+            .downcast_ref::<crate::commands::work::SourceChanged>()
+            .is_some()
         || matches!(
             error.downcast_ref::<PublicationRejection>(),
             Some(rejection) if matches!(
@@ -899,6 +902,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_page_a_capture_pinned_that_changed_is_work_input_drift() {
+        let changed = miette::Report::new(crate::commands::work::SourceChanged::new(
+            "semantic source removed: wiki/concepts/a.md",
+        ));
+        assert!(is_semantic_context_changed(&changed));
+        assert!(is_work_input_changed(&changed));
+    }
     #[test]
     fn result_retirement_guards_target_decisions_before_apply_and_recovery() {
         for decision in ["done", "stale", "policy", "missing-section", "missing-file"] {
