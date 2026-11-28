@@ -16,8 +16,9 @@ paths:
   identity before ready-only audit capture so valid scope drift remains a typed replan.
   Request planning and Work preparation defer a subject whose capture drifted since its
   replan (`audit inputs changed`) for the rest of the run, counted in `audit_deferred`, and
-  continue with the rest of the batch; request planning plans and measures the rest again
-  before it chooses the whole or bounded route, so a discarded subject's bytes never decide it.
+  continue with the rest of the batch. The rest are planned, measured and routed again
+  whenever request planning or bounded Work preparation leaves a subject out, so a
+  discarded subject's bytes never decide the whole or bounded route of its peers.
   The screening loop plans the batch once and, after recording a packet, reads only that
   subject again from the scan the recording checked against; a deferral changes the batch
   and plans it again, and before admission the loop plans once more if it refreshed only

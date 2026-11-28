@@ -8313,44 +8313,72 @@ mod native {
                 return false;
             }
             // The route reads the combined input of the subjects it keeps: a subject whose
-            // inputs drifted is deferred and the rest are planned and measured again without it.
-            let bounded = loop {
-                let mut bounded = plan.input.ensure_ready().is_err();
-                // Both routes below capture each subject again, so a wait needs no replan here.
-                let Some((session, _)) = self.mutation_session("audit request planning").await
-                else {
-                    return false;
-                };
-                let mut drifted = std::collections::BTreeSet::new();
-                for candidate in &plan.candidates {
-                    match crate::commands::work::audit_needs_work_controlled(
-                        &session,
-                        &self.config,
-                        &self.config_revision,
-                        candidate,
-                        self.supervisor.read_control(),
-                    ) {
-                        Ok(required) => bounded |= required,
-                        Err(error) if is_semantic_context_changed(&error) => {
-                            self.defer_audit_inputs(candidate, error.to_string());
-                            drifted.insert(candidate.path.clone());
-                        }
-                        Err(error) => {
-                            self.failure("audit request planning", error);
-                            return false;
+            // inputs drifted, during request planning or while its bounded Work was prepared,
+            // is deferred, and the rest are planned, measured and routed again without it.
+            let (bounded, mut prepared) = loop {
+                let bounded = loop {
+                    let mut bounded = plan.input.ensure_ready().is_err();
+                    // Both routes below capture each subject again, so a wait needs no replan here.
+                    let Some((session, _)) = self.mutation_session("audit request planning").await
+                    else {
+                        return false;
+                    };
+                    let mut drifted = std::collections::BTreeSet::new();
+                    for candidate in &plan.candidates {
+                        match crate::commands::work::audit_needs_work_controlled(
+                            &session,
+                            &self.config,
+                            &self.config_revision,
+                            candidate,
+                            self.supervisor.read_control(),
+                        ) {
+                            Ok(required) => bounded |= required,
+                            Err(error) if is_semantic_context_changed(&error) => {
+                                self.defer_audit_inputs(candidate, error.to_string());
+                                drifted.insert(candidate.path.clone());
+                            }
+                            Err(error) => {
+                                self.failure("audit request planning", error);
+                                return false;
+                            }
                         }
                     }
+                    drop(session);
+                    if drifted.is_empty() {
+                        break bounded;
+                    }
+                    let remaining = plan
+                        .candidates
+                        .iter()
+                        .filter(|candidate| !drifted.contains(&candidate.path))
+                        .map(|candidate| candidate.path.clone())
+                        .collect::<Vec<_>>();
+                    if remaining.is_empty() {
+                        return false;
+                    }
+                    let Some(fresh) = self.replan_audit(&remaining).await else {
+                        return false;
+                    };
+                    plan = fresh;
+                    if plan.candidates.is_empty() {
+                        return false;
+                    }
+                };
+                if !bounded {
+                    break (false, None);
                 }
-                drop(session);
-                if drifted.is_empty() {
-                    break bounded;
-                }
+                let Some(jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
+                    return false;
+                };
                 let remaining = plan
                     .candidates
                     .iter()
-                    .filter(|candidate| !drifted.contains(&candidate.path))
+                    .filter(|candidate| jobs.contains_key(&candidate.path))
                     .map(|candidate| candidate.path.clone())
                     .collect::<Vec<_>>();
+                if remaining.len() == plan.candidates.len() {
+                    break (true, Some(jobs));
+                }
                 if remaining.is_empty() {
                     return false;
                 }
@@ -8379,9 +8407,9 @@ mod native {
                     .iter()
                     .map(|candidate| (candidate.path.clone(), vec![candidate.clone()]))
                     .collect::<std::collections::BTreeMap<_, _>>();
-                let Some(mut jobs) = self.prepare_audit_jobs(&plan.candidates).await else {
-                    return false;
-                };
+                let mut jobs = prepared
+                    .take()
+                    .expect("the bounded route prepared its Work");
                 while !jobs.is_empty() {
                     jobs.retain(|path, work| {
                         if self.inspection_deferred.contains_key(work) {
