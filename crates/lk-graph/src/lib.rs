@@ -29,6 +29,10 @@ pub enum GraphError {
     /// inputs.
     #[error("audit read dependency changed: {0}")]
     AuditInputChanged(String),
+    /// While an exact selection was measured, `input`, a page `subject`'s inputs read, was
+    /// edited or removed after the subject was derived: that subject's planning drift.
+    #[error("audit subject {subject} changed while it was planned: {input}")]
+    AuditSubjectInputChanged { subject: String, input: String },
     /// An audit subject a writer removed from the vault after it was planned: a screening
     /// reply's subject (removed or retyped after its packet was issued) or a batch slot whose
     /// page is gone. The path is the subject as it was planned.

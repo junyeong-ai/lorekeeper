@@ -7047,45 +7047,62 @@ mod native {
 
         /// The plan of the selected `paths` that are still due. An exact plan keeps current
         /// subjects, but one a writer assessed since admission (a manual `wiki audit-record`
-        /// during another subject's call) is settled: no audit route sends it again.
+        /// during another subject's call) is settled: no audit route sends it again. A selected
+        /// subject whose input a writer changed while the selection was measured stays deferred
+        /// for the run, and its peers are planned again.
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
-            let pages = lk_graph::scan::scan_vault_controlled(
-                &self.root,
-                self.config.graph.scope.follow_links,
-                self.supervisor.read_control(),
-            )
-            .map_err(|e| miette::miette!("{e}"))?;
-            let mut readiness =
-                InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
-            let mut checked_paths = paths
-                .iter()
-                .cloned()
-                .collect::<std::collections::BTreeSet<_>>();
-            let mut deferred_paths = std::collections::BTreeSet::new();
-            let plan = lk_graph::audit::plan_selected_available_partitioned_controlled(
-                &self.root,
-                &self.config.vault.dirs,
-                lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
-                &pages,
-                self.config.graph.audit.batch_size,
-                paths,
-                self.config.graph.audit.max_input_bytes,
-                &mut |candidate| {
-                    checked_paths.insert(candidate.path.clone());
-                    let available =
-                        if let Some(reason) = self.audit_screening_deferred.get(&candidate.path) {
+            let (plan, readiness, checked_paths, deferred_paths) = loop {
+                let pages = lk_graph::scan::scan_vault_controlled(
+                    &self.root,
+                    self.config.graph.scope.follow_links,
+                    self.supervisor.read_control(),
+                )
+                .map_err(|e| miette::miette!("{e}"))?;
+                let mut readiness =
+                    InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
+                let mut checked_paths = paths
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                let mut deferred_paths = std::collections::BTreeSet::new();
+                let planned = lk_graph::audit::plan_selected_available_partitioned_controlled(
+                    &self.root,
+                    &self.config.vault.dirs,
+                    lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
+                    &pages,
+                    self.config.graph.audit.batch_size,
+                    paths,
+                    self.config.graph.audit.max_input_bytes,
+                    &mut |candidate| {
+                        checked_paths.insert(candidate.path.clone());
+                        let available = if let Some(reason) =
+                            self.audit_screening_deferred.get(&candidate.path)
+                        {
                             readiness.defer(candidate, vec![reason.clone()])
                         } else {
                             readiness.check(candidate)?
                         };
-                    if !available {
-                        deferred_paths.insert(candidate.path.clone());
+                        if !available {
+                            deferred_paths.insert(candidate.path.clone());
+                        }
+                        Ok(available)
+                    },
+                    self.supervisor.read_control(),
+                );
+                match planned {
+                    Ok(plan) => break (plan, readiness, checked_paths, deferred_paths),
+                    // A subject the run already defers is not measured, so each retry defers
+                    // another selected subject.
+                    Err(lk_graph::GraphError::AuditSubjectInputChanged { subject, input })
+                        if !self.audit_screening_deferred.contains_key(&subject) =>
+                    {
+                        let reason = format!("its input {input} changed while it was planned");
+                        self.deferred("audit inputs changed", format!("{subject}: {reason}"));
+                        self.audit_screening_deferred.insert(subject, reason);
                     }
-                    Ok(available)
-                },
-                self.supervisor.read_control(),
-            )
-            .map_err(|e| miette::miette!("{e}"))?;
+                    Err(e) => return Err(miette::miette!("{e}")),
+                }
+            };
             if paths.is_empty() {
                 self.audit_deferred_paths.clear();
                 self.result.audit_deferred.clear();

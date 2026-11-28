@@ -31,7 +31,9 @@ paths:
   planned again; an unreadable subject stays fatal. Drift never halts the loop.
   Every selected replan keeps only due subjects: an exact plan keeps current ones, but a
   subject a writer assessed since admission (a manual `wiki audit-record` during another
-  subject's call) is settled and no route sends it again. The run plans again until every
+  subject's call) is settled and no route sends it again; one whose input changed while
+  the selection was measured (`AuditSubjectInputChanged`) is deferred for the run and its
+  peers are planned again. The run plans again until every
   remaining subject has current discovery, so a recipe an edit invalidated is discovered
   before either audit route.
   Deferral counts track encountered subject paths independently of bounded details.
@@ -358,7 +360,8 @@ paths:
   Replan original slots through this workflow's guarded concept merges; documents
   retain exact addresses. A slot whose subject a writer removed outside the workflow
   (`GraphError::AuditSubjectRemoved`, the planned path) leaves the batch, and a subject
-  whose capture or request planning drifted is deferred like any late drift; their peers
+  whose capture, current input bound or request planning drifted is deferred like any late
+  drift; their peers
   are resolved and captured again. Isolate known blocked peers from publication readiness.
   A candidate edited while a whole assessment ran reopens its subject's screening: the
   judgment is stale like any changed input (spending the subject's replan), is never held

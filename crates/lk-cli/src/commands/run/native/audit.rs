@@ -176,12 +176,29 @@ impl Runner<'_> {
                     self.config.graph.audit.max_input_bytes,
                     self.supervisor.read_control(),
                 )
-                .map_err(|error| miette::miette!("{error}"))
+                .into_diagnostic()
             }) {
                 Ok(selected) => selected,
+                // A page a subject reads changed after its capture: that subject is deferred,
+                // and the rest are captured and measured again.
                 Err(error) => {
-                    self.failure("audit current input bound", error);
-                    return;
+                    let changed = match error.downcast_ref::<lk_graph::GraphError>() {
+                        Some(lk_graph::GraphError::AuditSubjectInputChanged {
+                            subject, ..
+                        }) => subjects
+                            .iter()
+                            .position(|planned| planned.candidate.path == *subject),
+                        _ => None,
+                    };
+                    let Some(position) = changed else {
+                        self.failure("audit current input bound", error);
+                        return;
+                    };
+                    self.defer_audit_inputs(&subjects[position].candidate, error.to_string());
+                    for index in &slots[position] {
+                        pending.remove(index);
+                    }
+                    continue;
                 }
             };
             let mut bounded = selected.input.ensure_ready().is_err();

@@ -1234,6 +1234,38 @@ fn measure_inputs_controlled<'a>(
     resources.bound(max_input_bytes)
 }
 
+/// Measures an exact selection subject by subject, so a dependency a writer edited or removed
+/// since derivation is reported with the subject that read it
+/// (`GraphError::AuditSubjectInputChanged`).
+fn measure_selection_controlled(
+    root: &Path,
+    candidates: &[AuditCandidate],
+    max_input_bytes: u64,
+    read: &lk_vault::ReadControl,
+) -> Result<AuditInputBound, GraphError> {
+    read.check().map_err(GraphError::from)?;
+    if max_input_bytes == 0 {
+        return Err(error("audit max_input_bytes must be positive"));
+    }
+    let mut resources = InputResources {
+        read: read.clone(),
+        ..InputResources::default()
+    };
+    for candidate in candidates {
+        match resources.include_candidate(root, candidate) {
+            Ok(()) => {}
+            Err(GraphError::AuditInputChanged(input)) => {
+                return Err(GraphError::AuditSubjectInputChanged {
+                    subject: candidate.path.clone(),
+                    input,
+                });
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+    resources.bound(max_input_bytes)
+}
+
 fn load(root: &Path) -> Result<(Option<String>, Receipts), GraphError> {
     load_controlled(root, &lk_vault::ReadControl::default())
 }
@@ -3372,7 +3404,7 @@ fn plan_selected_inner(
     let mut input = if selection.is_empty() {
         resources.bound(max_input_bytes)?
     } else {
-        measure_inputs_controlled(root, &candidates, max_input_bytes, read)?
+        measure_selection_controlled(root, &candidates, max_input_bytes, read)?
     };
     let mut blocked = Vec::new();
     let mut blocked_count = 0;
@@ -3431,7 +3463,16 @@ fn plan_selected_inner(
         let individual = if candidates.is_empty() {
             combined
         } else {
-            measure_inputs_controlled(root, std::iter::once(&candidate), max_input_bytes, read)?
+            match measure_inputs_controlled(
+                root,
+                std::iter::once(&candidate),
+                max_input_bytes,
+                read,
+            ) {
+                Ok(individual) => individual,
+                Err(GraphError::AuditInputChanged(_)) => continue,
+                Err(failure) => return Err(failure),
+            }
         };
         if individual.status == AuditInputStatus::Ready {
             // This complete input fits a fresh batch. Preserve its position instead
@@ -6706,6 +6747,36 @@ mod tests {
         drifted(root.path());
         std::fs::remove_file(root.path().join("daily/report.md")).unwrap();
         drifted(root.path());
+    }
+
+    #[test]
+    fn an_exact_selection_names_the_subject_whose_input_changed_while_it_was_planned() {
+        let root = tempfile::tempdir().unwrap();
+        rss_cited_concept(root.path());
+        let pages = scan(root.path());
+        let selection = ["wiki/concepts/a.md".to_owned()];
+        let planned = plan_selected_available_partitioned(
+            root.path(),
+            &VaultDirs::default(),
+            *ALL,
+            &pages,
+            1,
+            &selection,
+            u64::MAX,
+            &mut |_| {
+                write(
+                    root.path(),
+                    "wiki/concepts/a.md",
+                    "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn edited claim.\n",
+                );
+                Ok(true)
+            },
+        );
+        assert!(matches!(
+            planned,
+            Err(GraphError::AuditSubjectInputChanged { subject, input })
+                if subject == selection[0] && input == selection[0]
+        ));
     }
 
     #[test]

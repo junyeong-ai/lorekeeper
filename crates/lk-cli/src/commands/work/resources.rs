@@ -1414,7 +1414,7 @@ fn load_audit_candidate_controlled(
 ) -> miette::Result<lk_graph::audit::AuditCandidate> {
     let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
         .into_diagnostic()?;
-    let plan = lk_graph::audit::plan_selected_controlled(
+    let plan = match lk_graph::audit::plan_selected_controlled(
         root,
         &config.vault.dirs,
         lk_graph::audit::AuditCorpus::from(&config.graph.audit),
@@ -1423,8 +1423,13 @@ fn load_audit_candidate_controlled(
         &[path.to_owned()],
         u64::MAX,
         read,
-    )
-    .into_diagnostic()?;
+    ) {
+        Ok(plan) => plan,
+        Err(error @ lk_graph::GraphError::AuditSubjectInputChanged { .. }) => {
+            return Err(miette::Report::new(SourceChanged::new(error.to_string())));
+        }
+        Err(error) => return Err(error).into_diagnostic(),
+    };
     let candidate = plan
         .candidates
         .into_iter()

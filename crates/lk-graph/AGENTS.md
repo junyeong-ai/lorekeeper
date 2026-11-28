@@ -147,7 +147,9 @@ and CLI discovery, not a second graph authority.
   the batch. Read-only availability plans retain their complete checked scope.
   Input measurement reads each dependency again: one a writer edited or removed since
   derivation, an RSS origin included, is `AuditInputChanged`, and admission leaves that
-  subject for a later plan; a retained RSS payload that differs stays an integrity error.
+  subject for a later plan. An exact selection's measurement names the subject that read
+  it (`AuditSubjectInputChanged`) so its caller defers only that subject; a retained RSS
+  payload that differs stays an integrity error.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them in planned order and preserves the measured oversized status. Recording requires exact
