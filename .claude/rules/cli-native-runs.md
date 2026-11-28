@@ -18,7 +18,9 @@ paths:
   replan (`audit inputs changed`) for the rest of the run, counted in `audit_deferred`, and
   continue with the rest of the batch. The rest are planned, measured and routed again
   whenever request planning or bounded Work preparation leaves a subject out, so a
-  discarded subject's bytes never decide the whole or bounded route of its peers.
+  discarded subject's bytes never decide the whole or bounded route of its peers. A stored
+  Work forces the bounded route only once it holds current observations; a manifest that
+  preparation wrote before the route was decided again does not.
   The screening loop plans the batch once and, after recording a packet, reads only that
   subject again from the scan the recording checked against; a deferral changes the batch
   and plans it again, and before admission the loop plans once more if it refreshed only

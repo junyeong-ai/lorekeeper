@@ -2695,7 +2695,11 @@ pub(super) fn audit_needs_work_controlled(
     let root = session.root();
     let mut prepared = resources::audit_candidate_controlled(root, config, candidate, read)?;
     let work = expected(root, &mut prepared, config, config_revision)?;
-    if work.plan.parts.len() > 1 || work.is_planned(root)? {
+    // A stored Work continues only once it holds current observations; a manifest preparation
+    // wrote before the route was decided again does not choose the route.
+    if work.plan.parts.len() > 1
+        || (work.is_planned(root)? && work.progress(root, &prepared.resources)?.completed > 0)
+    {
         return Ok(true);
     }
     #[cfg(unix)]
@@ -6261,6 +6265,42 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_stored_audit_work_without_observations_does_not_choose_the_bounded_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let (config, revision) = context_audit_fixture(&root);
+        write(
+            &root,
+            CONTEXT_SUBJECT,
+            "---\ntype: document\ntitle: Subject\n---\n## Content\n[Related](../concepts/related.md)\n\nA source-scoped observation.\n",
+        );
+        let pages = lk_graph::scan::scan_vault(&root, false).unwrap();
+        let candidate = lk_graph::audit::plan_selected(
+            &root,
+            &config.vault.dirs,
+            lk_graph::audit::AuditCorpus::from(&config.graph.audit),
+            &pages,
+            1,
+            &[CONTEXT_SUBJECT.into()],
+            u64::MAX,
+        )
+        .unwrap()
+        .candidates
+        .remove(0);
+        let read = lk_vault::ReadControl::default();
+        let session = MutationSession::acquire(&root).unwrap();
+        let needs_work = || {
+            audit_needs_work_controlled(&session, &config, &revision, &candidate, &read).unwrap()
+        };
+        assert!(!needs_work());
+        prepare_audit_controlled(&session, &config, &revision, &candidate, &read).unwrap();
+        assert!(
+            !needs_work(),
+            "a manifest with no observations leaves the route to the subject's size"
+        );
+    }
+
     #[test]
     fn a_whole_audit_capture_changes_once_a_stored_work_continues_its_subject() {
         // A semantic Work keeps the revision and is told apart by the stored Work; a revived
