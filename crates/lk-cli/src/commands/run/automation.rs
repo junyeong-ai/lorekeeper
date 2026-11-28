@@ -14,65 +14,19 @@ const MAX_USAGE_BYTES: usize = 16_384;
 /// for every operation always fits `MAX_USAGE_BYTES`.
 const MAX_HALT_DETAIL_BYTES: usize = 1024;
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 enum Schema {
     #[serde(rename = "automation-usage-v2")]
     V2,
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "schema", deny_unknown_fields)]
-enum StoredUsage {
-    #[serde(rename = "automation-usage-v1")]
-    V1 {
-        utc_date: Date,
-        reserved_calls: usize,
-        paused: BTreeMap<ExecutionOperation, jiff::Timestamp>,
-    },
-    #[serde(rename = "automation-usage-v2")]
-    V2 {
-        utc_date: Date,
-        reserved_calls: usize,
-        paused: BTreeMap<ExecutionOperation, Pause>,
-    },
-}
-
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct Usage {
     schema: Schema,
     utc_date: Date,
     reserved_calls: usize,
     paused: BTreeMap<ExecutionOperation, Pause>,
-}
-
-impl From<StoredUsage> for Usage {
-    fn from(stored: StoredUsage) -> Self {
-        let (utc_date, reserved_calls, paused) = match stored {
-            StoredUsage::V1 {
-                utc_date,
-                reserved_calls,
-                paused,
-            } => (
-                utc_date,
-                reserved_calls,
-                paused
-                    .into_iter()
-                    .map(|(operation, at)| (operation, Pause { at, cause: None }))
-                    .collect(),
-            ),
-            StoredUsage::V2 {
-                utc_date,
-                reserved_calls,
-                paused,
-            } => (utc_date, reserved_calls, paused),
-        };
-        Self {
-            schema: Schema::V2,
-            utc_date,
-            reserved_calls,
-            paused,
-        }
-    }
 }
 
 /// The stage a run records when a profile's host cannot start (`execution::preflight_hosts`,
@@ -83,8 +37,7 @@ pub(super) const HOST_ENVIRONMENT_STAGE: &str = "host environment";
 #[serde(deny_unknown_fields)]
 pub(in crate::commands) struct Pause {
     pub at: jiff::Timestamp,
-    /// `None` only for a pause recorded by the v1 ledger, which kept no cause.
-    pub cause: Option<HaltCause>,
+    pub cause: HaltCause,
 }
 
 /// The failed stage that stopped a native job, as named in its report.
@@ -154,18 +107,8 @@ impl Usage {
         let value = lk_core::json::decode_object(&bytes).map_err(|_| {
             miette::miette!("automation usage requires a JSON object with unique fields")
         })?;
-        let mut usage = Self::from(
-            serde_json::from_value::<StoredUsage>(value)
-                .map_err(|_| miette::miette!("invalid automation usage schema or fields"))?,
-        );
-        // 0.163 paused an operation when a profile's host environment could not start. That
-        // stage no longer halts, so such a pause holds nothing an operator must repair.
-        usage.paused.retain(|_, pause| {
-            pause
-                .cause
-                .as_ref()
-                .is_none_or(|cause| cause.stage != HOST_ENVIRONMENT_STAGE)
-        });
+        let mut usage = serde_json::from_value::<Self>(value)
+            .map_err(|_| miette::miette!("invalid automation usage schema or fields"))?;
         if usage.utc_date > today {
             return Err(miette::miette!("automation UTC date moved backwards"));
         }
@@ -471,7 +414,7 @@ impl Control {
             self.operation,
             Pause {
                 at: jiff::Timestamp::now(),
-                cause: Some(cause),
+                cause,
             },
         );
         usage.save(root)?;
@@ -542,7 +485,7 @@ mod tests {
             ExecutionOperation::Daily,
             Pause {
                 at: jiff::Timestamp::now(),
-                cause: Some(HaltCause::new("daily ingest", None)),
+                cause: HaltCause::new("daily ingest", None),
             },
         );
         usage.save(root).unwrap();
@@ -554,46 +497,16 @@ mod tests {
     }
 
     #[test]
-    fn a_host_environment_pause_from_0_163_no_longer_holds_its_operation() {
-        let directory = fixture();
-        let root = directory.path();
-        let mut usage = Usage::load(root, today()).unwrap();
-        for (operation, stage) in [
-            (ExecutionOperation::Knowledge, HOST_ENVIRONMENT_STAGE),
-            (ExecutionOperation::Process, "native result host"),
-        ] {
-            usage.paused.insert(
-                operation,
-                Pause {
-                    at: jiff::Timestamp::now(),
-                    cause: Some(HaltCause::new(stage, Some("profile primary: missing"))),
-                },
-            );
-        }
-        usage.save(root).unwrap();
-        let mut knowledge =
-            Control::new(policy(3), ExecutionOperation::Knowledge, false, 64).unwrap();
-        assert!(knowledge.preflight(root).unwrap());
-        assert!(knowledge.enter(root).unwrap());
-        let mut process = Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
-        assert!(!process.enter(root).unwrap());
-        assert_eq!(process.report.stop, Some(Stop::Paused));
-        let stored = Usage::load(root, today()).unwrap();
-        assert_eq!(
-            stored.paused.keys().copied().collect::<Vec<_>>(),
-            [ExecutionOperation::Process]
-        );
-    }
-
-    #[test]
     fn invalid_usage_never_becomes_a_fresh_allowance() {
         let directory = fixture();
         let root = directory.path();
         for bytes in [
             b"{}".as_slice(),
             br#"{"schema":"unknown","utc_date":"2026-11-07","reserved_calls":0,"paused":{}}"#,
-            br#"{"schema":"automation-usage-v1","utc_date":"2026-11-07","reserved_calls":3,"reserved_calls":0,"paused":{}}"#,
-            br#"{"schema":"automation-usage-v1","utc_date":"2026-11-07","reserved_calls":-1,"paused":{}}"#,
+            br#"{"schema":"automation-usage-v1","utc_date":"2026-11-07","reserved_calls":0,"paused":{}}"#,
+            br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":3,"reserved_calls":0,"paused":{}}"#,
+            br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":-1,"paused":{}}"#,
+            br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":0,"paused":{"process":{"at":"2026-11-07T00:00:00Z","cause":null}}}"#,
             br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":0,"paused":{},"extra":0}"#,
             br#"{"schema":"automation-usage-v2","utc_date":"2026-11-07","reserved_calls":0,"paused":{"process":"2026-11-07T00:00:00Z"}}"#,
         ] {
@@ -606,23 +519,9 @@ mod tests {
     }
 
     #[test]
-    fn pauses_keep_their_halting_stage_and_v1_pauses_load_without_one() {
+    fn a_pause_keeps_its_halting_stage_and_a_bounded_detail() {
         let directory = fixture();
         let root = directory.path();
-        std::fs::write(
-            path(root).unwrap(),
-            format!(
-                r#"{{"schema":"automation-usage-v1","utc_date":"{}","reserved_calls":2,"paused":{{"knowledge":"2026-11-09T00:00:00Z"}}}}"#,
-                today()
-            ),
-        )
-        .unwrap();
-        let legacy = status(root, &policy(3)).unwrap();
-        assert!(
-            legacy.paused[&ExecutionOperation::Knowledge]
-                .cause
-                .is_none()
-        );
         let mut control = Control::new(policy(3), ExecutionOperation::Process, false, 64).unwrap();
         assert!(control.enter(root).unwrap());
         let detail = "é".repeat(MAX_HALT_DETAIL_BYTES);
@@ -630,11 +529,10 @@ mod tests {
             .pause(root, HaltCause::new("native result host", Some(&detail)))
             .unwrap();
         let paused = status(root, &policy(3)).unwrap().paused;
-        let cause = paused[&ExecutionOperation::Process].cause.as_ref().unwrap();
+        let cause = &paused[&ExecutionOperation::Process].cause;
         assert_eq!(cause.stage, "native result host");
         let kept = cause.detail.as_deref().unwrap();
         assert!(kept.len() <= MAX_HALT_DETAIL_BYTES && kept.ends_with("é…"));
-        assert!(paused[&ExecutionOperation::Knowledge].cause.is_none());
         assert!(
             std::fs::read_to_string(path(root).unwrap())
                 .unwrap()

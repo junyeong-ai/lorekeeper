@@ -263,10 +263,7 @@ fn automation_row(
                             ExecutionOperation::Process => "process",
                             ExecutionOperation::Knowledge => "knowledge",
                         };
-                        match &pause.cause {
-                            Some(cause) => format!("{operation} at {}", cause.stage),
-                            None => operation.to_owned(),
-                        }
+                        format!("{operation} at {}", pause.cause.stage)
                     })
                     .collect::<Vec<_>>();
                 let _ = write!(state, " · paused: {}", operations.join(", "));

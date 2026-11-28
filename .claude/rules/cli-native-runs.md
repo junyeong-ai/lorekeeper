@@ -189,12 +189,11 @@ paths:
   unsupported `--version`) is excluded the same way (`unstartable_host`), as is one that
   passed its version check and then cannot start a semantic call (`unstarted_call`, serial
   or in a wave: that step is unsent, peers that returned still record, and the run
-  replans); cancellation, and any attended run, keep that error fatal. That stage never halts, so the ledger drops a pause
-  0.163 recorded under it when it loads; an unresolvable profile is configuration and
-  still halts, as `host configuration`. Fatal scheduled failures
-  pause that operation: the `automation-usage-v2` ledger records the first halting stage
-  and at most 1024 bytes of its detail, while the job report keeps the full detail. An
-  `automation-usage-v1` ledger decodes with cause-less pauses and is written back as v2.
+  replans); cancellation, and any attended run, keep that error fatal. That stage never
+  halts; an unresolvable profile is configuration and still halts, as `host configuration`.
+  Fatal scheduled failures pause that operation: the `automation-usage-v2` ledger records
+  the first halting stage and at most 1024 bytes of its detail, while the job report
+  keeps the full detail.
   Explicit `--resume` clears the pause without clearing usage or semantic holds.
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;

@@ -1675,10 +1675,13 @@ fn a_paused_scheduled_operation_reports_without_waiting_for_an_owned_workflow() 
         .root()
         .join("vault/.lorekeeper/automation-usage.json");
     let raw = serde_json::to_vec(&serde_json::json!({
-        "schema":"automation-usage-v1",
+        "schema":"automation-usage-v2",
         "utc_date":jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::UTC).date(),
         "reserved_calls":3,
-        "paused":{"knowledge":"2026-11-16T23:28:26Z"}
+        "paused":{"knowledge":{
+            "at":"2026-11-16T23:28:26Z",
+            "cause":{"stage":"native result host","detail":null}
+        }}
     }))
     .unwrap();
     std::fs::write(&path, &raw).unwrap();
