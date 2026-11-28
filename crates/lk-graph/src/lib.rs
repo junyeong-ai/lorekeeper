@@ -73,6 +73,10 @@ pub enum GraphError {
     },
     #[error(transparent)]
     Unresynthesizable(#[from] backlinks::Unresynthesizable),
+    /// A vault read or publication failure, kept typed so its caller can tell a guard that
+    /// found a page changed (`VaultError::MutationConflict`) from a fault.
+    #[error(transparent)]
+    Vault(lk_vault::VaultError),
     #[error("I/O error: {0}")]
     Io(String),
 }
@@ -82,6 +86,7 @@ impl GraphError {
         match self {
             Self::Cancelled => lk_vault::VaultError::Cancelled,
             Self::CaptureChanged(change) => lk_vault::VaultError::CitationCapture(change),
+            Self::Vault(error) => error,
             other => std::io::Error::other(other).into(),
         }
     }
@@ -91,7 +96,7 @@ impl From<lk_vault::VaultError> for GraphError {
     fn from(error: lk_vault::VaultError) -> Self {
         match error {
             lk_vault::VaultError::Cancelled => Self::Cancelled,
-            other => Self::Io(other.to_string()),
+            other => Self::Vault(other),
         }
     }
 }

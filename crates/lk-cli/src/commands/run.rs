@@ -104,11 +104,10 @@ mod native {
     use crate::commands::audit::{DeferredAudit, InputAvailability};
     use crate::commands::queue::application::{is_semantic_context_changed, is_work_input_changed};
     use crate::commands::{
-        CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, workflow,
+        CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, typed_error, workflow,
     };
     use lk_core::config::Config;
     use lk_core::execution::{ExecutionProfile, ExecutionStage};
-    use miette::IntoDiagnostic;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
@@ -1064,7 +1063,7 @@ mod native {
             success
         }
 
-        fn failure(&mut self, name: &str, error: impl std::fmt::Display) -> bool {
+        fn failure(&mut self, name: &str, error: miette::Report) -> bool {
             if self.supervisor.is_cancelled() {
                 return self.record(name, StageState::Cancelled, Some(error.to_string()));
             }
@@ -1664,7 +1663,7 @@ mod native {
                 Err(error) => error.to_string(),
             };
             self.configuration_failed = true;
-            self.failure("configuration", failure)
+            self.failure("configuration", miette::miette!("{}", failure))
         }
 
         async fn child(
@@ -1816,6 +1815,7 @@ mod native {
                     &session,
                     self.supervisor.read_control(),
                 )
+                .map_err(miette::Report::msg)
                 .map(|closed| (report, closed))
             });
             drop(session);
@@ -1931,7 +1931,7 @@ mod native {
             }
             let report = match linted {
                 Ok(report) => report,
-                Err(error) => return self.failure(name, error),
+                Err(error) => return self.failure(name, miette::miette!("{}", error)),
             };
             if !report.errors.is_empty() {
                 return self.halt(name, Some(report.errors.join("; ")));
@@ -1961,7 +1961,7 @@ mod native {
                 Err(error) => return self.failure(name, error),
             };
             if state.pending_mutation || state.unreadable != 0 || state.unparseable_lines != 0 {
-                return self.failure(name, "queue contains an interrupted mutation or unknown inputs; inspect `lore queue check`");
+                return self.failure(name, miette::miette!("queue contains an interrupted mutation or unknown inputs; inspect `lore queue check`"));
             }
             if !state.staged_results.is_empty()
                 && let Err(error) =
@@ -2024,14 +2024,16 @@ mod native {
                     Err(error) => {
                         return self.failure(
                             name,
-                            format!("queue application report is unavailable or invalid: {error}"),
+                            miette::miette!(
+                                "queue application report is unavailable or invalid: {error}"
+                            ),
                         );
                     }
                 };
             if outcome.success != report.ok || outcome.exit_code != Some(i32::from(!report.ok)) {
                 return self.failure(
                     name,
-                    "queue application report disagrees with its process exit",
+                    miette::miette!("queue application report disagrees with its process exit"),
                 );
             }
             let can_continue = report.can_continue();
@@ -2255,13 +2257,13 @@ mod native {
                 .config
                 .execution
                 .resolve_stage_profile(metrics.stages[0])
-                .map_err(|e| miette::miette!("{e}"))?;
+                .map_err(typed_error)?;
             for stage in &metrics.stages[1..] {
                 let (other, _) = self
                     .config
                     .execution
                     .resolve_stage_profile(*stage)
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(typed_error)?;
                 if name != other {
                     return Err(miette::miette!(
                         "one semantic batch requires the same execution profile"
@@ -2337,7 +2339,7 @@ mod native {
                 profile: name,
                 engine: profile.engine(),
                 version: String::from_utf8(version.stdout)
-                    .map_err(|e| miette::miette!("{e}"))?
+                    .map_err(typed_error)?
                     .trim()
                     .into(),
                 requested_model: profile.model().map(str::to_owned),
@@ -2356,7 +2358,7 @@ mod native {
                         .config
                         .execution
                         .effective_work()
-                        .map_err(|error| miette::miette!("{error}"))?,
+                        .map_err(typed_error)?,
                 });
             }
             metrics.execution = Some(host.clone());
@@ -2379,7 +2381,7 @@ mod native {
                 .profile
         }
 
-        fn agent_preflight_failure(&mut self, name: &str, error: impl std::fmt::Display) -> bool {
+        fn agent_preflight_failure(&mut self, name: &str, error: miette::Report) -> bool {
             if self.result.cancelled {
                 self.record(name, StageState::Cancelled, Some(error.to_string()))
             } else {
@@ -2452,14 +2454,14 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 self.failure(
                     "bounded work receipt",
-                    "semantic execution is disabled by llm.provider",
+                    miette::miette!("semantic execution is disabled by llm.provider"),
                 );
                 return None;
             }
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
                 Err(error) => {
-                    self.failure("semantic work budget", error);
+                    self.failure("semantic work budget", typed_error(error));
                     return None;
                 }
             };
@@ -2843,7 +2845,7 @@ mod native {
                     if progress.completed <= completed
                         || progress.ready.iter().any(|ready| ready == node)
                     {
-                        self.failure("bounded work receipt", "worker exited without completing its selected node; unfinished work retained");
+                        self.failure("bounded work receipt", miette::miette!("worker exited without completing its selected node; unfinished work retained"));
                         return ObservationStep::Failed;
                     }
                     metrics.outcome = WorkOutcome::Recorded;
@@ -2949,7 +2951,10 @@ mod native {
                 return false;
             }
             let Some(lease) = &self.lease else {
-                self.failure("workflow checkpoint", "yield requires an owned workflow");
+                self.failure(
+                    "workflow checkpoint",
+                    miette::miette!("yield requires an owned workflow"),
+                );
                 return true;
             };
             match lease.admission_contended() {
@@ -2986,7 +2991,7 @@ mod native {
                     self.result.budget_exhausted = true;
                     self.deferred("semantic call budget", "configured execution.work.max_calls exhausted; unfinished work is retained for the next run")
                 }
-                Err(error) => self.failure("semantic work budget", error),
+                Err(error) => self.failure("semantic work budget", typed_error(error)),
             }
         }
 
@@ -3059,7 +3064,7 @@ mod native {
                 let Some(lease) = &self.lease else {
                     return self.failure(
                         "automation admission",
-                        "an owned vault workflow is required",
+                        miette::miette!("an owned vault workflow is required"),
                     );
                 };
                 match control.reserve(lease.root_pin().root(), count) {
@@ -3172,7 +3177,9 @@ mod native {
         ) -> Option<bool> {
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
-                Err(error) => return Some(self.failure("semantic work budget", error)),
+                Err(error) => {
+                    return Some(self.failure("semantic work budget", typed_error(error)));
+                }
             };
             let limit = self.wave_limit(budget);
             if limit <= 1 || !jobs.contains_key(selected) {
@@ -3225,9 +3232,10 @@ mod native {
                     Err(error) => return Some(self.failure("bounded work progress", error)),
                 };
                 if !progress.complete && requests.is_empty() {
-                    return Some(
-                        self.failure("bounded work progress", "incomplete work has no ready node"),
-                    );
+                    return Some(self.failure(
+                        "bounded work progress",
+                        miette::miette!("incomplete work has no ready node"),
+                    ));
                 }
                 prepared.insert(
                     id,
@@ -3297,7 +3305,7 @@ mod native {
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 return Some(self.failure(
                     "bounded work receipt",
-                    "semantic execution is disabled by llm.provider",
+                    miette::miette!("semantic execution is disabled by llm.provider"),
                 ));
             }
             let mut requests = Vec::new();
@@ -3717,7 +3725,10 @@ mod native {
             metrics.preparation_duration_ms = Some(preparation_duration_ms);
             let Some(node) = before.ready.first() else {
                 self.record_work_step(metrics);
-                self.failure("bounded work progress", "incomplete work has no ready node");
+                self.failure(
+                    "bounded work progress",
+                    miette::miette!("incomplete work has no ready node"),
+                );
                 return ObservationStep::Failed;
             };
             metrics.node_id = Some(node.clone());
@@ -3725,7 +3736,7 @@ mod native {
                 self.record_work_step(metrics);
                 self.failure(
                     "bounded work progress",
-                    "ready work has no inspection input",
+                    miette::miette!("ready work has no inspection input"),
                 );
                 return ObservationStep::Failed;
             };
@@ -3777,21 +3788,21 @@ mod native {
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
                 Err(error) => {
-                    self.failure("native result budget", error);
+                    self.failure("native result budget", typed_error(error));
                     return None;
                 }
             };
             if metrics.request_json_bytes.expect("measured request") > budget.max_input_bytes {
                 self.failure(
                     "native result request",
-                    "complete request exceeds max_input_bytes",
+                    miette::miette!("complete request exceeds max_input_bytes"),
                 );
                 return None;
             }
             if self.config.llm.provider == lk_core::config::LlmProvider::Noop {
                 self.failure(
                     "native result",
-                    "semantic execution is disabled by llm.provider",
+                    miette::miette!("semantic execution is disabled by llm.provider"),
                 );
                 return None;
             }
@@ -3904,7 +3915,7 @@ mod native {
                 }
                 self.failure(
                     "native result host",
-                    child.detail.unwrap_or_else(|| "host failed".into()),
+                    miette::miette!("{}", child.detail.unwrap_or_else(|| "host failed".into())),
                 );
                 return None;
             }
@@ -3942,7 +3953,7 @@ mod native {
                         metrics.unanswered = failure.is_unanswered();
                         return Some(ResultReply::InvocationFailed(failure.clone()));
                     }
-                    self.failure("native result response", error);
+                    self.failure("native result response", typed_error(error));
                     None
                 }
             }
@@ -5057,7 +5068,7 @@ mod native {
         ) -> bool {
             let budget = match self.config.execution.effective_work() {
                 Ok(budget) => budget,
-                Err(error) => return self.failure("semantic work budget", error),
+                Err(error) => return self.failure("semantic work budget", typed_error(error)),
             };
             let limit = self.wave_limit(budget);
             if limit == 0 {
@@ -5254,8 +5265,10 @@ mod native {
                         return true;
                     }
                     if requests.is_empty() {
-                        return self
-                            .failure("bounded work progress", "incomplete work has no ready node");
+                        return self.failure(
+                            "bounded work progress",
+                            miette::miette!("incomplete work has no ready node"),
+                        );
                     }
                     prepared.insert(
                         id,
@@ -5329,7 +5342,7 @@ mod native {
                 self.record_uninvoked_queue_reads(turns, WorkOutcome::Failed);
                 return self.failure(
                     "bounded queue receipt",
-                    "semantic execution is disabled by llm.provider",
+                    miette::miette!("semantic execution is disabled by llm.provider"),
                 );
             }
             let mut requests = Vec::new();
@@ -5991,7 +6004,10 @@ mod native {
             });
             let mut owners = std::collections::BTreeMap::new();
             for task in tasks {
-                self.supervisor.read_control().check().into_diagnostic()?;
+                self.supervisor
+                    .read_control()
+                    .check()
+                    .map_err(typed_error)?;
                 let owner = lk_vault::page_path(session.root(), Path::new(&task.target.vault_path))
                     .and_then(|path| path.canonicalize())
                     .map_err(|error| miette::miette!("queue target: {error}"))?;
@@ -6011,7 +6027,7 @@ mod native {
                 .config
                 .execution
                 .effective_work()
-                .map_err(|error| miette::miette!("{error}"))?;
+                .map_err(typed_error)?;
             let mut deferred = std::collections::BTreeMap::new();
             let mut targets = std::collections::BTreeMap::new();
             let rejected = crate::commands::queue::rejections::blocked_tasks_controlled(
@@ -6079,7 +6095,10 @@ mod native {
             let independent_limit = self.wave_limit(budget).min(MAX_PREPARED_QUEUE_TARGETS);
             let mut next = 0;
             while next < order.len() {
-                self.supervisor.read_control().check().into_diagnostic()?;
+                self.supervisor
+                    .read_control()
+                    .check()
+                    .map_err(typed_error)?;
                 if jobs.contains_key(&order[next]) || !keys.contains(&order[next]) {
                     next += 1;
                     continue;
@@ -6173,7 +6192,7 @@ mod native {
                         self.config.graph.scope.follow_links,
                         self.supervisor.read_control(),
                     )
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(typed_error)?;
                     let inputs = lk_graph::audit::load_synthesis_inputs_controlled(
                         session.root(),
                         &self.config.vault.dirs,
@@ -6181,7 +6200,7 @@ mod native {
                         &synthesis_paths,
                         self.supervisor.read_control(),
                     )
-                    .map_err(|error| miette::miette!("{error}"))?;
+                    .map_err(typed_error)?;
                     for (target, reason) in inputs.unavailable {
                         keys.remove(&target);
                         materialize.retain(|task| task.target.vault_path != target);
@@ -6262,13 +6281,13 @@ mod native {
                                 self.config
                                     .execution
                                     .resolve_stage_profile(generation_stage(previous.kind))
-                                    .map_err(|error| miette::miette!("{error}"))?
+                                    .map_err(typed_error)?
                                     .0
                                     == self
                                         .config
                                         .execution
                                         .resolve_stage_profile(generation_stage(task.kind))
-                                        .map_err(|error| miette::miette!("{error}"))?
+                                        .map_err(typed_error)?
                                         .0
                             } else {
                                 true
@@ -6285,7 +6304,7 @@ mod native {
                                 &self.config, &inputs,
                             ) {
                                 Ok(request) => serde_json::to_vec(&request)
-                                    .map_err(|error| miette::miette!("{error}"))?
+                                    .map_err(typed_error)?
                                     .len() > budget.max_input_bytes
                                     || crate::commands::work::native::selected_characters(&inputs)?
                                         > lk_core::semantic::INSPECTION_CHARACTERS.get(),
@@ -6788,7 +6807,7 @@ mod native {
                                 }
                             }
                         }
-                        return self.failure("selected queue receipt", "selected tasks are not completed against their retained inputs; unfinished work retained");
+                        return self.failure("selected queue receipt", miette::miette!("selected tasks are not completed against their retained inputs; unfinished work retained"));
                     }
                     break;
                 }
@@ -6832,7 +6851,7 @@ mod native {
                 _ if self.config.llm.provider == lk_core::config::LlmProvider::Noop => self
                     .failure(
                         "queue drain",
-                        "semantic processing is disabled by llm.provider",
+                        miette::miette!("semantic processing is disabled by llm.provider"),
                     ),
                 _ if self.drain_blocked => {
                     self.record(
@@ -7004,7 +7023,7 @@ mod native {
                 self.config.graph.scope.follow_links,
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             let mut readiness =
                 InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
             let mut deferred_paths = std::collections::BTreeSet::new();
@@ -7025,7 +7044,7 @@ mod native {
                 },
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             self.audit_deferred_paths.extend(deferred_paths);
             for deferred in readiness.deferred() {
                 if let Some(previous) = self
@@ -7057,7 +7076,7 @@ mod native {
                     self.config.graph.scope.follow_links,
                     self.supervisor.read_control(),
                 )
-                .map_err(|e| miette::miette!("{e}"))?;
+                .map_err(typed_error)?;
                 let mut readiness =
                     InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
                 let mut checked_paths = paths
@@ -7100,7 +7119,7 @@ mod native {
                         self.deferred("audit inputs changed", format!("{subject}: {reason}"));
                         self.audit_screening_deferred.insert(subject, reason);
                     }
-                    Err(e) => return Err(miette::miette!("{e}")),
+                    Err(e) => return Err(typed_error(e)),
                 }
             };
             if paths.is_empty() {
@@ -7130,7 +7149,11 @@ mod native {
         fn audit_screening_limits(
             &self,
         ) -> miette::Result<lk_graph::audit::selection::ScreeningLimits> {
-            let budget = self.config.execution.effective_work().into_diagnostic()?;
+            let budget = self
+                .config
+                .execution
+                .effective_work()
+                .map_err(typed_error)?;
             Ok(lk_graph::audit::selection::ScreeningLimits {
                 max_input_bytes: budget.max_input_bytes,
                 max_result_bytes: budget.max_result_bytes,
@@ -7161,7 +7184,7 @@ mod native {
                 &[path.to_owned()],
                 self.supervisor.read_control(),
             )
-            .map_err(|e| miette::miette!("{e}"))?
+            .map_err(typed_error)?
             .pop()
             .ok_or_else(|| {
                 miette::miette!("screened audit subject is no longer selectable: {path}")
@@ -7312,10 +7335,7 @@ mod native {
                         ) {
                             Ok(pages) => pages,
                             Err(error) => {
-                                self.failure(
-                                    "audit screening replanning",
-                                    miette::miette!("{error}"),
-                                );
+                                self.failure("audit screening replanning", typed_error(error));
                                 return None;
                             }
                         };
@@ -7335,7 +7355,7 @@ mod native {
                         continue;
                     }
                     Err(error) => {
-                        self.failure("audit screening preparation", error);
+                        self.failure("audit screening preparation", typed_error(error));
                         return None;
                     }
                 };
@@ -7411,7 +7431,7 @@ mod native {
                             None
                         }
                         Err(error) => {
-                            self.failure("audit selection refresh", error);
+                            self.failure("audit selection refresh", typed_error(error));
                             return None;
                         }
                     };
@@ -7614,7 +7634,7 @@ mod native {
                     }
                     Err(error) => {
                         self.record_work_step(metrics);
-                        self.failure("audit screening recording", error);
+                        self.failure("audit screening recording", typed_error(error));
                         return None;
                     }
                 };
@@ -7716,7 +7736,7 @@ mod native {
                 self.config.graph.scope.follow_links,
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             let _queue =
                 super::super::queue::claim_writer(&self.root.join(".lorekeeper/queue"), false)?;
             let focus = self.probe_target(crate::commands::work::host::ProbeScope::Audit);
@@ -7805,7 +7825,7 @@ mod native {
                 },
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             self.result.audit_deferred = readiness.deferred().to_vec();
             self.result.audit_deferred.extend(processing_deferred);
             self.result
@@ -7826,7 +7846,7 @@ mod native {
                 self.config.graph.scope.follow_links,
                 self.supervisor.read_control(),
             )
-            .map_err(|e| miette::miette!("{e}"))?;
+            .map_err(typed_error)?;
             let workflow = self
                 .lease
                 .as_ref()
@@ -7847,7 +7867,7 @@ mod native {
                 },
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             for path in &verified.pending {
                 if !readiness
                     .deferred()
@@ -7879,7 +7899,7 @@ mod native {
                 self.supervisor.read_control(),
             ) {
                 Ok(reports) => reports,
-                Err(error) => return self.failure("knowledge review health", error),
+                Err(error) => return self.failure("knowledge review health", typed_error(error)),
             };
             if !self.configuration_is_current() {
                 return false;
@@ -8325,7 +8345,7 @@ mod native {
                         None => {
                             self.failure(
                                 "bounded audit publication",
-                                "assessment path is not UTF-8",
+                                miette::miette!("assessment path is not UTF-8"),
                             );
                             return false;
                         }
@@ -8406,13 +8426,13 @@ mod native {
             let name = config
                 .execution
                 .resolve_profile(operation.semantic(), explicit.as_deref())
-                .map_err(|e| miette::miette!("{e}"))?
+                .map_err(typed_error)?
                 .0
                 .to_owned();
             config
                 .execution
                 .select_profile(&name)
-                .map_err(|e| miette::miette!("{e}"))?;
+                .map_err(typed_error)?;
         }
         let options = GlobalOptions {
             config: Some(config_path),
@@ -8436,7 +8456,7 @@ mod native {
                 config
                     .execution
                     .effective_work()
-                    .map_err(|error| miette::miette!("{error}"))?
+                    .map_err(typed_error)?
                     .max_calls,
             )?)
         } else {
@@ -8497,10 +8517,10 @@ mod native {
                     "duration_ms":started_at.elapsed().as_millis() as u64,
                 }))
             }
-            .map_err(|error| miette::miette!("{error}"))?;
+            .map_err(typed_error)?;
             println!(
                 "{}",
-                serde_json::to_string_pretty(&value).map_err(|error| miette::miette!("{error}"))?
+                serde_json::to_string_pretty(&value).map_err(typed_error)?
             );
         }
         if !ok {

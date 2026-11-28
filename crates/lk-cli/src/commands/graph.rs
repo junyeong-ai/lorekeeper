@@ -344,10 +344,10 @@ pub(crate) fn backlinks_sync_in_session(
     config: &lk_core::config::Config,
     session: &lk_vault::MutationSession,
     read: &lk_vault::ReadControl,
-) -> Result<output::BacklinksSyncReport, String> {
+) -> miette::Result<output::BacklinksSyncReport> {
     let rc = ResolvedConfig::from_config(session.root().to_path_buf(), Some(config));
     let views = scan::VaultViews::resolve(&rc.root, &rc.graph, &rc.vault_dirs, read)
-        .map_err(|e| format!("{e}"))?;
+        .map_err(super::typed_error)?;
     synchronize_backlinks(&rc, &views.scanned, false, Some(session), read)
 }
 
@@ -594,8 +594,8 @@ fn run_resolved(
         return Err(errors.join("; "));
     }
     if let GraphCommand::BacklinksSync { dry_run, .. } = &cmd {
-        let report =
-            synchronize_backlinks(&rc, &views.scanned, *dry_run, mutation.as_ref(), &read)?;
+        let report = synchronize_backlinks(&rc, &views.scanned, *dry_run, mutation.as_ref(), &read)
+            .map_err(|error| error.to_string())?;
         let violated = !report.sync.skipped.is_empty();
         if json {
             output::print_json(&report, violated)?;
@@ -947,7 +947,7 @@ fn synchronize_backlinks(
     dry_run: bool,
     session: Option<&lk_vault::MutationSession>,
     read: &lk_vault::ReadControl,
-) -> Result<output::BacklinksSyncReport, String> {
+) -> miette::Result<output::BacklinksSyncReport> {
     let policy = match rc.llm.provider {
         lk_core::config::LlmProvider::Queue => backlinks::SynthesisPolicy::Record,
         lk_core::config::LlmProvider::Noop => backlinks::SynthesisPolicy::Skip,
@@ -955,7 +955,7 @@ fn synchronize_backlinks(
     if dry_run {
         let (_, mut sync) =
             backlinks::plan_concept_backlinks(pages, &rc.root, &rc.vault_dirs, policy, read)
-                .map_err(|error| error.to_string())?;
+                .map_err(super::typed_error)?;
         sync.dry_run = true;
         return Ok(output::BacklinksSyncReport {
             changed: sync.updated.len(),
@@ -964,18 +964,20 @@ fn synchronize_backlinks(
         });
     }
     let _claim = if policy == backlinks::SynthesisPolicy::Record {
-        super::queue::claim_writer(&rc.root.join(".lorekeeper/queue"), false)
-            .map_err(|error| error.to_string())?
+        super::queue::claim_writer(&rc.root.join(".lorekeeper/queue"), false)?
     } else {
         None
     };
-    let (plan, report) = plan_backlinks_publication(rc, pages, policy, read)?;
+    let (plan, report) =
+        plan_backlinks_publication(rc, pages, policy, read).map_err(miette::Report::msg)?;
     if report.changed > 0 || report.queued > 0 {
-        read.check().map_err(|error| error.to_string())?;
+        read.check().map_err(super::typed_error)?;
         session
-            .ok_or("backlinks publication requires a vault mutation session")?
+            .ok_or_else(|| {
+                miette::miette!("backlinks publication requires a vault mutation session")
+            })?
             .apply(plan)
-            .map_err(|error| error.to_string())?;
+            .map_err(super::typed_error)?;
     }
     Ok(report)
 }

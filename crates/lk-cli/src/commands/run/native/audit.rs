@@ -10,7 +10,7 @@ impl Runner<'_> {
             self.config.graph.scope.follow_links,
             self.supervisor.read_control(),
         )
-        .map_err(|error| miette::miette!("{error}"))?;
+        .map_err(typed_error)?;
         let workflow = self
             .lease
             .as_ref()
@@ -23,7 +23,7 @@ impl Runner<'_> {
             workflow.id(),
             self.supervisor.read_control(),
         )
-        .into_diagnostic()?;
+        .map_err(typed_error)?;
         for (original, subject) in batch.iter().zip(&current) {
             self.audit_replans.inherit(&original.path, &subject.path);
         }
@@ -93,7 +93,7 @@ impl Runner<'_> {
                         continue;
                     }
                     Err(error) => {
-                        self.failure("audit input readiness", error);
+                        self.failure("audit input readiness", typed_error(error));
                         return;
                     }
                 }
@@ -164,7 +164,7 @@ impl Runner<'_> {
                 self.config.graph.scope.follow_links,
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))
+            .map_err(typed_error)
             .and_then(|pages| {
                 lk_graph::audit::plan_selected_partitioned_controlled(
                     &self.root,
@@ -176,7 +176,7 @@ impl Runner<'_> {
                     self.config.graph.audit.max_input_bytes,
                     self.supervisor.read_control(),
                 )
-                .into_diagnostic()
+                .map_err(typed_error)
             }) {
                 Ok(selected) => selected,
                 // A page a subject reads changed after its capture: that subject is deferred,
@@ -375,7 +375,7 @@ impl Runner<'_> {
             let Some(request) = request else {
                 self.failure(
                     "whole audit request",
-                    "selected subject requires bounded Work",
+                    miette::miette!("selected subject requires bounded Work"),
                 );
                 return;
             };
@@ -429,7 +429,7 @@ impl Runner<'_> {
                                 held.push((candidate.path, binding));
                             }
                         }
-                        session.apply(plan).into_diagnostic()?;
+                        session.apply(plan).map_err(typed_error)?;
                         held.into_iter()
                             .map(|(path, binding)| {
                                 let reason = binding.held(session.root())?.ok_or_else(|| {
@@ -556,7 +556,7 @@ impl Runner<'_> {
                     }
                     Err(error) => {
                         self.record_work_step(metrics);
-                        self.failure("audit input readiness", error);
+                        self.failure("audit input readiness", typed_error(error));
                         return;
                     }
                 }
@@ -607,7 +607,7 @@ impl Runner<'_> {
             }
             if let Err(error) = action_readiness
                 .guard(&mut actions)
-                .and_then(|()| session.apply(actions).into_diagnostic())
+                .and_then(|()| session.apply(actions).map_err(typed_error))
             {
                 self.record_work_step(metrics);
                 self.failure("whole audit action publication", error);

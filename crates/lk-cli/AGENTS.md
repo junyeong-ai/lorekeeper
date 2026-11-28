@@ -3,6 +3,9 @@
 Clap front door and orchestration (`main.rs`, `commands/`). Follow the root
 AGENTS.md for shared architecture, output, locks, and mutation rules. Delegate
 meaning to the owning crate; do not recreate its parser/status model in a command.
+A library error whose variant decides handling (input drift in `GraphError` or
+`VaultError`) converts with `commands::typed_error`; `into_diagnostic`, `Report::from_err`
+and `miette!` keep only its message, so a later `downcast_ref` finds nothing.
 
 Build the Clap command tree before inspecting all arguments or nested commands;
 deferred subcommands expose their names eagerly for name-only discovery.

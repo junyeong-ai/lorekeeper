@@ -9,8 +9,8 @@ struct DiscoverySubject {
 
 impl DiscoverySubject {
     fn load(root: &Path, path: &str, read: &lk_vault::ReadControl) -> miette::Result<Self> {
-        let absolute = lk_vault::page_path(root, Path::new(path)).into_diagnostic()?;
-        let raw = read.read_to_string(&absolute).into_diagnostic()?;
+        let absolute = lk_vault::page_path(root, Path::new(path)).map_err(typed_error)?;
+        let raw = read.read_to_string(&absolute).map_err(typed_error)?;
         Ok(Self {
             path: path.into(),
             revision: lk_core::concept::file_revision(&raw),
@@ -73,14 +73,17 @@ impl Runner<'_> {
                 &mut plan,
                 self.supervisor.read_control(),
             )
-            .map_err(|error| miette::miette!("{error}"))?
+            .map_err(typed_error)?
             {
                 lk_graph::audit::selection::PacketStatus::Unrecorded => {}
                 lk_graph::audit::selection::PacketStatus::Recorded
                 | lk_graph::audit::selection::PacketStatus::Changed => return Ok(false),
             }
-            self.supervisor.read_control().check().into_diagnostic()?;
-            session.apply(plan).into_diagnostic()?;
+            self.supervisor
+                .read_control()
+                .check()
+                .map_err(typed_error)?;
+            session.apply(plan).map_err(typed_error)?;
             Ok(true)
         })();
         drop(session);
@@ -99,7 +102,9 @@ impl Runner<'_> {
                     Ok(None) => {
                         return self.failure(
                             "audit attempt verification",
-                            "recorded preparation hold changed before verification",
+                            miette::miette!(
+                                "recorded preparation hold changed before verification"
+                            ),
                         );
                     }
                     Err(error) => return self.failure("audit attempt verification", error),
@@ -188,13 +193,13 @@ impl Runner<'_> {
                 })
                 .transpose()?;
             let mut plan = binding.plan_record(session.root(), disposition.clone())?;
-            let absolute =
-                lk_vault::page_path(session.root(), Path::new(&subject.path)).into_diagnostic()?;
+            let absolute = lk_vault::page_path(session.root(), Path::new(&subject.path))
+                .map_err(typed_error)?;
             let raw = self
                 .supervisor
                 .read_control()
                 .read_to_string(&absolute)
-                .into_diagnostic()?;
+                .map_err(typed_error)?;
             if lk_core::concept::file_revision(&raw) != subject.revision {
                 return Ok(false);
             }
@@ -202,8 +207,11 @@ impl Runner<'_> {
             if let Some(task) = task {
                 crate::commands::queue::guard_current_task(session.root(), task, &mut plan)?;
             }
-            self.supervisor.read_control().check().into_diagnostic()?;
-            session.apply(plan).into_diagnostic()?;
+            self.supervisor
+                .read_control()
+                .check()
+                .map_err(typed_error)?;
+            session.apply(plan).map_err(typed_error)?;
             Ok(true)
         })();
         drop(session);
@@ -225,7 +233,9 @@ impl Runner<'_> {
                     Ok(None) => {
                         return self.failure(
                             "discovery attempt verification",
-                            "recorded preparation hold changed before verification",
+                            miette::miette!(
+                                "recorded preparation hold changed before verification"
+                            ),
                         );
                     }
                     Err(error) => return self.failure("discovery attempt verification", error),
@@ -522,7 +532,7 @@ impl Runner<'_> {
             Ok(pages) => pages,
             Err(error) => {
                 self.record_work_step(metrics);
-                return self.failure("audit discovery recording", error);
+                return self.failure("audit discovery recording", typed_error(error));
             }
         };
         let mut usable = false;
@@ -558,7 +568,7 @@ impl Runner<'_> {
                 }
                 Err(error) => {
                     self.record_work_step(metrics);
-                    return self.failure("audit discovery recording", error);
+                    return self.failure("audit discovery recording", typed_error(error));
                 }
             }
         }

@@ -34,6 +34,17 @@ pub mod wiki;
 pub mod work;
 pub mod workflow;
 
+/// `error` as a report its handlers can still downcast to the error's own type.
+/// `IntoDiagnostic::into_diagnostic`, `Report::from_err` and `miette!` keep only the message,
+/// so a library error whose variant decides handling (input drift in `GraphError` or
+/// `VaultError`) converts here.
+pub(crate) fn typed_error<E>(error: E) -> miette::Report
+where
+    E: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static,
+{
+    miette::Report::msg(error)
+}
+
 pub struct GlobalOptions {
     pub config: Option<PathBuf>,
     pub template_dir: Option<PathBuf>,
@@ -459,5 +470,19 @@ sources:
         assert!(
             resolve_root_config(&opts(Some(missing)), Some(PathBuf::from("/override"))).is_err()
         );
+    }
+
+    #[test]
+    fn a_typed_error_report_keeps_the_variant_its_handler_matches() {
+        use miette::IntoDiagnostic;
+        let removed = || lk_graph::GraphError::AuditSubjectRemoved("wiki/concepts/a.md".into());
+        let typed = typed_error(removed());
+        assert!(matches!(
+            typed.downcast_ref::<lk_graph::GraphError>(),
+            Some(lk_graph::GraphError::AuditSubjectRemoved(path)) if path == "wiki/concepts/a.md"
+        ));
+        assert_eq!(typed.to_string(), removed().to_string());
+        let erased = Err::<(), _>(removed()).into_diagnostic().unwrap_err();
+        assert!(erased.downcast_ref::<lk_graph::GraphError>().is_none());
     }
 }
