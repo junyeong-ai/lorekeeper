@@ -185,7 +185,8 @@ paths:
   the first faulted stage and at most 1024 bytes of its detail, while the job report
   keeps the full detail. A failure caused by input drift is not fatal. One typed
   predicate (`run::is_input_drift`) decides it: `SourceChanged`, a publication rejection
-  whose kind is an input change, `TaskNotCurrent`, the audit drift variants of
+  whose kind is an input change, a `TaskNotCurrent` whose status means its inputs moved on
+  (`TaskStatus::is_input_change`; an unreadable or unresolvable target is a fault), the audit drift variants of
   `GraphError`, `VaultError::{MutationConflict, RssOriginChanged}`. Such a failure records
   its failed stage and ends the batch with unfinished work retained (`halt_kind:
   inputs-changed`, campaign stop `inputs-changed`) without pausing; the next run plans

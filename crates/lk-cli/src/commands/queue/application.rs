@@ -86,7 +86,9 @@ pub(in crate::commands) fn is_semantic_context_changed(error: &miette::Report) -
 /// longer current. A reply prepared from the old inputs is discarded, not a fault.
 pub(in crate::commands) fn is_work_input_changed(error: &miette::Report) -> bool {
     is_semantic_context_changed(error)
-        || error.downcast_ref::<super::TaskNotCurrent>().is_some()
+        || error
+            .downcast_ref::<super::TaskNotCurrent>()
+            .is_some_and(super::TaskNotCurrent::is_input_change)
         || matches!(
             error.downcast_ref::<PublicationRejection>(),
             Some(rejection) if rejection.kind == RejectionKind::EvidenceScopeChanged

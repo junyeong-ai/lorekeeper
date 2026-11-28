@@ -838,7 +838,7 @@ mod native {
             .is_some()
             || error
                 .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
-                .is_some()
+                .is_some_and(crate::commands::queue::TaskNotCurrent::is_input_change)
             || error
                 .downcast_ref::<lk_vault::VaultError>()
                 .is_some_and(vault_drift)
@@ -9031,7 +9031,10 @@ mod native {
             for drift in [
                 miette::Report::new(crate::commands::work::SourceChanged::new("edited")),
                 rejection(RejectionKind::SemanticContextChanged, "changed"),
-                miette::Report::new(crate::commands::queue::TaskNotCurrent(path())),
+                miette::Report::new(crate::commands::queue::TaskNotCurrent {
+                    status: Some(crate::commands::queue::TaskStatus::Stale),
+                    detail: path(),
+                }),
                 typed_error(GraphError::AuditInputChanged(path())),
                 typed_error(GraphError::AuditScreeningChanged),
                 typed_error(GraphError::AuditSubjectRemoved(path())),
@@ -9049,6 +9052,14 @@ mod native {
             }
             for fault in [
                 rejection(RejectionKind::InvalidSection, "invalid"),
+                miette::Report::new(crate::commands::queue::TaskNotCurrent {
+                    status: Some(crate::commands::queue::TaskStatus::Unreadable),
+                    detail: path(),
+                }),
+                miette::Report::new(crate::commands::queue::TaskNotCurrent {
+                    status: Some(crate::commands::queue::TaskStatus::InvalidTarget),
+                    detail: path(),
+                }),
                 typed_error(GraphError::Io("unreadable".into())),
                 typed_error(lk_vault::VaultError::Original("missing payload".into())),
                 miette::miette!("{}", GraphError::AuditSubjectRemoved(path())),

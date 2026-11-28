@@ -187,6 +187,15 @@ enum Artifact {
 }
 
 impl TaskStatus {
+    /// Whether a task that has this status, after it was selected as current, means its
+    /// inputs moved on. An unreadable or unresolvable target is a fault, never input drift.
+    pub(in crate::commands) fn is_input_change(self) -> bool {
+        match self {
+            TaskStatus::Done | TaskStatus::Stale | TaskStatus::MissingTarget => true,
+            TaskStatus::Current | TaskStatus::Unreadable | TaskStatus::InvalidTarget => false,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             TaskStatus::Current => "current",
@@ -300,13 +309,26 @@ fn resolve_vault(
     Ok((super::workflow::bind_root(root)?, pin, config))
 }
 
-/// A selected task that is no longer current pending work: superseded, answered or gone.
+/// A selected task that is no longer current pending work, with the status its target now
+/// has (`None`: the task left the pending queue).
 #[derive(Debug, Clone)]
-pub(in crate::commands) struct TaskNotCurrent(pub String);
+pub(in crate::commands) struct TaskNotCurrent {
+    pub status: Option<TaskStatus>,
+    pub detail: String,
+}
+
+impl TaskNotCurrent {
+    /// Whether the task's inputs moved on (answered, re-rendered, its target removed, or the
+    /// task left the queue), rather than its target being unreadable or unresolvable, which is
+    /// a fault to repair.
+    pub(in crate::commands) fn is_input_change(&self) -> bool {
+        self.status.is_none_or(TaskStatus::is_input_change)
+    }
+}
 
 impl std::fmt::Display for TaskNotCurrent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(formatter)
+        self.detail.fmt(formatter)
     }
 }
 
@@ -535,7 +557,10 @@ impl PendingTasks {
         let task = selected
             .next()
             .ok_or_else(|| {
-                miette::Report::new(TaskNotCurrent(format!("current task not found: {task_id}")))
+                miette::Report::new(TaskNotCurrent {
+                    status: None,
+                    detail: format!("current task not found: {task_id}"),
+                })
             })?
             .clone();
         if selected.next().is_some() {
@@ -568,10 +593,10 @@ impl PendingTasks {
             )? == TaskStatus::Current;
         }
         if !allowed {
-            return Err(miette::Report::new(TaskNotCurrent(format!(
-                "task {task_id} is {}, not current",
-                status.as_str()
-            ))));
+            return Err(miette::Report::new(TaskNotCurrent {
+                status: Some(status),
+                detail: format!("task {task_id} is {}, not current", status.as_str()),
+            }));
         }
         task.validate_retained_input()
             .map_err(|e| miette::miette!("{e}"))?;
@@ -3549,6 +3574,35 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("daily/s")).unwrap();
         std::fs::write(dir.path().join(&task.target.vault_path), page).unwrap();
         assert_eq!(classify_task(dir.path(), &task).unwrap(), TaskStatus::Done);
+    }
+
+    #[test]
+    fn only_a_task_whose_inputs_moved_on_is_input_change() {
+        for (status, moved) in [
+            (TaskStatus::Done, true),
+            (TaskStatus::Stale, true),
+            (TaskStatus::MissingTarget, true),
+            (TaskStatus::Unreadable, false),
+            (TaskStatus::InvalidTarget, false),
+        ] {
+            let gone = TaskNotCurrent {
+                status: Some(status),
+                detail: format!("task is {}", status.as_str()),
+            };
+            assert_eq!(gone.is_input_change(), moved, "{status:?}");
+            assert_eq!(
+                application::is_work_input_changed(&miette::Report::new(gone)),
+                moved,
+                "an unreadable or unresolvable target is a fault, never replanned: {status:?}"
+            );
+        }
+        assert!(
+            TaskNotCurrent {
+                status: None,
+                detail: "task left the queue".into(),
+            }
+            .is_input_change()
+        );
     }
 
     #[test]
