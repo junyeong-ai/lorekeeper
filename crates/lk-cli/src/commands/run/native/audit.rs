@@ -132,8 +132,7 @@ impl Runner<'_> {
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
                         if let Some(deferred) = readiness.deferred().last().cloned() {
-                            self.retain_deferral(&deferred);
-                            self.count_deferred_audit(deferred);
+                            self.defer_audit(deferred);
                         }
                         pending.remove(&index);
                         continue;
@@ -621,8 +620,7 @@ impl Runner<'_> {
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
                         if let Some(deferred) = readiness.deferred().last().cloned() {
-                            self.retain_deferral(&deferred);
-                            self.count_deferred_audit(deferred);
+                            self.defer_audit(deferred);
                         }
                         for index in indices {
                             pending.remove(index);

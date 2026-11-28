@@ -7291,11 +7291,7 @@ mod native {
                             "audit inputs changed",
                             format!("{subject}: {reason}"),
                         );
-                        self.audit_deferrals
-                            .deferred
-                            .insert(subject.clone(), reason);
-                        self.audit_deferred_paths.insert(subject);
-                        self.result.audit_deferred_count = self.audit_deferred_paths.len();
+                        self.defer_audit_subject(&subject, reason, None);
                     }
                     Err(lk_graph::GraphError::AuditSubjectRemoved(path))
                         if selection.contains(&path) =>
@@ -7310,14 +7306,14 @@ mod native {
             self.result
                 .audit_deferred
                 .retain(|item| !checked_paths.contains(&item.path));
-            self.audit_deferred_paths.extend(deferred_paths);
-            self.result
-                .audit_deferred
-                .extend_from_slice(readiness.deferred());
-            self.result
-                .audit_deferred
-                .truncate(super::super::audit::MAX_DEFERRED_DETAILS);
-            self.result.audit_deferred_count = self.audit_deferred_paths.len();
+            // A readiness hold keeps its subject out of the rest of the invocation like any
+            // other deferral; the report keeps the details it has room for.
+            for deferred in readiness.deferred().to_vec() {
+                self.defer_audit(deferred);
+            }
+            for path in deferred_paths {
+                self.defer_audit_subject(&path, "its inputs are not ready".into(), None);
+            }
             let mut plan = plan;
             plan.candidates
                 .retain(|candidate| candidate.reason != lk_graph::audit::AuditReason::Current);
@@ -7334,19 +7330,16 @@ mod native {
         ) {
             self.audit_deferrals.removed.insert(path.to_owned());
             self.defer_for_drift("audit subject removed", path);
-            match planned {
-                Some(candidate) => self.count_deferred_audit(DeferredAudit {
+            self.count_audit_deferral(
+                path,
+                planned.map(|candidate| DeferredAudit {
                     kind: candidate.kind,
                     path: candidate.path.clone(),
                     file_revision: candidate.file_revision.clone(),
                     input_revision: candidate.input_revision.clone(),
                     reasons: vec!["the subject left the vault after it was planned".into()],
                 }),
-                None => {
-                    self.audit_deferred_paths.insert(path.to_owned());
-                    self.result.audit_deferred_count = self.audit_deferred_paths.len();
-                }
-            }
+            );
         }
 
         fn audit_screening_limits(
@@ -7409,14 +7402,11 @@ mod native {
             candidate: &lk_graph::audit::AuditCandidate,
             reason: String,
         ) {
-            self.audit_deferrals
-                .deferred
-                .insert(candidate.path.clone(), reason.clone());
             self.defer_for_drift(
                 "audit inputs changed",
                 format!("{}: {reason}", candidate.path),
             );
-            self.count_deferred_audit(DeferredAudit {
+            self.defer_audit(DeferredAudit {
                 kind: candidate.kind,
                 path: candidate.path.clone(),
                 file_revision: candidate.file_revision.clone(),
@@ -7425,15 +7415,39 @@ mod native {
             });
         }
 
-        /// Counts `deferred` with this run's deferred subjects, keeping its detail while the
+        /// Counts `path` with this run's deferred subjects, keeping its `detail` while the
         /// report has room.
-        fn count_deferred_audit(&mut self, deferred: DeferredAudit) {
-            if self.audit_deferred_paths.insert(deferred.path.clone())
+        fn count_audit_deferral(&mut self, path: &str, detail: Option<DeferredAudit>) {
+            if self.audit_deferred_paths.insert(path.to_owned())
+                && let Some(detail) = detail
                 && self.result.audit_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS
             {
-                self.result.audit_deferred.push(deferred);
+                self.result.audit_deferred.push(detail);
             }
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
+        }
+
+        /// Defers the subject at `path` for the rest of the invocation: no later plan or
+        /// admission selects it (`AuditDeferrals`, with its first `reason`) and the report counts
+        /// it, with its `detail` while there is room. Every deferral a later plan must keep out
+        /// goes through here (planning drift, measurement drift, readiness holds, screening
+        /// limits), so a counted subject is always retained and a retained one always counted.
+        fn defer_audit_subject(
+            &mut self,
+            path: &str,
+            reason: String,
+            detail: Option<DeferredAudit>,
+        ) {
+            self.audit_deferrals
+                .deferred
+                .entry(path.to_owned())
+                .or_insert(reason);
+            self.count_audit_deferral(path, detail);
+        }
+
+        fn defer_audit(&mut self, deferred: DeferredAudit) {
+            let (path, reason) = (deferred.path.clone(), deferred.reasons.join("; "));
+            self.defer_audit_subject(&path, reason, Some(deferred));
         }
 
         /// Counts the subjects `plan` skipped because an input changed while it read them, and
@@ -7453,18 +7467,8 @@ mod native {
                         drift.input
                     )],
                 };
-                self.retain_deferral(&deferred);
-                self.count_deferred_audit(deferred);
+                self.defer_audit(deferred);
             }
-        }
-
-        /// Keeps `deferred`'s subject out of every later plan and admission of the invocation
-        /// (`AuditDeferrals`), with its first reason.
-        fn retain_deferral(&mut self, deferred: &DeferredAudit) {
-            self.audit_deferrals
-                .deferred
-                .entry(deferred.path.clone())
-                .or_insert_with(|| deferred.reasons.join("; "));
         }
 
         fn defer_audit_screening(
@@ -7472,13 +7476,17 @@ mod native {
             candidate: &lk_graph::audit::AuditCandidate,
             reason: String,
         ) {
-            self.audit_deferrals
-                .deferred
-                .insert(candidate.path.clone(), reason.clone());
             self.deferred(
                 "audit candidate selection",
                 format!("{}: {reason}", candidate.path),
             );
+            self.defer_audit(DeferredAudit {
+                kind: candidate.kind,
+                path: candidate.path.clone(),
+                file_revision: candidate.file_revision.clone(),
+                input_revision: candidate.input_revision.clone(),
+                reasons: vec![reason],
+            });
         }
 
         async fn screen_audit_inputs(
