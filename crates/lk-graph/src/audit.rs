@@ -265,12 +265,16 @@ fn record_discovery_guarded(
     let path = lk_vault::page_path(root, Path::new(&request.path)).map_err(error)?;
     let raw = read.read_to_string(&path).map_err(GraphError::from)?;
     let revision = source_revision(&lk_vault::parse_page(&raw).map_err(error)?);
+    // A subject a writer edited after its discovery was requested is that subject's drift.
     if file_revision(&raw) != request.file_revision
         || !pages.iter().any(|page| {
             page.path == Path::new(&request.path) && page.revision.as_deref() == Some(&revision)
         })
     {
-        return Err(error("discovery subject changed during recording"));
+        return Err(GraphError::AuditSubjectInputChanged {
+            subject: request.path.clone(),
+            input: request.path.clone(),
+        });
     }
     if matches!(mode, DiscoveryWrite::IfMissing)
         && receipts
@@ -4921,6 +4925,45 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.path().join(STATE)).unwrap(),
             ledger
+        );
+    }
+
+    #[test]
+    fn a_subject_edited_before_its_discovery_records_is_that_subjects_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let path = "wiki/documents/subject.md";
+        let raw = "---\ntype: document\ntitle: Subject\n---\nAn authored scope.\n";
+        write(root.path(), path, raw);
+        let pages = scan(root.path());
+        write(
+            root.path(),
+            path,
+            "---\ntype: document\ntitle: Subject\n---\nAn edited scope.\n",
+        );
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let refused = record_discovery(
+            &session,
+            &dirs,
+            &pages,
+            AuditDiscoveryRequest {
+                path: path.into(),
+                file_revision: file_revision(raw),
+                queries: vec![lk_vault::DiscoveryQuery {
+                    query: "authored scope".into(),
+                    phrase: true,
+                    spacing: false,
+                }],
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                GraphError::AuditSubjectInputChanged { subject, input }
+                    if subject == path && input == path
+            ),
+            "{refused}"
         );
     }
 

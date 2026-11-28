@@ -1116,6 +1116,7 @@ async fn apply_into(
                 application::RejectionKind::InvalidProposalIdentity,
                 "extraction result does not match its pending task",
             );
+            let message = error.to_string();
             application::reject_group(
                 report,
                 &vault_root,
@@ -1123,10 +1124,10 @@ async fn apply_into(
                 &config_revision,
                 task,
                 &snapshots,
-                &error,
+                error,
                 mutation.as_ref(),
             )?;
-            fail(error.to_string());
+            fail(message);
             failed += 1;
             continue;
         }
@@ -1259,6 +1260,7 @@ async fn apply_into(
                 application::RejectionKind::ConflictingProposals,
                 "conflicting extraction results for the same retained task and input; review and reconcile all retained proposals to one agreed value before retrying",
             );
+            let message = error.to_string();
             application::reject_group(
                 report,
                 &vault_root,
@@ -1266,10 +1268,10 @@ async fn apply_into(
                 &config_revision,
                 task,
                 &snapshots,
-                &error,
+                error,
                 mutation.as_ref(),
             )?;
-            fail(error.to_string());
+            fail(message);
             failed += 1;
             continue;
         }
@@ -1278,6 +1280,7 @@ async fn apply_into(
                 application::RejectionKind::TargetChanged,
                 "target changed; read the current page and regenerate this result",
             );
+            let message = error.to_string();
             application::reject_group(
                 report,
                 &vault_root,
@@ -1285,10 +1288,10 @@ async fn apply_into(
                 &config_revision,
                 task,
                 &snapshots,
-                &error,
+                error,
                 mutation.as_ref(),
             )?;
-            fail(error.to_string());
+            fail(message);
             failed += 1;
             continue;
         }
@@ -1302,6 +1305,7 @@ async fn apply_into(
         let result_guards = match guarded {
             Ok(guards) => guards,
             Err(error) => {
+                let message = error.to_string();
                 application::reject_group(
                     report,
                     &vault_root,
@@ -1309,10 +1313,10 @@ async fn apply_into(
                     &config_revision,
                     task,
                     &snapshots,
-                    &error,
+                    error,
                     mutation.as_ref(),
                 )?;
-                fail(error.to_string());
+                fail(message);
                 failed += 1;
                 continue;
             }
@@ -1349,6 +1353,7 @@ async fn apply_into(
             Err(lk_pipeline::PipelineError::RejectedResult(detail)) => {
                 let error =
                     application::rejection(application::RejectionKind::InvalidProposal, detail);
+                let message = error.to_string();
                 application::reject_group(
                     report,
                     &vault_root,
@@ -1356,10 +1361,10 @@ async fn apply_into(
                     &config_revision,
                     task,
                     &snapshots,
-                    &error,
+                    error,
                     mutation.as_ref(),
                 )?;
-                fail(error.to_string());
+                fail(message);
                 failed += 1;
             }
             Err(error) => return Err(miette::miette!("{error}")),
@@ -1375,9 +1380,11 @@ async fn apply_into(
         let current = read_page(&vault_root, path)
             .map_err(|error| miette::miette!("read {}: {error}", path.display()))?;
         if synthesis::revision(&current) != *expected {
-            return Err(miette::miette!(
-                "target changed before publication: {}; regenerate its extraction result",
-                path.display()
+            return Err(miette::Report::new(
+                crate::commands::work::SourceChanged::new(format!(
+                    "target changed before publication: {}; regenerate its extraction result",
+                    path.display()
+                )),
             ));
         }
     }

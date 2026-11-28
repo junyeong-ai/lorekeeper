@@ -386,7 +386,7 @@ pub(super) fn apply(
                         config_revision,
                         task,
                         &snapshots,
-                        &error,
+                        error,
                         session,
                     ) {
                         report.report.fail(fatal);
@@ -473,13 +473,13 @@ fn guard_citations(
             if rss.is_none() {
                 rss = Some(
                     lk_vault::RssEvidenceCapture::build(root, &lk_vault::ReadControl::default())
-                        .map_err(|error| miette::miette!("{error}"))?,
+                        .map_err(crate::commands::typed_error)?,
                 );
             }
             rss.as_mut()
                 .expect("RSS capture initialized")
                 .load_citation(target, citation)
-                .map_err(|error| miette::miette!("{error}"))?;
+                .map_err(crate::commands::typed_error)?;
         } else {
             let path = resolve_target_path(&citation.path)
                 .ok_or_else(|| miette::miette!("invalid citation path: {}", citation.path))?;
@@ -488,17 +488,18 @@ fn guard_citations(
             let page = lk_core::frontmatter::parse_page(&content)
                 .map_err(|error| miette::miette!("parse {}: {error}", path.display()))?;
             if lk_core::concept::source_revision(&page) != citation.revision {
-                return Err(miette::miette!(
-                    "synthesis citation changed before publication: {}",
-                    path.display()
+                return Err(miette::Report::new(
+                    crate::commands::work::SourceChanged::new(format!(
+                        "synthesis citation changed before publication: {}",
+                        path.display()
+                    )),
                 ));
             }
             plan.require(path, content, lk_vault::Pin::Editable);
         }
     }
     if let Some(rss) = rss {
-        rss.guard(plan)
-            .map_err(|error| miette::miette!("{error}"))?;
+        rss.guard(plan).map_err(crate::commands::typed_error)?;
     }
     Ok(())
 }

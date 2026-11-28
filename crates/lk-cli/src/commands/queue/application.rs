@@ -618,14 +618,15 @@ pub(super) fn reject_group(
     config_revision: &str,
     task: &lk_queue::QueueTask,
     snapshots: &[ProposalSnapshot],
-    error: &miette::Report,
+    error: miette::Report,
     session: Option<&lk_vault::MutationSession>,
 ) -> miette::Result<()> {
     if let Some(held) = error.downcast_ref::<super::SynthesisHeld>() {
         return hold_group(report, root, task, snapshots, held);
     }
+    // Anything but a rejection is the failure itself, kept typed for the run's classification.
     let Some(rejection) = error.downcast_ref::<PublicationRejection>() else {
-        return Err(miette::miette!("{error}"));
+        return Err(error);
     };
     let identity = TaskIdentity::capture(root, task)?;
     if task.kind == lk_queue::TaskKind::SynthesizeConcept
