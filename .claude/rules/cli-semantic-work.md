@@ -37,7 +37,10 @@ paths:
   reports measured bytes. Keep both local to their admitted target. Stored corruption,
   invalid evidence and I/O remain strict; shared preparation preserves independent work.
 - Resume current explicit Work plans even when the remaining batch fits whole input;
-  validate their exact manifest before using recorded observations.
+  validate their exact manifest before using recorded observations. A Work directory of the
+  preparation's reading (under any partition policy) that holds artifacts but no manifest
+  lost it: that is `RetainedWorkInvalid`, never a new plan or the whole-input route, while an
+  empty directory holds no Work.
 - Context pages (selected owners, discovery matches, audit related pages) follow one
   `ContextReading` per preparation (`work/resources.rs`). An audit Work reads only the
   candidate's bounded `related_pages` as resources. Its `context_cards` stay outside the

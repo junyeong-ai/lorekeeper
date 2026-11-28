@@ -338,11 +338,23 @@ fn planned(
     }
     // Work planned before page alignment continues under its byte-filled parts.
     let byte_filled = expected(state::Partition::LegacyInspection)?;
-    Ok(if byte_filled.is_planned(root)? {
-        Planned::Stored(byte_filled)
-    } else {
-        Planned::New(current)
-    })
+    if byte_filled.is_planned(root)? {
+        return Ok(Planned::Stored(byte_filled));
+    }
+    // A Work directory of this reading that holds artifacts without its manifest lost it:
+    // damaged retained Work, which a new plan (or the whole-input route) must not replace.
+    for work in [&byte_only, &current, &byte_filled] {
+        if has_entries(&root.join(".lorekeeper/work").join(&work.plan.id))? {
+            return Err(publication_rejection(
+                RejectionKind::RetainedWorkInvalid,
+                format!(
+                    "stored work {} lost its manifest beside its other artifacts; repair or remove it",
+                    work.plan.id
+                ),
+            ));
+        }
+    }
+    Ok(Planned::New(current))
 }
 
 fn expected_partitioned(
@@ -420,6 +432,15 @@ fn persist_prepared(
         })?;
     }
     Ok(work)
+}
+
+/// Whether `directory` exists and holds an entry.
+fn has_entries(directory: &Path) -> miette::Result<bool> {
+    match std::fs::read_dir(directory) {
+        Ok(mut entries) => Ok(entries.next().transpose().into_diagnostic()?.is_some()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).into_diagnostic(),
+    }
 }
 
 /// Guard `result` through `expected`, the Work `prepared` continues (`expected()`).
@@ -6572,6 +6593,36 @@ mod tests {
         assert_eq!(
             rejection(drafted(&exact)),
             Some(RejectionKind::SemanticContextChanged)
+        );
+
+        let current =
+            resources::task_with_discovery(&root, &config, &task.task_id, &discovery).unwrap();
+        let session = MutationSession::acquire(&root).unwrap();
+        let stored = Work::create(
+            &session,
+            &current.resources,
+            &current.revision(&config_revision).unwrap(),
+            current.context.clone(),
+            limits(&config).unwrap(),
+        )
+        .unwrap();
+        drop(session);
+        assert_eq!(stored.plan.parts.len(), 1);
+        let manifest = root
+            .join(".lorekeeper/work")
+            .join(&stored.plan.id)
+            .join("plan.json");
+        std::fs::remove_file(&manifest).unwrap();
+        std::fs::write(manifest.with_file_name("seal.json"), "{}").unwrap();
+        assert_eq!(
+            rejection(drafted(&current)),
+            Some(RejectionKind::RetainedWorkInvalid),
+            "a single-part Work that lost its manifest beside its other artifacts is damage, never whole input"
+        );
+        std::fs::remove_file(manifest.with_file_name("seal.json")).unwrap();
+        assert!(
+            apply(drafted(&current)).is_ok(),
+            "a Work directory left empty holds no Work"
         );
     }
 
