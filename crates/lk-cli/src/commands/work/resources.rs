@@ -650,6 +650,7 @@ impl<'a> Capture<'a> {
     /// Reads a scoped review. A review that no longer exists is not read: its dependency
     /// inventory still names it, but nothing a synthesis or audit could cite remains, and its
     /// absence is guarded so a review restored before publication refuses the stale scope.
+    /// Evidence a read review cites that is gone is guarded absent the same way.
     fn review(&mut self, review: &lk_graph::audit::AuditReviewDependency) -> miette::Result<()> {
         if review.state == lk_graph::audit::AuditReviewState::Missing {
             lk_vault::page_path(self.root, Path::new(&review.path)).into_diagnostic()?;
@@ -667,6 +668,11 @@ impl<'a> Capture<'a> {
             SemanticAuthority::Review,
         )?;
         for evidence in &review.evidence {
+            if evidence.current.is_none() {
+                lk_vault::page_path(self.root, Path::new(&evidence.recorded.path))
+                    .into_diagnostic()?;
+                self.absent.insert(PathBuf::from(&evidence.recorded.path));
+            }
             for current in evidence.current.iter().chain(&evidence.archived) {
                 let authority = match evidence.archived.as_ref() {
                     Some(archive) if archive.path == current.path => {
@@ -2642,6 +2648,38 @@ mod tests {
         assert!(
             error.downcast_ref::<SourceChanged>().is_none(),
             "a read nothing placed keeps its error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_scoped_reviews_missing_evidence_is_captured_as_absent() {
+        let (directory, _, _, _) = synthesis_batch_fixture();
+        let root = directory.path().canonicalize().unwrap();
+        let review = "wiki/explorations/review.md";
+        let raw = "---\ntype: exploration\ntitle: Review\n---\nAn open question.\n";
+        write(&root, review, raw);
+        let dependency = lk_graph::audit::AuditReviewDependency {
+            path: review.into(),
+            file_revision: Some(file_revision(raw)),
+            source_revision: None,
+            state: lk_graph::audit::AuditReviewState::Open,
+            errors: vec![],
+            evidence: vec![lk_graph::audit::AuditReviewEvidence {
+                recorded: Citation {
+                    path: "wiki/documents/gone.md".into(),
+                    revision: "0".repeat(64),
+                    rss_event: None,
+                },
+                current: None,
+                archived: None,
+            }],
+        };
+        let read = lk_vault::ReadControl::default();
+        let mut capture = Capture::new(&root, &read);
+        capture.review(&dependency).unwrap();
+        assert!(
+            capture.absent.contains(Path::new("wiki/documents/gone.md")),
+            "evidence a review cites that is gone must stay gone until publication"
         );
     }
 
