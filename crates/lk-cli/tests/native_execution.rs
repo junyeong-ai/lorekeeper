@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::disallowed_methods)]
 
 #[path = "support/home.rs"]
 mod home;

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 pub mod captured_file;
 pub mod concept;
 pub mod concept_sources;
@@ -20,6 +21,7 @@ pub mod markdown;
 pub mod math;
 pub mod network;
 pub mod origin;
+pub mod process;
 pub mod rss_evidence;
 pub mod rss_original;
 pub mod semantic;

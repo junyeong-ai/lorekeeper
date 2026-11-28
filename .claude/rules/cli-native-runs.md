@@ -219,9 +219,14 @@ paths:
   host failures and configuration or root drift remain faults. Keep errors typed down to
   `Runner::failure` (`commands::typed_error`); a message is never classified. A child the
   run starts under the lease classifies its own failure with the same predicate
-  (`drift::FailureKind::of`) and writes `drift::ChildFailure` (`kind`, `detail`) to the
-  file the runner names in `LORE_CHILD_FAILURE_REPORT`; a failed child halts the job as
-  that kind, and as a fault when it wrote no report, never from its exit code or text.
+  (`drift::FailureKind::of`) and writes `drift::ChildFailure` (`kind`, `detail`) into the
+  report the runner names in `LORE_CHILD_FAILURE_REPORT`. The runner creates that file
+  exclusively and owner-only and reads it back through the descriptor it kept, never by
+  its name; the child opens the named file without creating it or following a link, and
+  every process Lore starts goes without the variable (`lk_core::process::command`), so
+  only the one child the runner names can answer. A failed child halts the job as that
+  kind, and as a fault when its report is missing, replaced or unreadable, never from its
+  exit code or text.
   `queue apply --json` carries the same `kind` in `fatal`, and its report halts as input
   drift only when that fatal is its one blocker (`Report::failure_kind`).
   Explicit `--resume` clears the pause without clearing usage or semantic holds.

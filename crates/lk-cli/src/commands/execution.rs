@@ -950,7 +950,8 @@ fn result_invocation(
             }
         }
     }
-    let mut command = tokio::process::Command::new(profile.executable());
+    let mut command =
+        tokio::process::Command::from(lk_core::process::command(profile.executable()));
     let binary = installation
         .binary()
         .to_str()
@@ -1162,7 +1163,7 @@ pub(super) fn lore_command(
 ) -> miette::Result<tokio::process::Command> {
     let executable =
         std::env::current_exe().map_err(|e| miette::miette!("current executable: {e}"))?;
-    let mut command = tokio::process::Command::new(executable);
+    let mut command = tokio::process::Command::from(lk_core::process::command(executable));
     command.arg("--config").arg(super::find_config(opts)?);
     if let Some(path) = &opts.template_dir {
         command.arg("--template-dir").arg(path);

@@ -318,7 +318,7 @@ pub async fn run(
             wait,
         )
         .await?;
-        let mut child = std::process::Command::new(program);
+        let mut child = lk_core::process::command(program);
         child.args(arguments);
         child.env("LORE_INSTALL_DATA_DIR", installation.data_dir());
         lease.configure(&mut child);

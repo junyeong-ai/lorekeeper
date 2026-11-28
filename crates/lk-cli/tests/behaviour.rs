@@ -18,6 +18,7 @@
 //! [`every_command_is_swept_or_exempt`] until it is swept or written into
 //! [`EXEMPT`] with its reason. A hand-kept list would be the same allowlist
 //! this exists to complement.
+#![allow(clippy::disallowed_methods)]
 
 #[path = "support/home.rs"]
 mod home;

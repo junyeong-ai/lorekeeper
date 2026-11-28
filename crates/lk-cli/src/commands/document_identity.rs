@@ -77,7 +77,7 @@ struct HistoricalTree {
     blobs: BTreeMap<String, String>,
 }
 fn git(repo: &Path, args: &[&str]) -> miette::Result<String> {
-    let output = std::process::Command::new("git")
+    let output = lk_core::process::command("git")
         .arg("--no-replace-objects")
         .arg("-C")
         .arg(repo)

@@ -123,6 +123,13 @@ config loading and the shared filesystem primitives intentionally perform I/O.
   plan identity. Cutting differently needs a new policy, and every builder stored Work can
   still name stays byte-identical (the v2 byte-filled plan identity is pinned in a test).
 
+## Processes (`process.rs`)
+
+- `process::command` is the one process constructor; the workspace `clippy.toml` disallows
+  `std::process::Command::new` and `tokio::process::Command::new` outside tests. It
+  removes the variables addressed to one process (`CHILD_FAILURE_REPORT_ENV`), so no process
+  Lore starts inherits them; a caller sets one again only on the child it addresses.
+
 ## Durable files (`fs.rs`)
 
 - `resolve_resource` resolves existing aliases and appends missing path components.

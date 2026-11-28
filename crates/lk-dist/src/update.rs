@@ -76,7 +76,7 @@ fn precedence(a: &Version, b: &Version) -> Ordering {
 /// signing — and it answers all of them at once. Comparing bytes or reading a header would
 /// each answer one.
 pub fn running_version(binary: &Path) -> Result<Version, DistError> {
-    let output = std::process::Command::new(binary)
+    let output = lk_core::process::command(binary)
         .arg("--version")
         .output()
         .map_err(|e| DistError::io(format!("running {}", binary.display()), e))?;

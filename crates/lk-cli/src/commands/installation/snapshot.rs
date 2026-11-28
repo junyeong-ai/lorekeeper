@@ -46,7 +46,7 @@ pub(super) fn run(
                 ));
             }
         }
-        let mut child = std::process::Command::new(program);
+        let mut child = lk_core::process::command(program);
         child.args(arguments);
         protection.configure_snapshot(&mut child)?;
         for descriptor in std::iter::once(mutation.as_fd()).chain(queue.as_ref().map(AsFd::as_fd)) {

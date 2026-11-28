@@ -75,7 +75,7 @@ pub fn verify_sidecar(archive: &[u8], sidecar: &str, expected_name: &str) -> Res
 /// Opt-in because it needs the `gh` CLI, and hard-failing when asked for: a verification the
 /// caller requested and did not get is a failed update, never a warning.
 pub fn verify_attestation(archive: &Path) -> Result<(), DistError> {
-    let status = std::process::Command::new("gh")
+    let status = lk_core::process::command("gh")
         .arg("attestation")
         .arg("verify")
         .arg(archive)

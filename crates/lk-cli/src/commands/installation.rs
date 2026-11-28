@@ -662,7 +662,7 @@ fn redeploy_through(
     data_dir: &std::path::Path,
     protection: &Protection,
 ) {
-    let mut child = std::process::Command::new(binary);
+    let mut child = lk_core::process::command(binary);
     // The config the CALLER named, not whatever the child would auto-discover: `--config`
     // decides which vault's `AGENTS.md` the deploy regenerates, and a child that re-discovered
     // it would rewrite the contract of a different vault and leave this one behind.

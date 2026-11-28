@@ -6,6 +6,7 @@
 //! home, and its installation claims would block an installer running there. Each test
 //! binary includes this module and uses the part it needs.
 #![allow(dead_code)]
+#![allow(clippy::disallowed_methods)]
 
 use std::path::Path;
 use std::process::Command;

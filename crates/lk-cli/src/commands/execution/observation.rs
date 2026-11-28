@@ -343,7 +343,8 @@ pub(super) fn build(
         .map_err(|error| miette::miette!("observation workspace: {error}"))?;
     let schema = serde_json::to_string(&response_schema)
         .map_err(|error| miette::miette!("observation schema: {error}"))?;
-    let mut command = tokio::process::Command::new(profile.executable());
+    let mut command =
+        tokio::process::Command::from(lk_core::process::command(profile.executable()));
     command.current_dir(directory.path());
     match profile {
         ExecutionProfile::ClaudeCode {

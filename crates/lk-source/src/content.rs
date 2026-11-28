@@ -426,7 +426,7 @@ async fn run_processor(
         }),
         allow_empty: format == InputFormat::Pdf,
     };
-    let mut command = tokio::process::Command::new(&config.python);
+    let mut command = tokio::process::Command::from(lk_core::process::command(&config.python));
     command.env_clear();
     for name in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR"] {
         if let Some(value) = std::env::var_os(name) {

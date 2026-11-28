@@ -66,10 +66,16 @@ pub(crate) fn is_input_drift(error: &miette::Report) -> bool {
             })
 }
 
-/// The environment variable naming the file a child command writes its failure to.
-pub(crate) const CHILD_FAILURE_ENV: &str = "LORE_CHILD_FAILURE_REPORT";
+/// The environment variable naming the report a native run created for one child command.
+/// Every process Lore starts goes without it (`lk_core::process::command`); the run sets it
+/// on the one child it names.
+pub(crate) const CHILD_FAILURE_ENV: &str = lk_core::process::CHILD_FAILURE_REPORT_ENV;
 
-/// A failed child command's classified failure, written where `CHILD_FAILURE_ENV` names.
+/// The most report bytes a run reads back; a larger report reads as none, a fault.
+#[cfg(unix)]
+const MAX_CHILD_FAILURE_BYTES: u64 = 1024 * 1024;
+
+/// A failed child command's classified failure, written to the report its run created.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChildFailure {
@@ -77,9 +83,9 @@ pub(crate) struct ChildFailure {
     pub detail: String,
 }
 
-/// Writes `error`'s classification for a parent that named `CHILD_FAILURE_ENV`. The parent
-/// reads a missing or unreadable report as a fault, so a write that fails can only make it
-/// stricter.
+/// Writes `error`'s classification into the report a parent named in `CHILD_FAILURE_ENV`. The
+/// parent created that file and reads it back through its own descriptor, so a missing,
+/// replaced or unwritable report reads as a fault there and can only make it stricter.
 pub(crate) fn report_child_failure(error: &miette::Report) {
     if let Some(path) = std::env::var_os(CHILD_FAILURE_ENV) {
         write_child_failure(std::path::Path::new(&path), error);
@@ -87,19 +93,53 @@ pub(crate) fn report_child_failure(error: &miette::Report) {
 }
 
 fn write_child_failure(path: &std::path::Path, error: &miette::Report) {
+    use std::io::Write as _;
     let failure = ChildFailure {
         kind: FailureKind::of(error),
         detail: error.to_string(),
     };
-    if let Ok(bytes) = serde_json::to_vec(&failure) {
-        let _ = std::fs::write(path, bytes);
+    if let (Ok(bytes), Ok(mut report)) = (serde_json::to_vec(&failure), open_report(path)) {
+        let _ = report.set_len(0).and_then(|()| report.write_all(&bytes));
     }
 }
 
-/// The failure a child wrote to `path`: none when it wrote nothing or something else.
+/// Opens the report the parent created, never creating one or following a link to another
+/// file; a FIFO without a reader fails at once instead of blocking the exit.
 #[cfg(unix)]
-pub(crate) fn load_child_failure(path: &std::path::Path) -> Option<ChildFailure> {
-    let bytes = std::fs::read(path).ok()?;
+fn open_report(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use rustix::fs::{Mode, OFlags};
+    let report = std::fs::File::from(rustix::fs::open(
+        path,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?);
+    if !report.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "child failure report is not a regular file",
+        ));
+    }
+    Ok(report)
+}
+
+#[cfg(not(unix))]
+fn open_report(_: &std::path::Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::ErrorKind::Unsupported.into())
+}
+
+/// The failure a child wrote into `report`, the file the run created and kept open: none when
+/// it wrote nothing or something else.
+#[cfg(unix)]
+pub(crate) fn load_child_failure(report: &mut std::fs::File) -> Option<ChildFailure> {
+    use std::io::{Read as _, Seek as _};
+    report.rewind().ok()?;
+    let mut bytes = Vec::new();
+    report
+        .take(MAX_CHILD_FAILURE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_CHILD_FAILURE_BYTES {
+        return None;
+    }
     serde_json::from_slice(&bytes).ok()
 }
 
@@ -157,23 +197,53 @@ mod tests {
     }
 
     #[test]
-    fn a_child_reports_its_failure_kind_and_a_missing_report_reads_as_none() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("failure.json");
-        assert!(load_child_failure(&path).is_none());
-        std::fs::write(&path, "").unwrap();
+    fn a_child_reports_its_failure_into_the_file_its_run_created_and_reads_back() {
+        let mut report = tempfile::NamedTempFile::new().unwrap();
         assert!(
-            load_child_failure(&path).is_none(),
+            load_child_failure(report.as_file_mut()).is_none(),
             "an empty report is no report"
         );
         let drift = crate::commands::typed_error(lk_graph::GraphError::AuditSubjectRemoved(
             "wiki/concepts/a.md".into(),
         ));
-        write_child_failure(&path, &drift);
-        let reported = load_child_failure(&path).unwrap();
+        write_child_failure(report.path(), &drift);
+        let reported = load_child_failure(report.as_file_mut()).unwrap();
         assert_eq!(reported.kind, FailureKind::InputsChanged);
         assert_eq!(reported.detail, drift.to_string());
-        write_child_failure(&path, &miette::miette!("unreadable page"));
-        assert_eq!(load_child_failure(&path).unwrap().kind, FailureKind::Fault);
+        write_child_failure(report.path(), &miette::miette!("unreadable page"));
+        assert_eq!(
+            load_child_failure(report.as_file_mut()).unwrap().kind,
+            FailureKind::Fault,
+            "a shorter report replaces a longer one"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing.json");
+        write_child_failure(&missing, &drift);
+        assert!(!missing.exists(), "a child never creates a report");
+    }
+
+    #[test]
+    fn a_report_path_another_process_replaced_is_never_read_or_followed() {
+        let drift = crate::commands::typed_error(lk_graph::GraphError::AuditSubjectRemoved(
+            "wiki/concepts/a.md".into(),
+        ));
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("target");
+        std::fs::write(&target, "kept").unwrap();
+        let mut report = tempfile::NamedTempFile::new().unwrap();
+        std::fs::remove_file(report.path()).unwrap();
+        std::os::unix::fs::symlink(&target, report.path()).unwrap();
+        write_child_failure(report.path(), &drift);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
+        assert!(load_child_failure(report.as_file_mut()).is_none());
+
+        std::fs::remove_file(report.path()).unwrap();
+        std::fs::write(report.path(), "").unwrap();
+        write_child_failure(report.path(), &drift);
+        assert!(
+            load_child_failure(report.as_file_mut()).is_none(),
+            "a report written to a replacement file never reaches the run's own file"
+        );
     }
 }

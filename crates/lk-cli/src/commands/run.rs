@@ -1779,12 +1779,13 @@ mod native {
                 return false;
             }
             self.configure_child(&mut command);
-            // The child writes its classified failure here (`drift::ChildFailure`).
-            let failure = match tempfile::NamedTempFile::new() {
-                Ok(file) => file.into_temp_path(),
+            // The child writes its classified failure into this file (`drift::ChildFailure`),
+            // which the run creates exclusively and reads back through its own descriptor.
+            let mut report = match tempfile::NamedTempFile::new() {
+                Ok(file) => file,
                 Err(error) => return self.failure(name, typed_error(error)),
             };
-            command.env(crate::commands::drift::CHILD_FAILURE_ENV, &failure);
+            command.env(crate::commands::drift::CHILD_FAILURE_ENV, report.path());
             let completed = self
                 .supervisor
                 .run_request(
@@ -1795,17 +1796,17 @@ mod native {
                     execution::ChildOutput::Forward,
                 )
                 .await;
-            self.settle_child(name, completed, Some(&failure))
+            self.settle_child(name, completed, Some(report.as_file_mut()))
         }
 
         /// Records a finished child. Under the lease a failed child halts the job as the kind
-        /// it reported (`failure`, `drift::ChildFailure`); without a report it is a fault,
+        /// it reported in `report` (`drift::ChildFailure`); without a report it is a fault,
         /// whatever its exit code says.
         fn settle_child(
             &mut self,
             name: &str,
             completed: miette::Result<execution::ChildResult>,
-            failure: Option<&Path>,
+            report: Option<&mut std::fs::File>,
         ) -> bool {
             let completed = match completed {
                 Ok(result) if result.cancelled => {
@@ -1815,7 +1816,7 @@ mod native {
                     self.record(name, StageState::Completed, result.detail)
                 }
                 Ok(result) if self.lease.is_some() => {
-                    let kind = failure
+                    let kind = report
                         .and_then(crate::commands::drift::load_child_failure)
                         .map_or(FailureKind::Fault, |failure| failure.kind);
                     self.halt_as(name, kind, result.detail)
@@ -1830,7 +1831,6 @@ mod native {
             if let Some(lease) = &self.lease {
                 lease.configure(command.as_std_mut());
             }
-            command.env_remove(crate::commands::drift::CHILD_FAILURE_ENV);
             command.env(CONFIG_REVISION_ENV, &self.config_revision).env(
                 "LORE_CONFIG",
                 self.opts.config.as_ref().expect("resolved config"),
@@ -2407,7 +2407,7 @@ mod native {
                 Err(error) => return Err(self.unstartable_host(&name, error)),
             };
             profile.set_executable(executable.clone());
-            let mut command = tokio::process::Command::new(executable);
+            let mut command = tokio::process::Command::from(lk_core::process::command(executable));
             command.arg("--version");
             let version = match self
                 .supervisor

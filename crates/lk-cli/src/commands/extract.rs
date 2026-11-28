@@ -531,7 +531,7 @@ fn repo_state(repo: &Path, baseline: Option<&str>, declared: &[String]) -> RepoS
 /// Observe local Git state; the empty transport allowlist also protects Git
 /// versions that do not support disabling lazy fetches directly.
 fn git_command(repo: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = lk_core::process::command("git");
     command
         .env("GIT_NO_LAZY_FETCH", "1")
         .env("GIT_ALLOW_PROTOCOL", "")

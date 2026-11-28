@@ -283,7 +283,7 @@ fn command(
         max_output_bytes: config.max_output_bytes.get(),
         scratch_dir,
     };
-    let mut command = tokio::process::Command::new(python);
+    let mut command = tokio::process::Command::from(lk_core::process::command(python));
     command.env_clear();
     for name in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "TMPDIR"] {
         if let Some(value) = std::env::var_os(name) {

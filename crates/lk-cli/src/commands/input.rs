@@ -252,7 +252,7 @@ async fn install_environment(
     let requirements = directory.join("requirements.txt");
     std::fs::write(&requirements, lock)
         .map_err(|error| miette::miette!("write dependency lock: {error}"))?;
-    let mut create = tokio::process::Command::new(python);
+    let mut create = tokio::process::Command::from(lk_core::process::command(python));
     create
         .args(["-I", "-m", "venv"])
         .arg(directory.join("venv"));
@@ -262,7 +262,7 @@ async fn install_environment(
     } else {
         "venv/bin/python"
     });
-    let mut packages = tokio::process::Command::new(&executable);
+    let mut packages = tokio::process::Command::from(lk_core::process::command(&executable));
     packages
         .args([
             "-I",

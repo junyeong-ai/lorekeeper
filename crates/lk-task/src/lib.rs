@@ -19,6 +19,8 @@
 //! somewhere else discards that edit in silence. What keeps the parsing risk small is that a
 //! line this cannot read is never rewritten.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod board;
 mod lock;
 mod log;

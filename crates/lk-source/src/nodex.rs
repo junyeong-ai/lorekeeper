@@ -611,7 +611,7 @@ async fn run_nodex<T: serde::de::DeserializeOwned>(
     args: &[&str],
     query: bool,
 ) -> Result<T, SourceError> {
-    let output = tokio::process::Command::new(executable)
+    let output = tokio::process::Command::from(lk_core::process::command(executable))
         .kill_on_drop(true)
         .arg("-C")
         .arg(repo)

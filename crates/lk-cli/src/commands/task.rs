@@ -1350,12 +1350,12 @@ async fn notify(plane: &IntentPlane) -> miette::Result<()> {
             let mut command;
             #[cfg(target_os = "macos")]
             {
-                command = tokio::process::Command::new("/usr/bin/osascript");
+                command = tokio::process::Command::from(lk_core::process::command("/usr/bin/osascript"));
                 command.args(["-e", "on run argv\ndisplay notification (item 1 of argv) with title \"lore\"\nend run", "--", text]);
             }
             #[cfg(not(target_os = "macos"))]
             {
-                command = tokio::process::Command::new("notify-send");
+                command = tokio::process::Command::from(lk_core::process::command("notify-send"));
                 command.args(["--app-name=lore", "--", "lore", text]);
             }
             let result = supervisor.run(command, Some(std::time::Duration::from_secs(10)), false, super::execution::ChildOutput::Forward).await?;

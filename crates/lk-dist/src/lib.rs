@@ -16,6 +16,8 @@
 //! which is a byte comparison rather than a version string, and therefore has no reading in
 //! which it is merely probably right.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod archive;
 mod coherence;
 mod embedded;

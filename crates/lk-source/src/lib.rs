@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 mod atlassian;
 mod confluence;
 pub mod content;

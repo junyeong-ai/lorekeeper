@@ -407,7 +407,7 @@ fn open_in_browser(url: &str) -> std::io::Result<()> {
     ));
 
     #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
-    std::process::Command::new(program)
+    lk_core::process::command(program)
         .args(args)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

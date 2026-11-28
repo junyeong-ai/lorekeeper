@@ -5,6 +5,8 @@
 //! [`Cli`] rather than a hand-kept description of it, which would drift from
 //! the surface it claims to describe.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod commands;
 
 use std::path::PathBuf;

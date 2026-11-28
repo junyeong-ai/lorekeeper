@@ -1,0 +1,6 @@
+# Processes start through `lk_core::process::command`, which keeps variables addressed to one
+# process (a native run's child failure report) out of every process Lore starts.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "start processes with lk_core::process::command" },
+  { path = "tokio::process::Command::new", reason = "convert lk_core::process::command into a tokio command" },
+]
