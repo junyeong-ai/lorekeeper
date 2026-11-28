@@ -20,7 +20,10 @@ are not token counts or billed cost, and unobserved or inapplicable measurements
 ## Outcome
 
 `ok` is false for a halted controller and for known incomplete states; `halted`
-distinguishes the two. A halted controller starts no further semantic or mutating
+distinguishes the two. A halted job's `halt_kind` is `fault` or `inputs-changed`: a fault
+pauses a scheduled operation, while `inputs-changed` means a writer edited or removed
+inputs while the job read them, so the batch ended with its work retained, nothing
+paused, and the next run plans again. A halted controller starts no further semantic or mutating
 stage; read-only final checks still report preserved state when configuration is
 current. An incomplete job can still publish independent work and verify selected
 audits; neither field implies full-corpus semantic coverage. A recorded observation or
@@ -133,7 +136,8 @@ permits at most N queue-only batches, each with the configured call budget and a
 workflow lease; the default is one batch. Configuration bytes and the first acquired
 vault's directory identity remain pinned across the campaign. It continues only at a
 typed exhausted-budget checkpoint with newly retained progress; fatal or unknown
-failures, cancellation, ordinary deferral or no progress stop it. New action or
+failures, input drift (`inputs-changed`), cancellation, ordinary deferral or no progress
+stop it. New action or
 discovery receipts are preparation progress, never semantic completion. Every
 checkpoint retains its own incomplete outcome; the campaign succeeds only after a
 settled final batch passes its full checks, and reaching N with remaining work stays

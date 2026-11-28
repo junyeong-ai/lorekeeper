@@ -774,11 +774,78 @@ mod native {
         after: Option<lk_graph::audit::AuditCoverage>,
     }
 
-    fn serialize_halted<S: serde::Serializer>(
-        halt: &Option<automation::HaltCause>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bool(halt.is_some())
+    /// What the failed stage that stopped a job asks of its scheduled operation.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    enum HaltKind {
+        /// State the operator repairs (accounting, integrity, configuration, an unknown host
+        /// failure): a scheduled operation pauses until `--resume`.
+        Fault,
+        /// A writer changed or removed inputs while the job read them (`is_input_drift`): the
+        /// batch ends with its unfinished work retained, and the next run plans again.
+        InputsChanged,
+    }
+
+    #[derive(Clone, Debug)]
+    struct Halt {
+        kind: HaltKind,
+        cause: automation::HaltCause,
+    }
+
+    /// `halted` and, for a halted job, `halt_kind`.
+    #[derive(Default)]
+    struct HaltState(Option<Halt>);
+
+    impl Serialize for HaltState {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::SerializeMap;
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_entry("halted", &self.0.is_some())?;
+            if let Some(halt) = &self.0 {
+                map.serialize_entry("halt_kind", &halt.kind)?;
+            }
+            map.end()
+        }
+    }
+
+    /// Whether `error` is input drift: a page, citation, task or capture a writer edited or
+    /// removed after the job read it, or a publication guard that found guarded bytes changed.
+    /// The halt decision reads only these typed errors. Integrity faults (an immutable capture
+    /// missing or changed, corrupt state, an unreadable present page), host failures and
+    /// configuration or root drift are not drift.
+    fn is_input_drift(error: &miette::Report) -> bool {
+        use lk_graph::GraphError;
+        let vault_drift = |error: &lk_vault::VaultError| {
+            matches!(
+                error,
+                lk_vault::VaultError::MutationConflict(_)
+                    | lk_vault::VaultError::RssOriginChanged(_)
+            )
+        };
+        if let Some(rejection) =
+            error.downcast_ref::<crate::commands::queue::application::PublicationRejection>()
+        {
+            return rejection.kind.is_input_change();
+        }
+        error
+            .downcast_ref::<crate::commands::work::SourceChanged>()
+            .is_some()
+            || error
+                .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
+                .is_some()
+            || error
+                .downcast_ref::<lk_vault::VaultError>()
+                .is_some_and(vault_drift)
+            || error
+                .downcast_ref::<GraphError>()
+                .is_some_and(|error| match error {
+                    GraphError::AuditInputChanged(_)
+                    | GraphError::AuditScreeningChanged
+                    | GraphError::AuditSubjectRemoved(_)
+                    | GraphError::AuditSubjectInputChanged { .. } => true,
+                    GraphError::Vault(error) => vault_drift(error),
+                    _ => false,
+                })
     }
 
     #[derive(Serialize)]
@@ -786,8 +853,8 @@ mod native {
         operation: Operation,
         ok: bool,
         cancelled: bool,
-        #[serde(rename = "halted", serialize_with = "serialize_halted")]
-        halt: Option<automation::HaltCause>,
+        #[serde(flatten)]
+        halt: HaltState,
         duration_ms: u64,
         semantic_duration_ms: u64,
         execution: Option<ExecutionInfo>,
@@ -828,6 +895,8 @@ mod native {
         Deferred,
         NoProgress,
         Failed,
+        /// Inputs changed under the batch (`HaltKind::InputsChanged`); the next run replans.
+        InputsChanged,
         Cancelled,
         AutomationLimit,
         Yielded,
@@ -840,7 +909,7 @@ mod native {
                 operation,
                 ok: true,
                 cancelled: false,
-                halt: None,
+                halt: HaltState::default(),
                 duration_ms: 0,
                 semantic_duration_ms: 0,
                 execution: None,
@@ -867,7 +936,32 @@ mod native {
         }
 
         fn is_halted(&self) -> bool {
-            self.halt.is_some()
+            self.halt.0.is_some()
+        }
+
+        /// Records `name`'s failure as the halt that stops this job. The first halt is kept,
+        /// except that a fault replaces input drift: a scheduled pause names a fault.
+        fn halt_on(&mut self, name: &str, kind: HaltKind, detail: Option<&str>) {
+            if self
+                .halt
+                .0
+                .as_ref()
+                .is_none_or(|halt| halt.kind == HaltKind::InputsChanged && kind == HaltKind::Fault)
+            {
+                self.halt.0 = Some(Halt {
+                    kind,
+                    cause: automation::HaltCause::new(name, detail),
+                });
+            }
+        }
+
+        /// The cause a scheduled operation pauses on: a fault, never input drift.
+        fn pause_cause(&self) -> Option<&automation::HaltCause> {
+            self.halt
+                .0
+                .as_ref()
+                .filter(|halt| halt.kind == HaltKind::Fault)
+                .map(|halt| &halt.cause)
         }
 
         fn campaign_stop(&self) -> CampaignStop {
@@ -888,8 +982,11 @@ mod native {
                     | automation::Stop::WaitDuration => CampaignStop::AutomationLimit,
                 };
             }
-            if self.is_halted() {
-                return CampaignStop::Failed;
+            if let Some(halt) = &self.halt.0 {
+                return match halt.kind {
+                    HaltKind::Fault => CampaignStop::Failed,
+                    HaltKind::InputsChanged => CampaignStop::InputsChanged,
+                };
             }
             if self.yield_reason.is_some() {
                 return if self.work_telemetry.retained_progress.has_progress() {
@@ -1001,7 +1098,7 @@ mod native {
 
     impl Runner<'_> {
         fn finish(mut self) -> JobResult {
-            if let Some(cause) = self.result.halt.clone()
+            if let Some(cause) = self.result.pause_cause().cloned()
                 && !self.result.cancelled
                 && self.automation.is_some()
                 && self.lease.is_some()
@@ -1063,19 +1160,26 @@ mod native {
             success
         }
 
+        /// Records `name` as the failed stage that stops this job. A failure caused by input
+        /// drift (`is_input_drift`) ends the batch without pausing; any other is a fault.
         fn failure(&mut self, name: &str, error: miette::Report) -> bool {
             if self.supervisor.is_cancelled() {
                 return self.record(name, StageState::Cancelled, Some(error.to_string()));
             }
-            self.halt(name, Some(error.to_string()))
+            let kind = if is_input_drift(&error) {
+                HaltKind::InputsChanged
+            } else {
+                HaltKind::Fault
+            };
+            let detail = error.to_string();
+            self.result.halt_on(name, kind, Some(&detail));
+            self.record(name, StageState::Failed, Some(detail))
         }
 
-        /// Records `name` as the failed stage that stops this job; the first one is the
-        /// cause a scheduled pause keeps.
+        /// Records `name` as a faulted stage that stops this job (`HaltKind::Fault`).
         fn halt(&mut self, name: &str, detail: Option<String>) -> bool {
-            if self.result.halt.is_none() {
-                self.result.halt = Some(automation::HaltCause::new(name, detail.as_deref()));
-            }
+            self.result
+                .halt_on(name, HaltKind::Fault, detail.as_deref());
             self.record(name, StageState::Failed, detail)
         }
 
@@ -8707,10 +8811,79 @@ mod native {
                 elapsed_job_ms: 0,
             });
             assert!(!result.is_successful_yield());
-            result.halt = Some(automation::HaltCause::new("required evidence", None));
+            result.halt_on("required evidence", HaltKind::Fault, None);
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
+        }
+
+        #[test]
+        fn input_drift_ends_the_batch_without_a_pause_and_a_fault_still_pauses() {
+            for operation in [Operation::Process, Operation::Knowledge] {
+                let mut result = JobResult::new(operation);
+                result.ok = false;
+                result.work_telemetry.retained_progress.action_receipts = 1;
+                result.halt_on(
+                    "audit fresh scope",
+                    HaltKind::InputsChanged,
+                    Some("removed"),
+                );
+                assert_eq!(result.campaign_stop(), CampaignStop::InputsChanged);
+                assert!(result.pause_cause().is_none());
+                let report = serde_json::to_value(&result).unwrap();
+                assert_eq!(report["halted"], true);
+                assert_eq!(report["halt_kind"], "inputs-changed");
+                result.halt_on("audit fresh scope", HaltKind::InputsChanged, Some("again"));
+                result.halt_on(
+                    "knowledge review health",
+                    HaltKind::Fault,
+                    Some("unreadable"),
+                );
+                assert_eq!(result.campaign_stop(), CampaignStop::Failed);
+                assert_eq!(
+                    result.pause_cause().map(|cause| cause.stage.as_str()),
+                    Some("knowledge review health")
+                );
+                result.halt_on("audit fresh scope", HaltKind::InputsChanged, None);
+                assert_eq!(serde_json::to_value(&result).unwrap()["halt_kind"], "fault");
+            }
+            let settled = serde_json::to_value(JobResult::new(Operation::Process)).unwrap();
+            assert_eq!(settled["halted"], false);
+            assert!(settled.get("halt_kind").is_none());
+        }
+
+        #[test]
+        fn only_typed_input_drift_is_drift() {
+            use crate::commands::queue::application::{RejectionKind, rejection};
+            use lk_graph::GraphError;
+            let path = || "wiki/concepts/a.md".to_owned();
+            for drift in [
+                miette::Report::new(crate::commands::work::SourceChanged::new("edited")),
+                rejection(RejectionKind::SemanticContextChanged, "changed"),
+                miette::Report::new(crate::commands::queue::TaskNotCurrent(path())),
+                typed_error(GraphError::AuditInputChanged(path())),
+                typed_error(GraphError::AuditScreeningChanged),
+                typed_error(GraphError::AuditSubjectRemoved(path())),
+                typed_error(GraphError::AuditSubjectInputChanged {
+                    subject: path(),
+                    input: path(),
+                }),
+                typed_error(lk_vault::VaultError::RssOriginChanged(path())),
+                typed_error(lk_vault::VaultError::MutationConflict(path().into())),
+                typed_error(GraphError::from(lk_vault::VaultError::MutationConflict(
+                    path().into(),
+                ))),
+            ] {
+                assert!(is_input_drift(&drift), "{drift}");
+            }
+            for fault in [
+                rejection(RejectionKind::InvalidSection, "invalid"),
+                typed_error(GraphError::Io("unreadable".into())),
+                typed_error(lk_vault::VaultError::Original("missing payload".into())),
+                miette::miette!("{}", GraphError::AuditSubjectRemoved(path())),
+            ] {
+                assert!(!is_input_drift(&fault), "{fault}");
+            }
         }
 
         #[test]
@@ -8733,12 +8906,12 @@ mod native {
             assert_eq!(result.campaign_stop(), CampaignStop::NoProgress);
             result.work_telemetry.retained_progress.action_receipts = 1;
             assert_eq!(result.campaign_stop(), CampaignStop::BatchLimit);
-            result.halt = Some(automation::HaltCause::new("queue application", None));
+            result.halt_on("queue application", HaltKind::Fault, None);
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
             result.cancelled = false;
-            result.halt = None;
+            result.halt = HaltState::default();
             result.budget_exhausted = false;
             assert_eq!(result.campaign_stop(), CampaignStop::Deferred);
             result.ok = true;

@@ -110,7 +110,12 @@ manual trigger too; add `--wait` when it should wait for the workflow lease.
 ## Pauses and holds
 
 Unknown or corrupt accounting refuses semantic execution. Fatal inference failures
-pause that operation's semantic phase across restarts and day rollover. Daily source
+pause that operation's semantic phase across restarts and day rollover. A page, citation
+or task that a writer edits or removes while a run reads it is not fatal: the run records
+the failed stage, ends its batch with unfinished work retained (`halt_kind:
+inputs-changed`) and does not pause, so the next scheduled run plans from the current
+vault. An immutable capture that is missing or changed is an integrity failure and
+still pauses. Daily source
 collection still runs before this pause check; process and knowledge report a known
 pause before waiting for the workflow lease. Reviews needing reassessment keep
 completion nonzero without pausing automation; invalid reviews and failed reads remain

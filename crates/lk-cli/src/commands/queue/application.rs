@@ -20,6 +20,26 @@ pub(in crate::commands) enum RejectionKind {
     InvalidSection,
 }
 
+impl RejectionKind {
+    /// Whether the refusal found inputs a writer changed after the result was prepared, rather
+    /// than a result that is invalid in itself.
+    pub(in crate::commands) fn is_input_change(self) -> bool {
+        match self {
+            Self::SelectionInventoryChanged
+            | Self::SelectionDecisionsChanged
+            | Self::SemanticContextChanged
+            | Self::CitationsChanged
+            | Self::EvidenceScopeChanged
+            | Self::TargetChanged => true,
+            Self::ConflictingProposals
+            | Self::InvalidProposalIdentity
+            | Self::InvalidProposal
+            | Self::InvalidResultLink
+            | Self::InvalidSection => false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::commands) struct PublicationRejection {
     pub kind: RejectionKind,

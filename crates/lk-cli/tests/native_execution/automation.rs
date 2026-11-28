@@ -95,6 +95,7 @@ fn an_unrecordable_concept_defers_graph_stages_and_unreadable_pages_remain_fatal
             "{report}"
         );
         if let Some(stage) = unreadable {
+            assert_eq!(report["runs"][0]["halt_kind"], "fault", "{report}");
             assert_eq!(
                 usage(&fixture)["paused"]["process"]["cause"]["stage"],
                 stage,
@@ -1249,6 +1250,53 @@ fn a_subject_settled_during_another_subjects_discovery_is_not_assessed_again() {
         receipts["entries"][settled]["reason"], "Settled by hand during discovery.",
         "{receipts}"
     );
+}
+
+#[test]
+fn a_subject_removed_during_its_whole_assessment_ends_the_batch_without_a_pause() {
+    let remove = r#"if request.get('schema')=='native-audit-results-v1':
+    remove=root/'remove-during-assessment'
+    if remove.exists():
+        (root/'vault'/remove.read_text()).unlink()
+        remove.unlink()
+"#;
+    let host = RECORD_AUDIT.replacen(
+        "if request.get('kind')=='audit-discovery':\n",
+        &format!("{remove}if request.get('kind')=='audit-discovery':\n"),
+        1,
+    );
+    assert_ne!(host, RECORD_AUDIT);
+    let fixture = Fixture::new("codex", 30, &host);
+    configure(&fixture, Some(20), 60);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 2\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    write_audit_concept(&fixture, "kept");
+    write_audit_concept(&fixture, "removed");
+    std::fs::write(
+        fixture.root().join("remove-during-assessment"),
+        "wiki/concepts/removed.md",
+    )
+    .unwrap();
+
+    let report = run(&fixture, "knowledge", false);
+    assert!(
+        !fixture.root().join("remove-during-assessment").exists(),
+        "the assessment ran: {report}"
+    );
+    assert_eq!(report["runs"][0]["halted"], true, "{report}");
+    assert_eq!(report["runs"][0]["halt_kind"], "inputs-changed", "{report}");
+    assert_eq!(report["stop_reason"], "inputs-changed", "{report}");
+    assert!(
+        usage(&fixture)["paused"].as_object().unwrap().is_empty(),
+        "{report}"
+    );
+    let repeated = run(&fixture, "knowledge", false);
+    assert_eq!(repeated["runs"][0]["halted"], false, "{repeated}");
+    let assessed: Vec<String> =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("maintain-command")).unwrap())
+            .unwrap();
+    assert_eq!(assessed, ["wiki/concepts/kept.md"], "{repeated}");
 }
 
 #[test]

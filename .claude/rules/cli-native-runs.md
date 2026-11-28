@@ -173,8 +173,17 @@ paths:
   replans); cancellation, and any attended run, keep that error fatal. That stage never
   halts; an unresolvable profile is configuration and still halts, as `host configuration`.
   Fatal scheduled failures pause that operation: the `automation-usage-v2` ledger records
-  the first halting stage and at most 1024 bytes of its detail, while the job report
-  keeps the full detail.
+  the first faulted stage and at most 1024 bytes of its detail, while the job report
+  keeps the full detail. A failure caused by input drift is not fatal. One typed
+  predicate (`run::is_input_drift`) decides it: `SourceChanged`, a publication rejection
+  whose kind is an input change, `TaskNotCurrent`, the audit drift variants of
+  `GraphError`, `VaultError::{MutationConflict, RssOriginChanged}`. Such a failure records
+  its failed stage and ends the batch with unfinished work retained (`halt_kind:
+  inputs-changed`, campaign stop `inputs-changed`) without pausing; the next run plans
+  from the current vault. A later fault in the same job still pauses it. Integrity faults
+  (an immutable capture missing or changed, corrupt state, an unreadable present page),
+  host failures and configuration or root drift remain faults. Keep errors typed down to
+  `Runner::failure` (`commands::typed_error`); a message is never classified.
   Explicit `--resume` clears the pause without clearing usage or semantic holds.
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;
