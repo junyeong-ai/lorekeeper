@@ -7030,8 +7030,9 @@ mod native {
                 return;
             }
             // After input drift the read-only checks still classify what they find: an
-            // unreadable page, a lint error or an invalid review is a fault, which replaces the
-            // drift as the cause a scheduled operation pauses on.
+            // unreadable page, a lint error, an invalid review, an interrupted mutation or an
+            // unreadable queue row is a fault, which replaces the drift as the cause a scheduled
+            // operation pauses on.
             if self
                 .result
                 .halt
@@ -7041,6 +7042,7 @@ mod native {
             {
                 self.lint_vault("graph lint");
                 self.inspect_review_health();
+                self.check_queue("queue completion");
                 return;
             }
             for (name, args) in [
