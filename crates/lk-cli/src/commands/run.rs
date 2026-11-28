@@ -555,6 +555,9 @@ mod native {
     const FINALIZATION_CHANGED_AGAIN: &str =
         "finalizer inputs changed again after fresh replanning; retained for a later run";
 
+    const EVIDENCE_CHANGED_AGAIN: &str =
+        "evidence inputs changed again after fresh replanning; retained for a later run";
+
     #[derive(Default, PartialEq, Eq)]
     enum QueueReplan {
         #[default]
@@ -5189,6 +5192,28 @@ mod native {
                                 StageState::Skipped,
                                 Some(error.to_string()),
                             );
+                            // Each target reading this Work spends its replan; one whose inputs
+                            // change again is deferred, so its peers proceed.
+                            let readers = jobs
+                                .iter()
+                                .filter_map(|(target, job)| match job {
+                                    QueueDispatch::Partitioned { id: current, .. }
+                                    | QueueDispatch::Source { id: current }
+                                        if current == &id =>
+                                    {
+                                        Some(target.clone())
+                                    }
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>();
+                            for target in &readers {
+                                if !self
+                                    .finalization_replans
+                                    .try_spend(target, EVIDENCE_CHANGED_AGAIN)
+                                {
+                                    self.deferred("bounded work inputs unstable", target);
+                                }
+                            }
                             self.queue_replan = QueueReplan::Invalidate;
                             self.queue_admitted.clear();
                             return true;

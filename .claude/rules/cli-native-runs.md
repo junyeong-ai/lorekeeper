@@ -343,7 +343,9 @@ paths:
   ran (context, citations or evidence scope, or a task no longer current) is discarded
   unrecorded and its Work replans as it would before a host call, spending its queue
   target's one replan per run: an external edit during an inspection never halts or
-  pauses the run, and repeated drift defers that target.
+  pauses the run, and repeated drift defers that target. A read wave whose preparation
+  finds a Work's inputs changed before any call spends the same allowance for each target
+  reading that Work, so repeated edits defer those targets while their peers proceed.
   Queue finalizers follow the same rule per target: a fresh guard that finds changed
   inputs before or after the host discards that step without relabeling its answer,
   allows one replan per target per run and then defers the target. A publication guard
