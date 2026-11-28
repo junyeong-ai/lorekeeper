@@ -8554,23 +8554,38 @@ mod native {
                         }
                         WorkStep::Failed => return false,
                         WorkStep::Replan => {
-                            let mut exhausted = Vec::new();
-                            originals
-                                .get_mut(&selected)
-                                .expect("selected audit has original slots")
-                                .retain(|original| {
-                                    self.audit_replans.try_spend(&bindings[&original.path]) || {
-                                        exhausted.push(original.clone());
-                                        false
-                                    }
-                                });
-                            for original in exhausted {
-                                deferred_subjects.insert(original.path.clone());
-                                self.defer_audit_inputs(&original, AUDIT_UNSTABLE.into());
+                            // Every wave replan still pending is charged with this one, before
+                            // the shared replan below can end the batch, and the replan serves
+                            // them all.
+                            let mut replanned = vec![selected.clone()];
+                            replanned.extend(
+                                std::mem::take(&mut self.audit_wave_replans)
+                                    .into_iter()
+                                    .filter(|subject| {
+                                        *subject != selected && jobs.contains_key(subject)
+                                    }),
+                            );
+                            for subject in &replanned {
+                                let mut exhausted = Vec::new();
+                                originals
+                                    .get_mut(subject)
+                                    .expect("replanned audit has original slots")
+                                    .retain(|original| {
+                                        self.audit_replans.try_spend(&bindings[&original.path]) || {
+                                            exhausted.push(original.clone());
+                                            false
+                                        }
+                                    });
+                                for original in exhausted {
+                                    deferred_subjects.insert(original.path.clone());
+                                    self.defer_audit_inputs(&original, AUDIT_UNSTABLE.into());
+                                }
+                                if originals[subject].is_empty() {
+                                    deferred_subjects.insert(subject.clone());
+                                    jobs.remove(subject);
+                                }
                             }
-                            if originals[&selected].is_empty() {
-                                deferred_subjects.insert(selected.clone());
-                                jobs.remove(&selected);
+                            if !replanned.iter().any(|subject| jobs.contains_key(subject)) {
                                 continue;
                             }
                             let mut pending = jobs
