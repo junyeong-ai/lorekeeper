@@ -1466,7 +1466,7 @@ pub(super) fn load_sealed(
     use super::{RejectionKind, publication_rejection};
     if binding.policy != lk_queue::ExtractionSelectionPolicy::IndependentV1 {
         return Err(publication_rejection(
-            RejectionKind::SelectionDecisionsChanged,
+            RejectionKind::InvalidProposal,
             "candidate screening: this result was drafted under the retired packet selection; regenerate the extraction result",
         ));
     }
@@ -1481,7 +1481,7 @@ pub(super) fn load_sealed(
             Some(raw) => (raw, true),
             None => {
                 return Err(publication_rejection(
-                    RejectionKind::SelectionInventoryChanged,
+                    RejectionKind::RetainedWorkInvalid,
                     "candidate screening: the result names a roster that was never sealed; run `lore work select` and draft against its ready selection",
                 ));
             }
@@ -1506,7 +1506,7 @@ pub(super) fn load_sealed(
             .map(|decision| decision.decision)
         else {
             return Err(publication_rejection(
-                RejectionKind::SelectionDecisionsChanged,
+                RejectionKind::RetainedWorkInvalid,
                 "candidate screening: a sealed roster row has no recorded decision",
             ));
         };

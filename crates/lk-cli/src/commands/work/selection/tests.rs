@@ -349,7 +349,8 @@ fn a_sealed_roster_binds_its_decisions_without_rereading_unselected_pages() {
     };
     assert_eq!(
         kind(guard(&binding).err().unwrap()),
-        Some(crate::commands::work::RejectionKind::SelectionInventoryChanged)
+        Some(crate::commands::work::RejectionKind::RetainedWorkInvalid),
+        "a roster the store does not hold is retained state, never an input change"
     );
     let seal = selection.seal().unwrap();
     let sealing = load_sealed(
@@ -402,7 +403,8 @@ fn a_sealed_roster_binds_its_decisions_without_rereading_unselected_pages() {
     retired.policy = lk_queue::ExtractionSelectionPolicy::ProgressiveV1;
     assert_eq!(
         kind(guard(&retired).err().unwrap()),
-        Some(crate::commands::work::RejectionKind::SelectionDecisionsChanged)
+        Some(crate::commands::work::RejectionKind::InvalidProposal),
+        "a result drafted under a retired policy is invalid in itself, not an input change"
     );
 }
 

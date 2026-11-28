@@ -9052,6 +9052,7 @@ mod native {
             }
             for fault in [
                 rejection(RejectionKind::InvalidSection, "invalid"),
+                rejection(RejectionKind::RetainedWorkInvalid, "unsealed"),
                 miette::Report::new(crate::commands::queue::TaskNotCurrent {
                     status: Some(crate::commands::queue::TaskStatus::Unreadable),
                     detail: path(),

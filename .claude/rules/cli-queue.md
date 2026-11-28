@@ -163,8 +163,9 @@ paths:
   scope (a native run spends that target's one finalization replan, and a selected task
   superseded this way replans rather than failing completion). Holding it would block the
   request until the scope returned byte for byte. Citation changes stay held, because
-  reconciliation retires their request; incomplete or unsealed Work
-  (`evidence-scope-changed`) stays held for its Work to finish.
+  reconciliation retires their request; incomplete or unsealed Work, or a sealed roster
+  the store no longer holds (`retained-work-invalid`, an integrity refusal that is never
+  input drift), stays held for its Work to finish or its store to be repaired.
   A synthesis whose concept's own audit assessment or current-revision discovery recipe
   cannot be read is `held`: apply leaves its result staged without a rejection receipt,
   reports the run not ok and continues with independent groups, including when the hold

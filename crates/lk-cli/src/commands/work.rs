@@ -443,7 +443,7 @@ fn guard_prepared(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(publication_rejection(
-                RejectionKind::EvidenceScopeChanged,
+                RejectionKind::RetainedWorkInvalid,
                 "bounded evidence work is required before publication; plan work for this exact subject",
             ));
         }
@@ -458,13 +458,21 @@ fn guard_prepared(
         ));
     }
     work.guard_completion(mutation, root, &prepared.resources, &result)
-        .map_err(|error| {
-            if error.downcast_ref::<state::CompletionRefusal>().is_some() {
-                publication_rejection(RejectionKind::EvidenceScopeChanged, error.to_string())
-            } else {
-                error
-            }
-        })?;
+        .map_err(
+            |error| match error.downcast_ref::<state::CompletionRefusal>() {
+                // Observations re-recorded after the seal answer changed evidence; a seal that is
+                // missing, incomplete or disagrees with the result is damaged retained Work.
+                Some(state::CompletionRefusal::ChangedObservations) => {
+                    publication_rejection(RejectionKind::EvidenceScopeChanged, error.to_string())
+                }
+                Some(
+                    state::CompletionRefusal::IncompleteReduction
+                    | state::CompletionRefusal::UnsealedResult
+                    | state::CompletionRefusal::ChangedResult,
+                ) => publication_rejection(RejectionKind::RetainedWorkInvalid, error.to_string()),
+                None => error,
+            },
+        )?;
     if matches!(prepared.subject, Subject::Audit { .. }) {
         prepared.validate_audit_result(&result)?;
     }
@@ -634,7 +642,7 @@ fn prepare_queue_publication_controlled(
             serde_json::from_value(result.clone()).into_diagnostic()?;
         if !typed.concepts.is_empty() && typed.discovery.is_empty() {
             return Err(publication_rejection(
-                RejectionKind::EvidenceScopeChanged,
+                RejectionKind::InvalidProposal,
                 "nonempty concept extraction requires discovery before drafting",
             ));
         }
@@ -1863,7 +1871,7 @@ fn sealed_task_controlled(
     let sealed = selection::load_sealed(root, task_id, cache_hash, binding, sealing)?;
     if sealed.queries != discovery::validate_queries(queries)? {
         return Err(publication_rejection(
-            RejectionKind::EvidenceScopeChanged,
+            RejectionKind::InvalidProposal,
             "the result's discovery queries differ from its sealed candidate roster; regenerate the extraction result",
         ));
     }
@@ -6475,8 +6483,8 @@ mod tests {
         };
         assert_eq!(
             rejection(drafted(&exact)),
-            Some(RejectionKind::EvidenceScopeChanged),
-            "a result drafted from the stored exact-bytes Work reaches that Work's completion check"
+            Some(RejectionKind::RetainedWorkInvalid),
+            "a result drafted from the stored exact-bytes Work reaches that Work's completion check, which holds no seal"
         );
         assert_eq!(
             rejection(drafted(&semantic)),

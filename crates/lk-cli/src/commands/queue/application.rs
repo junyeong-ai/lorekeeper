@@ -13,6 +13,10 @@ pub(in crate::commands) enum RejectionKind {
     CitationsChanged,
     EvidenceScopeChanged,
     TargetChanged,
+    /// Retained Work or screening state cannot prove what the result claims: its completion
+    /// seal is missing or disagrees with the result, its reduction is incomplete, or a sealed
+    /// roster or roster decision it names is gone. An integrity failure, never an input change.
+    RetainedWorkInvalid,
     ConflictingProposals,
     InvalidProposalIdentity,
     InvalidProposal,
@@ -31,7 +35,8 @@ impl RejectionKind {
             | Self::CitationsChanged
             | Self::EvidenceScopeChanged
             | Self::TargetChanged => true,
-            Self::ConflictingProposals
+            Self::RetainedWorkInvalid
+            | Self::ConflictingProposals
             | Self::InvalidProposalIdentity
             | Self::InvalidProposal
             | Self::InvalidResultLink
