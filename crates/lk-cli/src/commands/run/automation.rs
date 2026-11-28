@@ -20,6 +20,14 @@ enum Schema {
     V2,
 }
 
+/// Consecutive scheduled runs of one operation that may end on input drift without semantic
+/// progress before the operation pauses. A run that ends on drift is not paused, so a fault
+/// the drift predicate misreads, or a writer that wins every run, would otherwise end every
+/// run early unseen; this bounds that to a few runs before the operator is told.
+pub(super) const REPEATED_DRIFT_LIMIT: usize = 3;
+/// The stage a pause names when `REPEATED_DRIFT_LIMIT` is reached.
+pub(super) const REPEATED_DRIFT_STAGE: &str = "repeated input drift";
+
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Usage {
@@ -27,6 +35,10 @@ struct Usage {
     utc_date: Date,
     reserved_calls: usize,
     paused: BTreeMap<ExecutionOperation, Pause>,
+    /// Consecutive scheduled runs per operation that ended on input drift without semantic
+    /// progress; absent reads as none.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    drift_runs: BTreeMap<ExecutionOperation, usize>,
 }
 
 /// The stage a run records when a profile's host cannot start (`execution::preflight_hosts`,
@@ -85,6 +97,7 @@ impl Usage {
                     utc_date: today,
                     reserved_calls: 0,
                     paused: BTreeMap::new(),
+                    drift_runs: BTreeMap::new(),
                 });
             }
             Err(error) => return Err(error).into_diagnostic(),
@@ -410,6 +423,14 @@ impl Control {
 
     pub fn pause(&mut self, root: &Path, cause: HaltCause) -> miette::Result<()> {
         let mut usage = Usage::load(root, today())?;
+        self.pause_in(&mut usage, cause);
+        usage.save(root)?;
+        self.refresh(&usage);
+        Ok(())
+    }
+
+    fn pause_in(&mut self, usage: &mut Usage, cause: HaltCause) {
+        usage.drift_runs.remove(&self.operation);
         usage.paused.insert(
             self.operation,
             Pause {
@@ -417,9 +438,36 @@ impl Control {
                 cause,
             },
         );
+        self.report.stop = Some(Stop::Paused);
+    }
+
+    /// Records how a scheduled run that did not fault ended. `unproductive_drift` is the
+    /// drift that stopped it when it retained no semantic progress; any other ending resets
+    /// the operation's count. The `REPEATED_DRIFT_LIMIT`th consecutive such run pauses the
+    /// operation, naming `REPEATED_DRIFT_STAGE` and the last drift's detail.
+    pub fn conclude(
+        &mut self,
+        root: &Path,
+        unproductive_drift: Option<&HaltCause>,
+    ) -> miette::Result<()> {
+        let mut usage = Usage::load(root, today())?;
+        match unproductive_drift {
+            None => {
+                if usage.drift_runs.remove(&self.operation).is_none() {
+                    return Ok(());
+                }
+            }
+            Some(drift) => {
+                let runs = usage.drift_runs.entry(self.operation).or_default();
+                *runs += 1;
+                if *runs >= REPEATED_DRIFT_LIMIT {
+                    let cause = HaltCause::new(REPEATED_DRIFT_STAGE, drift.detail.as_deref());
+                    self.pause_in(&mut usage, cause);
+                }
+            }
+        }
         usage.save(root)?;
         self.refresh(&usage);
-        self.report.stop = Some(Stop::Paused);
         Ok(())
     }
 }
@@ -516,6 +564,44 @@ mod tests {
         std::fs::remove_file(path(root).unwrap()).unwrap();
         std::os::unix::fs::symlink(root.join("elsewhere"), path(root).unwrap()).unwrap();
         assert!(Usage::load(root, today()).is_err());
+    }
+
+    #[test]
+    fn repeated_unproductive_drift_pauses_at_its_limit_and_progress_resets_it() {
+        let root = fixture();
+        let control = || Control::new(policy(10), ExecutionOperation::Knowledge, false, 4).unwrap();
+        let drift = HaltCause::new("audit fresh scope", Some("wiki/concepts/a.md changed"));
+        let paused = || Usage::load(root.path(), today()).unwrap().paused;
+        for _ in 1..REPEATED_DRIFT_LIMIT {
+            let mut run = control();
+            run.conclude(root.path(), Some(&drift)).unwrap();
+            assert!(run.report.stop.is_none());
+            assert!(paused().is_empty());
+        }
+        control().conclude(root.path(), None).unwrap();
+        assert!(
+            Usage::load(root.path(), today())
+                .unwrap()
+                .drift_runs
+                .is_empty(),
+            "progress or a clean run resets the count"
+        );
+        for _ in 1..REPEATED_DRIFT_LIMIT {
+            control().conclude(root.path(), Some(&drift)).unwrap();
+        }
+        let mut third = control();
+        third.conclude(root.path(), Some(&drift)).unwrap();
+        assert!(matches!(third.report.stop, Some(Stop::Paused)));
+        let pause = &paused()[&ExecutionOperation::Knowledge];
+        assert_eq!(pause.cause.stage, REPEATED_DRIFT_STAGE);
+        assert_eq!(pause.cause.detail, drift.detail);
+        let usage = Usage::load(root.path(), today()).unwrap();
+        assert!(usage.drift_runs.is_empty());
+        let raw = serde_json::to_value(&usage).unwrap();
+        assert!(
+            raw.get("drift_runs").is_none(),
+            "an empty count is omitted: {raw}"
+        );
     }
 
     #[test]

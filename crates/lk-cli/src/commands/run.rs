@@ -961,6 +961,21 @@ mod native {
             }
         }
 
+        /// The drift that stopped this job when it retained no semantic progress (no retained
+        /// progress and no recorded assessment): what `automation::Control::conclude` counts.
+        fn unproductive_drift(&self) -> Option<&automation::HaltCause> {
+            let progressed = self.work_telemetry.retained_progress.has_progress()
+                || self
+                    .audit
+                    .as_ref()
+                    .is_some_and(|completed| !completed.is_empty());
+            self.halt
+                .0
+                .as_ref()
+                .filter(|halt| halt.kind == HaltKind::InputsChanged && !progressed)
+                .map(|halt| &halt.cause)
+        }
+
         /// The cause a scheduled operation pauses on: a fault, never input drift.
         fn pause_cause(&self) -> Option<&automation::HaltCause> {
             self.halt
@@ -1108,8 +1123,7 @@ mod native {
 
     impl Runner<'_> {
         fn finish(mut self) -> JobResult {
-            if let Some(cause) = self.result.pause_cause().cloned()
-                && !self.result.cancelled
+            if !self.result.cancelled
                 && self.automation.is_some()
                 && self.lease.is_some()
                 && self.configuration_is_current()
@@ -1120,12 +1134,14 @@ mod native {
                     .expect("owned workflow")
                     .root_pin()
                     .root();
-                if let Err(error) = self
-                    .automation
-                    .as_mut()
-                    .expect("scheduled run")
-                    .pause(root, cause)
-                {
+                let pause = self.result.pause_cause().cloned();
+                let drift = self.result.unproductive_drift().cloned();
+                let control = self.automation.as_mut().expect("scheduled run");
+                let concluded = match pause {
+                    Some(cause) => control.pause(root, cause),
+                    None => control.conclude(root, drift.as_ref()),
+                };
+                if let Err(error) = concluded {
                     self.record(
                         "automation pause",
                         StageState::Failed,
@@ -8969,12 +8985,20 @@ mod native {
             for operation in [Operation::Process, Operation::Knowledge] {
                 let mut result = JobResult::new(operation);
                 result.ok = false;
-                result.work_telemetry.retained_progress.action_receipts = 1;
                 result.halt_on(
                     "audit fresh scope",
                     HaltKind::InputsChanged,
                     Some("removed"),
                 );
+                assert_eq!(
+                    result
+                        .unproductive_drift()
+                        .map(|cause| cause.stage.as_str()),
+                    Some("audit fresh scope"),
+                    "drift without progress is what repeated-drift escalation counts"
+                );
+                result.work_telemetry.retained_progress.action_receipts = 1;
+                assert!(result.unproductive_drift().is_none());
                 assert_eq!(result.campaign_stop(), CampaignStop::InputsChanged);
                 assert!(result.pause_cause().is_none());
                 let report = serde_json::to_value(&result).unwrap();

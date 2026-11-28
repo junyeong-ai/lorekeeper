@@ -189,7 +189,12 @@ paths:
   `GraphError`, `VaultError::{MutationConflict, RssOriginChanged}`. Such a failure records
   its failed stage and ends the batch with unfinished work retained (`halt_kind:
   inputs-changed`, campaign stop `inputs-changed`) without pausing; the next run plans
-  from the current vault. A later fault in the same job still pauses it. Integrity faults
+  from the current vault. A later fault in the same job still pauses it. Drift that recurs
+  is bounded: the ledger counts per operation consecutive scheduled runs that ended on drift
+  with no semantic progress (no retained progress and no recorded assessment) in the
+  defaulted `drift_runs` field, any other ending resets it, and the
+  `automation::REPEATED_DRIFT_LIMIT`th (3) such run pauses the operation as `repeated input
+  drift` with the last drift's detail. Integrity faults
   (an immutable capture missing or changed, corrupt state, an unreadable present page),
   host failures and configuration or root drift remain faults. Keep errors typed down to
   `Runner::failure` (`commands::typed_error`); a message is never classified.

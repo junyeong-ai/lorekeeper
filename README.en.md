@@ -194,7 +194,8 @@ A call that keeps timing out or exits with an error on one input holds only that
 completed results stay saved, independent work continues, and the held input is not called again until you release it or it changes.
 Likewise, a concept page the backlink sweep cannot update and a `lore graph lint` violation name the pages to fix:
 the job stays incomplete while other work continues. A page that cannot be read still pauses the operation.
-A page or task you edit or delete while a run reads it ends that run without pausing; the next scheduled run plans from your change.
+A page or task you edit or delete while a run reads it does not pause the operation: the run replans or defers only the work that read it, and when it cannot confine the change it ends early and the next scheduled run plans from your change.
+Three scheduled runs in a row that end early this way without progress pause the operation as `repeated input drift`.
 Ask `/lore-process` to diagnose and release it, or follow [plan and resume](skills/lore-process/references/bounded-work.md#plan-and-resume)
 for the exact `lore work retry` commands, each previewable with `--dry-run`.
 
