@@ -373,7 +373,8 @@ paths:
   retain exact addresses. A slot whose subject a writer removed outside the workflow
   (`GraphError::AuditSubjectRemoved`, the planned path) leaves the batch, and a subject
   whose capture, current input bound or request planning drifted is deferred like any late
-  drift; their peers
+  drift, as is one a selected replan (`audit_plan`) deferred or removed while refreshing its
+  discovery: it is never planned again in the run; their peers
   are resolved and captured again. Isolate known blocked peers from publication readiness.
   A candidate edited while a whole assessment ran reopens its subject's screening: the
   judgment is stale like any changed input (spending the subject's replan), is never held
