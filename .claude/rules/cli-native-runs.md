@@ -15,7 +15,9 @@ paths:
   prerequisite queue tasks. Existing Work compares fresh subject/input
   identity before ready-only audit capture so valid scope drift remains a typed replan.
   Request planning and Work preparation defer a subject whose capture drifted since its
-  replan (`audit inputs changed`) and continue with the rest of the batch.
+  replan (`audit inputs changed`) for the rest of the run, counted in `audit_deferred`, and
+  continue with the rest of the batch; request planning plans and measures the rest again
+  before it chooses the whole or bounded route, so a discarded subject's bytes never decide it.
   The screening loop plans the batch once and, after recording a packet, reads only that
   subject again from the scan the recording checked against; a deferral changes the batch
   and plans it again, and before admission the loop plans once more if it refreshed only

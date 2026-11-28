@@ -7133,6 +7133,34 @@ mod native {
             Ok(plan)
         }
 
+        /// Defers `candidate` for the rest of the run because a page its inputs read changed
+        /// after it was planned: later plans of the run keep it deferred with `reason`, and the
+        /// report counts it with the other deferred subjects.
+        fn defer_audit_inputs(
+            &mut self,
+            candidate: &lk_graph::audit::AuditCandidate,
+            reason: String,
+        ) {
+            self.audit_screening_deferred
+                .insert(candidate.path.clone(), reason.clone());
+            self.deferred(
+                "audit inputs changed",
+                format!("{}: {reason}", candidate.path),
+            );
+            if self.audit_deferred_paths.insert(candidate.path.clone())
+                && self.result.audit_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS
+            {
+                self.result.audit_deferred.push(DeferredAudit {
+                    kind: candidate.kind,
+                    path: candidate.path.clone(),
+                    file_revision: candidate.file_revision.clone(),
+                    input_revision: candidate.input_revision.clone(),
+                    reasons: vec![reason],
+                });
+            }
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
+        }
+
         fn defer_audit_screening(
             &mut self,
             candidate: &lk_graph::audit::AuditCandidate,
@@ -7590,10 +7618,7 @@ mod native {
                     }
                     // A page a writer edited or removed since the subject was planned.
                     Err(error) if is_semantic_context_changed(&error) => {
-                        self.deferred(
-                            "audit inputs changed",
-                            format!("{}: {error}", candidate.path),
-                        );
+                        self.defer_audit_inputs(candidate, error.to_string());
                     }
                     Err(error) => {
                         self.failure("bounded audit planning", error);
@@ -8038,42 +8063,56 @@ mod native {
                 }
                 return false;
             }
-            let mut bounded = plan.input.ensure_ready().is_err();
-            // Both routes below capture each subject again, so a wait needs no replan here.
-            let Some((session, _)) = self.mutation_session("audit request planning").await else {
-                return false;
-            };
-            let mut drifted = std::collections::BTreeSet::new();
-            for candidate in &plan.candidates {
-                match crate::commands::work::audit_needs_work_controlled(
-                    &session,
-                    &self.config,
-                    &self.config_revision,
-                    candidate,
-                    self.supervisor.read_control(),
-                ) {
-                    Ok(required) => bounded |= required,
-                    // A page a writer edited or removed since the replan: that subject waits
-                    // for a later run.
-                    Err(error) if is_semantic_context_changed(&error) => {
-                        self.deferred(
-                            "audit inputs changed",
-                            format!("{}: {error}", candidate.path),
-                        );
-                        drifted.insert(candidate.path.clone());
-                    }
-                    Err(error) => {
-                        self.failure("audit request planning", error);
-                        return false;
+            // The route reads the combined input of the subjects it keeps: a subject whose
+            // inputs drifted is deferred and the rest are planned and measured again without it.
+            let bounded = loop {
+                let mut bounded = plan.input.ensure_ready().is_err();
+                // Both routes below capture each subject again, so a wait needs no replan here.
+                let Some((session, _)) = self.mutation_session("audit request planning").await
+                else {
+                    return false;
+                };
+                let mut drifted = std::collections::BTreeSet::new();
+                for candidate in &plan.candidates {
+                    match crate::commands::work::audit_needs_work_controlled(
+                        &session,
+                        &self.config,
+                        &self.config_revision,
+                        candidate,
+                        self.supervisor.read_control(),
+                    ) {
+                        Ok(required) => bounded |= required,
+                        Err(error) if is_semantic_context_changed(&error) => {
+                            self.defer_audit_inputs(candidate, error.to_string());
+                            drifted.insert(candidate.path.clone());
+                        }
+                        Err(error) => {
+                            self.failure("audit request planning", error);
+                            return false;
+                        }
                     }
                 }
-            }
-            drop(session);
-            plan.candidates
-                .retain(|candidate| !drifted.contains(&candidate.path));
-            if plan.candidates.is_empty() {
-                return false;
-            }
+                drop(session);
+                if drifted.is_empty() {
+                    break bounded;
+                }
+                let remaining = plan
+                    .candidates
+                    .iter()
+                    .filter(|candidate| !drifted.contains(&candidate.path))
+                    .map(|candidate| candidate.path.clone())
+                    .collect::<Vec<_>>();
+                if remaining.is_empty() {
+                    return false;
+                }
+                let Some(fresh) = self.replan_audit(&remaining).await else {
+                    return false;
+                };
+                plan = fresh;
+                if plan.candidates.is_empty() {
+                    return false;
+                }
+            };
             let mut deferred_subjects = std::collections::BTreeSet::new();
             if bounded {
                 let bindings = plan
