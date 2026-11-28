@@ -353,6 +353,8 @@ impl<'de> Deserialize<'de> for Group {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(in crate::commands) struct Fatal {
+    /// Whether the failure is input drift a later run plans around, or a fault.
+    pub kind: crate::commands::drift::FailureKind,
     pub detail: String,
 }
 
@@ -406,8 +408,25 @@ impl Report {
     }
 
     pub(in crate::commands) fn can_continue(&self) -> bool {
+        self.fatal.is_none() && self.continues_without_fatal()
+    }
+
+    /// How a report that cannot continue reads: input drift only when its one blocker is a
+    /// fatal failure its command classified as drift.
+    pub(in crate::commands) fn failure_kind(&self) -> crate::commands::drift::FailureKind {
+        use crate::commands::drift::FailureKind;
+        match &self.fatal {
+            Some(fatal)
+                if fatal.kind == FailureKind::InputsChanged && self.continues_without_fatal() =>
+            {
+                FailureKind::InputsChanged
+            }
+            _ => FailureKind::Fault,
+        }
+    }
+
+    fn continues_without_fatal(&self) -> bool {
         !self.dry_run
-            && self.fatal.is_none()
             && self.unreadable == 0
             && self.quarantined == 0
             && self.applied
@@ -447,7 +466,8 @@ impl Report {
                     .filter(|group| matches!(group.outcome, Outcome::Held { .. }))
                     .count()
             && self.ok
-                == (self.rejected == 0
+                == (self.fatal.is_none()
+                    && self.rejected == 0
                     && self.orphaned == 0
                     && self.superseded == 0
                     && self.held == 0)
@@ -473,9 +493,10 @@ impl Report {
             })
     }
 
-    pub(super) fn fail(&mut self, error: impl std::fmt::Display) {
+    pub(super) fn fail(&mut self, error: miette::Report) {
         self.ok = false;
         self.fatal = Some(Fatal {
+            kind: crate::commands::drift::FailureKind::of(&error),
             detail: error.to_string(),
         });
     }
@@ -710,12 +731,7 @@ pub(super) fn quarantine_group(
         None => plan.validate_addresses(root),
         Some(session) => session.apply(plan),
     }
-    .map_err(|error| {
-        miette::miette!(
-            "cannot keep results under results/{}: {error}",
-            store.directory()
-        )
-    })?;
+    .map_err(crate::commands::typed_error)?;
     if session.is_some() {
         for (source, destination) in moves {
             eprintln!("  kept {} → {}", source.display(), destination.display());
@@ -733,7 +749,7 @@ pub(super) fn retire_group(
 ) -> miette::Result<()> {
     let plan = plan_retirement(root, task, snapshots, classification)?;
     if let Some(session) = session {
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     } else {
         plan.validate_addresses(root).into_diagnostic()?;
     }
@@ -927,6 +943,26 @@ mod tests {
             }
             self.preserve();
         }
+    }
+
+    #[test]
+    fn a_report_reads_as_drift_only_when_a_drift_fatal_is_its_one_blocker() {
+        use crate::commands::drift::FailureKind;
+        let mut report = Report::new(false);
+        report.fail(crate::commands::typed_error(
+            lk_vault::VaultError::MutationConflict("wiki/concepts/a.md".into()),
+        ));
+        assert!(!report.can_continue());
+        assert_eq!(
+            report.fatal.as_ref().unwrap().kind,
+            FailureKind::InputsChanged
+        );
+        assert_eq!(report.failure_kind(), FailureKind::InputsChanged);
+        report.unreadable = 1;
+        assert_eq!(report.failure_kind(), FailureKind::Fault);
+        let mut fault = Report::new(false);
+        fault.fail(miette::miette!("IO failure"));
+        assert_eq!(fault.failure_kind(), FailureKind::Fault);
     }
 
     #[test]
@@ -1173,7 +1209,7 @@ mod tests {
             },
             |report| report.rejected += 1,
             |report| report.dry_run = true,
-            |report| report.fail("IO failure"),
+            |report| report.fail(miette::miette!("IO failure")),
         ];
         for mutate in mutations {
             let mut report = rejected();

@@ -7,6 +7,7 @@ pub mod brief;
 pub mod config;
 pub mod doctor;
 pub mod document_identity;
+pub(crate) mod drift;
 #[cfg(unix)]
 mod execution;
 pub mod extract;

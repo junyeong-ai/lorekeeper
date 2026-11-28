@@ -70,7 +70,8 @@ incomplete, and cached or already-complete steps add no progress.
 `queue_publication_observed` is a boolean from an applied report or an exact
 selected-task completion check, not a publication count. `queue_application`
 accumulates controller application `attempts`, `duration_ms`, `applied`, `dropped` and
-`rejected` counts and retains the `latest` typed report; repeated rejection counts are
+`rejected` counts and retains the `latest` typed report, whose `fatal` carries `kind` and
+`detail` as the [queue format](queue-format.md) describes; repeated rejection counts are
 attempts, not distinct tasks. These counters do not enumerate writes an interactive
 child CLI performed; use the exact native receipt or a guarded task-identity comparison
 when complete publication accounting is needed.

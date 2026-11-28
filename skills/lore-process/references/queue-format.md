@@ -47,7 +47,10 @@ drafted again from its current context. A held synthesis group stays staged beca
 concept's own audit assessment or discovery recipe cannot be read; once that record is
 repaired it is validated again, and a changed recipe supersedes it. Rejected groups include their current validation
 scope and receipt. `fatal` reports a failure whose ownership or safety could not be
-established; partial publications remain real.
+established; partial publications remain real. Its `kind` is `inputs-changed` when a
+writer edited or removed a page the application read (a publication guard conflict), and
+`fault` otherwise; `detail` names the failure. A native run halts on an `inputs-changed`
+fatal without pausing when it is the report's only blocker.
 
 Native jobs record known scoped rejections under `.lorekeeper/queue/rejections/` and
 continue independent work. These records are not completion or semantic approval; do

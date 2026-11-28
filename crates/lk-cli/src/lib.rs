@@ -299,7 +299,20 @@ pub async fn run() -> miette::Result<()> {
         std::process::exit(code);
     }
 
-    match cli.command {
+    // A parent run classifies a failed child from this report, never from its exit code.
+    let result = dispatch(cli.command, opts, &protection).await;
+    if let Err(error) = &result {
+        commands::drift::report_child_failure(error);
+    }
+    result
+}
+
+async fn dispatch(
+    command: Command,
+    opts: commands::GlobalOptions,
+    protection: &commands::installation::Protection,
+) -> miette::Result<()> {
+    match command {
         Command::Run { options } => {
             Box::pin(commands::run::run(
                 &opts,

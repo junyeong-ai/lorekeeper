@@ -65,9 +65,10 @@ pub(super) fn apply(
             Ok(raw) => raw,
             Err(error) => {
                 report.failed += 1;
-                report
-                    .report
-                    .fail(format!("read staged result {}: {error}", path.display()));
+                report.report.fail(miette::Report::msg(format!(
+                    "read staged result {}: {error}",
+                    path.display()
+                )));
                 return Ok(report);
             }
         };
@@ -90,10 +91,10 @@ pub(super) fn apply(
             Err(error) => {
                 report.unreadable += 1;
                 report.report.unreadable += 1;
-                report.report.fail(format!(
+                report.report.fail(miette::Report::msg(format!(
                     "unreadable staged section payload {}: {error}",
                     path.display()
-                ));
+                )));
                 let moved = super::quarantine(
                     root,
                     &super::corrupt_store(),
@@ -120,9 +121,9 @@ pub(super) fn apply(
     let mut formats = BTreeMap::new();
     for (section, task_id, cache_hash) in proposals.keys() {
         if formats.insert((task_id, cache_hash), section).is_some() {
-            report
-                .report
-                .fail("one retained task has incompatible section and synthesis result formats");
+            report.report.fail(miette::miette!(
+                "one retained task has incompatible section and synthesis result formats"
+            ));
             return Ok(report);
         }
     }
@@ -349,7 +350,7 @@ pub(super) fn apply(
                 session
                     .ok_or_else(|| miette::miette!("publication requires mutation session"))?
                     .apply(plan)
-                    .map_err(|e| miette::miette!("{e}"))?;
+                    .map_err(crate::commands::typed_error)?;
             }
             Ok(true)
         })();

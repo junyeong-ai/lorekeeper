@@ -102,6 +102,7 @@ mod native {
     use super::*;
     use super::{automation, scheduler};
     use crate::commands::audit::{DeferredAudit, InputAvailability};
+    use crate::commands::drift::FailureKind;
     use crate::commands::queue::application::{is_semantic_context_changed, is_work_input_changed};
     use crate::commands::{
         CONFIG_REVISION_ENV, EXECUTION_PROFILE_ENV, GlobalOptions, execution, typed_error, workflow,
@@ -780,21 +781,9 @@ mod native {
         after: Option<lk_graph::audit::AuditCoverage>,
     }
 
-    /// What the failed stage that stopped a job asks of its scheduled operation.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-    #[serde(rename_all = "kebab-case")]
-    enum HaltKind {
-        /// State the operator repairs (accounting, integrity, configuration, an unknown host
-        /// failure): a scheduled operation pauses until `--resume`.
-        Fault,
-        /// A writer changed or removed inputs while the job read them (`is_input_drift`): the
-        /// batch ends with its unfinished work retained, and the next run plans again.
-        InputsChanged,
-    }
-
     #[derive(Clone, Debug)]
     struct Halt {
-        kind: HaltKind,
+        kind: FailureKind,
         cause: automation::HaltCause,
     }
 
@@ -812,46 +801,6 @@ mod native {
             }
             map.end()
         }
-    }
-
-    /// Whether `error` is input drift: a page, citation, task or capture a writer edited or
-    /// removed after the job read it, or a publication guard that found guarded bytes changed.
-    /// The halt decision reads only these typed errors. Integrity faults (an immutable capture
-    /// missing or changed, corrupt state, an unreadable present page), host failures and
-    /// configuration or root drift are not drift.
-    fn is_input_drift(error: &miette::Report) -> bool {
-        use lk_graph::GraphError;
-        let vault_drift = |error: &lk_vault::VaultError| {
-            matches!(
-                error,
-                lk_vault::VaultError::MutationConflict(_)
-                    | lk_vault::VaultError::RssOriginChanged(_)
-            )
-        };
-        if let Some(rejection) =
-            error.downcast_ref::<crate::commands::queue::application::PublicationRejection>()
-        {
-            return rejection.kind.is_input_change();
-        }
-        error
-            .downcast_ref::<crate::commands::work::SourceChanged>()
-            .is_some()
-            || error
-                .downcast_ref::<crate::commands::queue::TaskNotCurrent>()
-                .is_some_and(crate::commands::queue::TaskNotCurrent::is_input_change)
-            || error
-                .downcast_ref::<lk_vault::VaultError>()
-                .is_some_and(vault_drift)
-            || error
-                .downcast_ref::<GraphError>()
-                .is_some_and(|error| match error {
-                    GraphError::AuditInputChanged(_)
-                    | GraphError::AuditScreeningChanged
-                    | GraphError::AuditSubjectRemoved(_)
-                    | GraphError::AuditSubjectInputChanged { .. } => true,
-                    GraphError::Vault(error) => vault_drift(error),
-                    _ => false,
-                })
     }
 
     #[derive(Serialize)]
@@ -901,7 +850,7 @@ mod native {
         Deferred,
         NoProgress,
         Failed,
-        /// Inputs changed under the batch (`HaltKind::InputsChanged`); the next run replans.
+        /// Inputs changed under the batch (`FailureKind::InputsChanged`); the next run replans.
         InputsChanged,
         Cancelled,
         AutomationLimit,
@@ -947,13 +896,10 @@ mod native {
 
         /// Records `name`'s failure as the halt that stops this job. The first halt is kept,
         /// except that a fault replaces input drift: a scheduled pause names a fault.
-        fn halt_on(&mut self, name: &str, kind: HaltKind, detail: Option<&str>) {
-            if self
-                .halt
-                .0
-                .as_ref()
-                .is_none_or(|halt| halt.kind == HaltKind::InputsChanged && kind == HaltKind::Fault)
-            {
+        fn halt_on(&mut self, name: &str, kind: FailureKind, detail: Option<&str>) {
+            if self.halt.0.as_ref().is_none_or(|halt| {
+                halt.kind == FailureKind::InputsChanged && kind == FailureKind::Fault
+            }) {
                 self.halt.0 = Some(Halt {
                     kind,
                     cause: automation::HaltCause::new(name, detail),
@@ -972,7 +918,7 @@ mod native {
             self.halt
                 .0
                 .as_ref()
-                .filter(|halt| halt.kind == HaltKind::InputsChanged && !progressed)
+                .filter(|halt| halt.kind == FailureKind::InputsChanged && !progressed)
                 .map(|halt| &halt.cause)
         }
 
@@ -981,7 +927,7 @@ mod native {
             self.halt
                 .0
                 .as_ref()
-                .filter(|halt| halt.kind == HaltKind::Fault)
+                .filter(|halt| halt.kind == FailureKind::Fault)
                 .map(|halt| &halt.cause)
         }
 
@@ -1005,8 +951,8 @@ mod native {
             }
             if let Some(halt) = &self.halt.0 {
                 return match halt.kind {
-                    HaltKind::Fault => CampaignStop::Failed,
-                    HaltKind::InputsChanged => CampaignStop::InputsChanged,
+                    FailureKind::Fault => CampaignStop::Failed,
+                    FailureKind::InputsChanged => CampaignStop::InputsChanged,
                 };
             }
             if self.yield_reason.is_some() {
@@ -1192,20 +1138,20 @@ mod native {
             if self.supervisor.is_cancelled() {
                 return self.record(name, StageState::Cancelled, Some(error.to_string()));
             }
-            let kind = if is_input_drift(&error) {
-                HaltKind::InputsChanged
-            } else {
-                HaltKind::Fault
-            };
+            let kind = FailureKind::of(&error);
             let detail = error.to_string();
             self.result.halt_on(name, kind, Some(&detail));
             self.record(name, StageState::Failed, Some(detail))
         }
 
-        /// Records `name` as a faulted stage that stops this job (`HaltKind::Fault`).
+        /// Records `name` as a faulted stage that stops this job (`FailureKind::Fault`).
         fn halt(&mut self, name: &str, detail: Option<String>) -> bool {
-            self.result
-                .halt_on(name, HaltKind::Fault, detail.as_deref());
+            self.halt_as(name, FailureKind::Fault, detail)
+        }
+
+        /// Records `name` as a failed stage that stops this job as `kind`.
+        fn halt_as(&mut self, name: &str, kind: FailureKind, detail: Option<String>) -> bool {
+            self.result.halt_on(name, kind, detail.as_deref());
             self.record(name, StageState::Failed, detail)
         }
 
@@ -1818,6 +1764,12 @@ mod native {
                 return false;
             }
             self.configure_child(&mut command);
+            // The child writes its classified failure here (`drift::ChildFailure`).
+            let failure = match tempfile::NamedTempFile::new() {
+                Ok(file) => file.into_temp_path(),
+                Err(error) => return self.failure(name, typed_error(error)),
+            };
+            command.env(crate::commands::drift::CHILD_FAILURE_ENV, &failure);
             let completed = self
                 .supervisor
                 .run_request(
@@ -1828,13 +1780,17 @@ mod native {
                     execution::ChildOutput::Forward,
                 )
                 .await;
-            self.settle_child(name, completed)
+            self.settle_child(name, completed, Some(&failure))
         }
 
+        /// Records a finished child. Under the lease a failed child halts the job as the kind
+        /// it reported (`failure`, `drift::ChildFailure`); without a report it is a fault,
+        /// whatever its exit code says.
         fn settle_child(
             &mut self,
             name: &str,
             completed: miette::Result<execution::ChildResult>,
+            failure: Option<&Path>,
         ) -> bool {
             let completed = match completed {
                 Ok(result) if result.cancelled => {
@@ -1843,7 +1799,12 @@ mod native {
                 Ok(result) if result.success => {
                     self.record(name, StageState::Completed, result.detail)
                 }
-                Ok(result) if self.lease.is_some() => self.halt(name, result.detail),
+                Ok(result) if self.lease.is_some() => {
+                    let kind = failure
+                        .and_then(crate::commands::drift::load_child_failure)
+                        .map_or(FailureKind::Fault, |failure| failure.kind);
+                    self.halt_as(name, kind, result.detail)
+                }
                 Ok(result) => self.record(name, StageState::Failed, result.detail),
                 Err(error) => self.failure(name, error),
             };
@@ -1854,6 +1815,7 @@ mod native {
             if let Some(lease) = &self.lease {
                 lease.configure(command.as_std_mut());
             }
+            command.env_remove(crate::commands::drift::CHILD_FAILURE_ENV);
             command.env(CONFIG_REVISION_ENV, &self.config_revision).env(
                 "LORE_CONFIG",
                 self.opts.config.as_ref().expect("resolved config"),
@@ -1919,7 +1881,7 @@ mod native {
                     );
                     self.configuration_is_current()
                 }
-                completed => self.settle_child(name, completed),
+                completed => self.settle_child(name, completed, None),
             }
         }
 
@@ -2205,9 +2167,10 @@ mod native {
                 }
             );
             let success = report.ok;
+            let kind = report.failure_kind();
             self.result.queue_application.latest = Some(report);
             if !can_continue {
-                self.halt(name, Some(detail));
+                self.halt_as(name, kind, Some(detail));
             } else if success {
                 self.record(name, StageState::Completed, Some(detail));
             } else {
@@ -8974,7 +8937,7 @@ mod native {
                 elapsed_job_ms: 0,
             });
             assert!(!result.is_successful_yield());
-            result.halt_on("required evidence", HaltKind::Fault, None);
+            result.halt_on("required evidence", FailureKind::Fault, None);
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);
@@ -8987,7 +8950,7 @@ mod native {
                 result.ok = false;
                 result.halt_on(
                     "audit fresh scope",
-                    HaltKind::InputsChanged,
+                    FailureKind::InputsChanged,
                     Some("removed"),
                 );
                 assert_eq!(
@@ -9004,10 +8967,14 @@ mod native {
                 let report = serde_json::to_value(&result).unwrap();
                 assert_eq!(report["halted"], true);
                 assert_eq!(report["halt_kind"], "inputs-changed");
-                result.halt_on("audit fresh scope", HaltKind::InputsChanged, Some("again"));
+                result.halt_on(
+                    "audit fresh scope",
+                    FailureKind::InputsChanged,
+                    Some("again"),
+                );
                 result.halt_on(
                     "knowledge review health",
-                    HaltKind::Fault,
+                    FailureKind::Fault,
                     Some("unreadable"),
                 );
                 assert_eq!(result.campaign_stop(), CampaignStop::Failed);
@@ -9015,59 +8982,12 @@ mod native {
                     result.pause_cause().map(|cause| cause.stage.as_str()),
                     Some("knowledge review health")
                 );
-                result.halt_on("audit fresh scope", HaltKind::InputsChanged, None);
+                result.halt_on("audit fresh scope", FailureKind::InputsChanged, None);
                 assert_eq!(serde_json::to_value(&result).unwrap()["halt_kind"], "fault");
             }
             let settled = serde_json::to_value(JobResult::new(Operation::Process)).unwrap();
             assert_eq!(settled["halted"], false);
             assert!(settled.get("halt_kind").is_none());
-        }
-
-        #[test]
-        fn only_typed_input_drift_is_drift() {
-            use crate::commands::queue::application::{RejectionKind, rejection};
-            use lk_graph::GraphError;
-            let path = || "wiki/concepts/a.md".to_owned();
-            for drift in [
-                miette::Report::new(crate::commands::work::SourceChanged::new("edited")),
-                rejection(RejectionKind::SemanticContextChanged, "changed"),
-                miette::Report::new(crate::commands::queue::TaskNotCurrent {
-                    status: Some(crate::commands::queue::TaskStatus::Stale),
-                    detail: path(),
-                }),
-                typed_error(GraphError::AuditInputChanged(path())),
-                typed_error(GraphError::AuditScreeningChanged),
-                typed_error(GraphError::AuditSubjectRemoved(path())),
-                typed_error(GraphError::AuditSubjectInputChanged {
-                    subject: path(),
-                    input: path(),
-                }),
-                typed_error(lk_vault::VaultError::RssOriginChanged(path())),
-                typed_error(lk_vault::VaultError::MutationConflict(path().into())),
-                typed_error(GraphError::from(lk_vault::VaultError::MutationConflict(
-                    path().into(),
-                ))),
-            ] {
-                assert!(is_input_drift(&drift), "{drift}");
-            }
-            for fault in [
-                rejection(RejectionKind::InvalidSection, "invalid"),
-                rejection(RejectionKind::RetainedWorkInvalid, "unsealed"),
-                miette::Report::new(crate::commands::queue::TaskNotCurrent {
-                    status: Some(crate::commands::queue::TaskStatus::Unreadable),
-                    detail: path(),
-                }),
-                miette::Report::new(crate::commands::queue::TaskNotCurrent {
-                    status: Some(crate::commands::queue::TaskStatus::InvalidTarget),
-                    detail: path(),
-                }),
-                typed_error(GraphError::Io("unreadable".into())),
-                typed_error(lk_vault::VaultError::Original("missing payload".into())),
-                typed_error(lk_vault::VaultError::RetainedCaptureChanged(path().into())),
-                miette::miette!("{}", GraphError::AuditSubjectRemoved(path())),
-            ] {
-                assert!(!is_input_drift(&fault), "{fault}");
-            }
         }
 
         #[test]
@@ -9090,7 +9010,7 @@ mod native {
             assert_eq!(result.campaign_stop(), CampaignStop::NoProgress);
             result.work_telemetry.retained_progress.action_receipts = 1;
             assert_eq!(result.campaign_stop(), CampaignStop::BatchLimit);
-            result.halt_on("queue application", HaltKind::Fault, None);
+            result.halt_on("queue application", FailureKind::Fault, None);
             assert_eq!(result.campaign_stop(), CampaignStop::Failed);
             result.cancelled = true;
             assert_eq!(result.campaign_stop(), CampaignStop::Cancelled);

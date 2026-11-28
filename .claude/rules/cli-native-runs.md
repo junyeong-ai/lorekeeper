@@ -184,7 +184,7 @@ paths:
   Fatal scheduled failures pause that operation: the `automation-usage-v2` ledger records
   the first faulted stage and at most 1024 bytes of its detail, while the job report
   keeps the full detail. A failure caused by input drift is not fatal. One typed
-  predicate (`run::is_input_drift`) decides it: `SourceChanged`, a publication rejection
+  predicate (`drift::is_input_drift`) decides it: `SourceChanged`, a publication rejection
   whose kind is an input change (`RejectionKind::is_input_change`, exhaustive; a missing,
   incomplete or disagreeing seal and a lost sealed roster are `RetainedWorkInvalid`, and a
   result invalid in itself is `InvalidProposal`), a `TaskNotCurrent` whose status means its inputs moved on
@@ -200,7 +200,13 @@ paths:
   drift` with the last drift's detail. Integrity faults
   (an immutable capture missing or changed, corrupt state, an unreadable present page),
   host failures and configuration or root drift remain faults. Keep errors typed down to
-  `Runner::failure` (`commands::typed_error`); a message is never classified.
+  `Runner::failure` (`commands::typed_error`); a message is never classified. A child the
+  run starts under the lease classifies its own failure with the same predicate
+  (`drift::FailureKind::of`) and writes `drift::ChildFailure` (`kind`, `detail`) to the
+  file the runner names in `LORE_CHILD_FAILURE_REPORT`; a failed child halts the job as
+  that kind, and as a fault when it wrote no report, never from its exit code or text.
+  `queue apply --json` carries the same `kind` in `fatal`, and its report halts as input
+  drift only when that fatal is its one blocker (`Report::failure_kind`).
   Explicit `--resume` clears the pause without clearing usage or semantic holds.
   Before workflow waiting, a read-only ledger preflight may refuse a proven operation
   pause under a validated physical-root pin. It neither reserves calls nor clears pauses;

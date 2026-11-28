@@ -923,7 +923,9 @@ async fn apply_into(
         report.unreadable += staged.unreadable.len();
         report.quarantined +=
             quarantine(&vault_root, &corrupt_store(), &staged.unreadable, dry_run);
-        report.fail("unreadable staged result payloads have unknown task identities");
+        report.fail(miette::miette!(
+            "unreadable staged result payloads have unknown task identities"
+        ));
         return Ok(());
     }
 
@@ -933,7 +935,9 @@ async fn apply_into(
     if !batch.unreadable.is_empty() {
         report.unreadable += batch.unreadable.len();
         report.quarantined += quarantine(&vault_root, &corrupt_store(), &batch.unreadable, dry_run);
-        report.fail("unreadable extraction result payloads have unknown targets");
+        report.fail(miette::miette!(
+            "unreadable extraction result payloads have unknown targets"
+        ));
         return Ok(());
     }
 
@@ -1064,7 +1068,7 @@ async fn apply_into(
             if pending.unparseable > 0 {
                 let reason = "no matching readable task; repair unparseable queue lines before deciding this result's fate";
                 fail(reason.into());
-                report.fail(reason);
+                report.fail(miette::Report::msg(reason));
                 return Ok(());
             }
             if let Err(error) = application::quarantine_group(
@@ -1460,7 +1464,7 @@ async fn apply_into(
         .as_ref()
         .expect("non-dry-run owns the mutation session")
         .apply(plan)
-        .map_err(|e| miette::miette!("publish extraction: {e}"))?;
+        .map_err(crate::commands::typed_error)?;
     for page in &concept_pages {
         super::report_refusals(page, false);
     }
