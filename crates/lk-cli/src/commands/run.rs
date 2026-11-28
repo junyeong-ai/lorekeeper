@@ -9062,6 +9062,7 @@ mod native {
                 }),
                 typed_error(GraphError::Io("unreadable".into())),
                 typed_error(lk_vault::VaultError::Original("missing payload".into())),
+                typed_error(lk_vault::VaultError::RetainedCaptureChanged(path().into())),
                 miette::miette!("{}", GraphError::AuditSubjectRemoved(path())),
             ] {
                 assert!(!is_input_drift(&fault), "{fault}");

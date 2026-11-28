@@ -633,7 +633,7 @@ pub fn guard_rss_evidence(
         }
     }
     for (relative, bytes) in dependencies {
-        plan.require_unchanged(relative, String::from_utf8(bytes).map_err(err)?);
+        plan.require_retained(relative, String::from_utf8(bytes).map_err(err)?);
     }
     Ok(())
 }

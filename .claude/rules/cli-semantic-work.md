@@ -19,7 +19,8 @@ paths:
 - A capture types drift (`resources::SourceChanged`): an editable page
   (`SemanticAuthority::is_editable`) it expected that reads differently or is gone. A
   retained input, RSS event payload or archive that reads differently from its pin is an
-  integrity failure, never drift. A page is expected when the
+  integrity failure, never drift; publication pins it with `require_retained`, so a change
+  that lands after the capture fails as `RetainedCaptureChanged`. A page is expected when the
   capture pins its revision or when earlier evidence placed it (a selected extraction
   owner, the target its audit candidate describes); an RSS citation whose origin page was
   removed, or edited to drop that event's binding, is the same drift

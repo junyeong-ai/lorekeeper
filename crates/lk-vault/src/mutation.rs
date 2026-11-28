@@ -19,6 +19,13 @@ enum Step {
     RequireAbsent {
         path: PathBuf,
     },
+    /// An immutable capture (an archive, a retained RSS manifest or payload, a retained input)
+    /// that must hold exactly `expected`: no writer edits it, so a difference is an integrity
+    /// failure (`VaultError::RetainedCaptureChanged`), never a conflict with a writer.
+    RequireRetained {
+        path: PathBuf,
+        expected: String,
+    },
     Create {
         path: PathBuf,
         after: String,
@@ -42,7 +49,7 @@ enum Step {
 impl Step {
     fn is_guard(&self) -> bool {
         match self {
-            Self::RequireAbsent { .. } => true,
+            Self::RequireAbsent { .. } | Self::RequireRetained { .. } => true,
             Self::Edit { before, after, .. } => before == after,
             _ => false,
         }
@@ -159,6 +166,15 @@ impl MutationPlan {
             path: path.into(),
             before: expected.clone(),
             after: expected,
+        });
+    }
+
+    /// Pin an immutable capture (`Step::RequireRetained`): a preflight or recovery that finds
+    /// it different is an integrity failure, where `require_unchanged` is a writer's conflict.
+    pub fn require_retained(&mut self, path: impl Into<PathBuf>, expected: String) {
+        self.steps.push(Step::RequireRetained {
+            path: path.into(),
+            expected,
         });
     }
 
@@ -365,6 +381,7 @@ impl MutationSession {
         for step in &plan.steps {
             let paths: Vec<&Path> = match step {
                 Step::RequireAbsent { path }
+                | Step::RequireRetained { path, .. }
                 | Step::Create { path, .. }
                 | Step::Edit { path, .. }
                 | Step::Remove { path, .. } => {
@@ -381,6 +398,11 @@ impl MutationSession {
                 Step::RequireAbsent { path } => {
                     if state[path].is_some() {
                         return Err(VaultError::MutationConflict(path.clone()));
+                    }
+                }
+                Step::RequireRetained { path, expected } => {
+                    if state[path].as_ref() != Some(expected) {
+                        return Err(VaultError::RetainedCaptureChanged(path.clone()));
                     }
                 }
                 Step::Create { path, after } => {
@@ -425,7 +447,12 @@ impl MutationSession {
         for step in &plan.steps {
             let states: Vec<(&Path, Option<&str>)> = match step {
                 Step::RequireAbsent { path } | Step::Remove { path, .. } => vec![(path, None)],
-                Step::Create { path, after } | Step::Edit { path, after, .. } => {
+                Step::Create { path, after }
+                | Step::Edit { path, after, .. }
+                | Step::RequireRetained {
+                    path,
+                    expected: after,
+                } => {
                     vec![(path, Some(after))]
                 }
                 Step::Rename { from, to, expected } if from == to => vec![(to, Some(expected))],
@@ -448,6 +475,9 @@ impl MutationSession {
                     after,
                 } if before == after => {
                     retained.insert(path, Some(before));
+                }
+                Step::RequireRetained { path, expected } => {
+                    retained.insert(path, Some(expected));
                 }
                 _ => {}
             }
@@ -504,12 +534,22 @@ impl MutationSession {
             {
                 return Err(Self::conflict(path));
             }
+            if let Step::RequireRetained { path, expected } = step
+                && self.read(path)?.as_ref() != Some(expected)
+            {
+                return Err(VaultError::RetainedCaptureChanged(path.clone()));
+            }
         }
         while let Some(step) = journal.plan.steps.get(completed) {
             match step {
                 Step::RequireAbsent { path } => {
                     if self.read(path)?.is_some() {
                         return Err(Self::conflict(path));
+                    }
+                }
+                Step::RequireRetained { path, expected } => {
+                    if self.read(path)?.as_ref() != Some(expected) {
+                        return Err(VaultError::RetainedCaptureChanged(path.clone()));
                     }
                 }
                 Step::Create { path, after } => {
@@ -641,7 +681,9 @@ fn validate_addresses(root: &Path, plan: &MutationPlan) -> Result<(), VaultError
     let validation = (|| {
         for step in &plan.steps {
             let (paths, writes): (Vec<&Path>, bool) = match step {
-                Step::RequireAbsent { path } => (vec![path], false),
+                Step::RequireAbsent { path } | Step::RequireRetained { path, .. } => {
+                    (vec![path], false)
+                }
                 Step::Edit {
                     path,
                     before,
@@ -1489,6 +1531,43 @@ mod tests {
         assert!(root.path().join("old.md").exists());
         assert!(root.path().join("new.md").exists());
         assert!(!session.journal.exists());
+    }
+
+    #[test]
+    fn a_changed_retained_capture_is_an_integrity_failure_and_a_changed_page_a_conflict() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("page.md"), "page").unwrap();
+        fs::write(root.path().join("capture.json"), "capture").unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let plan = || {
+            let mut plan = MutationPlan::default();
+            plan.require_unchanged("page.md", "page".into());
+            plan.require_retained("capture.json", "capture".into());
+            plan.create("result.md", "result".into());
+            plan
+        };
+        fs::write(root.path().join("capture.json"), "replaced").unwrap();
+        assert!(matches!(
+            session.apply(plan()),
+            Err(VaultError::RetainedCaptureChanged(path)) if path == Path::new("capture.json")
+        ));
+        fs::remove_file(root.path().join("capture.json")).unwrap();
+        assert!(matches!(
+            session.apply(plan()),
+            Err(VaultError::RetainedCaptureChanged(_))
+        ));
+        fs::write(root.path().join("capture.json"), "capture").unwrap();
+        fs::write(root.path().join("page.md"), "edited").unwrap();
+        assert!(matches!(
+            session.apply(plan()),
+            Err(VaultError::MutationConflict(path)) if path == Path::new("page.md")
+        ));
+        fs::write(root.path().join("page.md"), "page").unwrap();
+        session.apply(plan()).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("result.md")).unwrap(),
+            "result"
+        );
     }
 
     #[test]

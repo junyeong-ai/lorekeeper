@@ -3603,6 +3603,31 @@ fn guard_page_input_controlled(
     input: &AuditPageInput,
     read: &lk_vault::ReadControl,
 ) -> Result<(), GraphError> {
+    let (direct, raw) = pinned_page_input(root, input, read)?;
+    plan.require_unchanged(direct, raw);
+    Ok(())
+}
+
+/// Guards an immutable capture a scoped review cites (`MutationPlan::require_retained`): one
+/// missing or changed now, or at publication, is an integrity failure.
+fn guard_retained_input_controlled(
+    plan: &mut MutationPlan,
+    root: &Path,
+    input: &AuditPageInput,
+    read: &lk_vault::ReadControl,
+) -> Result<(), GraphError> {
+    let (direct, raw) = pinned_page_input(root, input, read).map_err(immutable_capture_failure)?;
+    plan.require_retained(direct, raw);
+    Ok(())
+}
+
+/// The vault-relative path and current bytes of `input`, which must still hold its pinned
+/// revision.
+fn pinned_page_input(
+    root: &Path,
+    input: &AuditPageInput,
+    read: &lk_vault::ReadControl,
+) -> Result<(PathBuf, String), GraphError> {
     let Some((raw, current)) = load_page_input_controlled(root, &input.path, read)? else {
         return Err(GraphError::AuditInputChanged(input.path.clone()));
     };
@@ -3621,8 +3646,7 @@ fn guard_page_input_controlled(
         Err(failure) => return Err(error(failure)),
     };
     let direct = canonical.strip_prefix(&canonical_root).map_err(error)?;
-    plan.require_unchanged(direct, raw);
-    Ok(())
+    Ok((direct.to_path_buf(), raw))
 }
 
 #[cfg(test)]
@@ -3650,8 +3674,7 @@ fn guard_review_dependency_controlled(
             plan.require_absent(&evidence.recorded.path);
         }
         if let Some(archived) = &evidence.archived {
-            guard_page_input_controlled(plan, root, archived, read)
-                .map_err(immutable_capture_failure)?;
+            guard_retained_input_controlled(plan, root, archived, read)?;
         }
     }
     Ok(())

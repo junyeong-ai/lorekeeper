@@ -203,7 +203,10 @@ pub struct RssCitationInput {
 pub struct RssEvidenceCapture {
     originals: Originals,
     origins: BTreeMap<String, Arc<Origin>>,
+    /// Origin pages the loaded citations read: editable, so a later change is a conflict.
     dependencies: BTreeMap<PathBuf, Arc<String>>,
+    /// Manifests and payloads the loaded citations read: immutable captures.
+    retained: BTreeMap<PathBuf, Arc<String>>,
 }
 
 impl RssEvidenceCapture {
@@ -212,6 +215,7 @@ impl RssEvidenceCapture {
             originals: Originals::build(root, read)?,
             origins: BTreeMap::new(),
             dependencies: BTreeMap::new(),
+            retained: BTreeMap::new(),
         })
     }
 
@@ -393,7 +397,7 @@ impl RssEvidenceCapture {
             declared_manifest(&origin.page)?.ok_or_else(|| err("missing current manifest"))?;
         for reference in [&current, &binding.manifest] {
             self.originals.manifest(reference)?;
-            self.dependencies.insert(
+            self.retained.insert(
                 PathBuf::from(&reference.manifest_path),
                 Arc::clone(&self.originals.manifests[&reference.revision].raw),
             );
@@ -403,7 +407,7 @@ impl RssEvidenceCapture {
             selection.revision
         ));
         let payload = Arc::clone(&self.originals.payloads[&selection.revision].raw);
-        self.dependencies
+        self.retained
             .insert(payload_path.clone(), Arc::clone(&payload));
         self.dependencies
             .insert(origin.owner.clone(), Arc::clone(&origin.raw));
@@ -431,6 +435,10 @@ impl RssEvidenceCapture {
         for (path, raw) in &self.dependencies {
             self.originals.read.check()?;
             plan.require_unchanged(path, raw.as_str().to_owned());
+        }
+        for (path, raw) in &self.retained {
+            self.originals.read.check()?;
+            plan.require_retained(path, raw.as_str().to_owned());
         }
         self.originals.read.check()?;
         Ok(())
@@ -620,7 +628,13 @@ mod tests {
         ));
         std::fs::write(&payload, "changed").unwrap();
         let session = crate::MutationSession::acquire(root.path()).unwrap();
-        assert!(session.apply(plan).is_err());
+        assert!(
+            matches!(
+                session.apply(plan),
+                Err(VaultError::RetainedCaptureChanged(path)) if root.path().join(&path) == payload
+            ),
+            "a changed retained payload is an integrity failure, never a writer's conflict"
+        );
         let mut fresh =
             RssEvidenceCapture::build(root.path(), &crate::ReadControl::default()).unwrap();
         assert!(

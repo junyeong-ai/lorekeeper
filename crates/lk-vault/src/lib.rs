@@ -151,6 +151,14 @@ pub enum VaultError {
         .0.display()
     )]
     MutationConflict(std::path::PathBuf),
+    /// An immutable capture a plan pins (`MutationPlan::require_retained`) differs from its
+    /// pinned bytes or is gone. No writer edits a capture, so this is an integrity failure to
+    /// repair, never a conflict with a writer.
+    #[error(
+        "retained capture {} differs from its pinned bytes or is gone; nothing was written",
+        .0.display()
+    )]
+    RetainedCaptureChanged(std::path::PathBuf),
     /// A session's publication precondition refused a plan before it was journaled.
     #[error("{0}")]
     PublicationRefused(String),

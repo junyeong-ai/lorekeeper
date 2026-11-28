@@ -411,10 +411,22 @@ impl Prepared {
         Ok(lk_core::rss_original::digest(&bytes))
     }
 
-    /// Guards every captured page and the context snapshot the preparation read.
+    /// Guards every captured page and the context snapshot the preparation read. An immutable
+    /// capture (`SemanticAuthority::is_editable` false) is pinned as retained, so a change to
+    /// it at publication is an integrity failure rather than a writer's conflict.
     pub fn guard_pages(&self, plan: &mut lk_vault::MutationPlan) {
+        let retained = self
+            .resources
+            .iter()
+            .filter(|resource| !resource.authority.is_editable())
+            .map(|resource| resource.address.as_str())
+            .collect::<BTreeSet<_>>();
         for (path, content) in &self.pages {
-            plan.require_unchanged(path, content.clone());
+            if retained.contains(lk_core::vault_path::address(path).as_str()) {
+                plan.require_retained(path, content.clone());
+            } else {
+                plan.require_unchanged(path, content.clone());
+            }
         }
         self.guard_beyond_pages(plan);
     }
@@ -2057,6 +2069,20 @@ mod tests {
             resource.address == lk_core::vault_path::address(&archived)
                 && resource.authority == SemanticAuthority::Archive
         }));
+        let archive_raw = std::fs::read_to_string(root.join(&archived)).unwrap();
+        std::fs::write(root.join(&archived), format!("{archive_raw}\nRewritten.\n")).unwrap();
+        let mut guarded = lk_vault::MutationPlan::default();
+        shared.source.guard_pages(&mut guarded);
+        let session = lk_vault::MutationSession::acquire(&root).unwrap();
+        assert!(
+            matches!(
+                session.apply(guarded),
+                Err(lk_vault::VaultError::RetainedCaptureChanged(path)) if path == archived
+            ),
+            "a rewritten archive is an integrity failure at publication, never a conflict"
+        );
+        drop(session);
+        std::fs::write(root.join(&archived), archive_raw).unwrap();
         assert!(
             admit(&[selected])
                 .unwrap()

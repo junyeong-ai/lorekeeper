@@ -56,6 +56,10 @@ canonical; SQLite navigation is derived.
   A session's `with_precondition` check runs under the lock before each plan is
   journaled; `PublicationRefused` publishes nothing. A holder writing outside the
   journal runs the same check with `validate` immediately before that write.
+  A guard names what it pins: `require_unchanged` an editable page, whose difference is
+  a writer's `MutationConflict`; `require_retained` an immutable capture (an archive, an
+  RSS manifest or payload, a retained input), whose difference or absence in preflight or
+  recovery is the integrity failure `RetainedCaptureChanged`.
 - `MutationClaim` acquires the same writer boundary without reading or recovering
   journals. Installation uses it for settlement inspection and replacement; it is
   not a publication session and must be released before schema publication.
