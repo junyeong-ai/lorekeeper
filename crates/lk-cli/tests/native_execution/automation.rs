@@ -1300,7 +1300,7 @@ fn a_subject_removed_during_another_subjects_discovery_leaves_the_batch() {
 }
 
 #[test]
-fn a_subject_removed_during_its_whole_assessment_ends_the_batch_without_a_pause() {
+fn a_subject_removed_during_its_whole_assessment_leaves_it_and_records_its_peer() {
     let remove = r#"if request.get('schema')=='native-audit-results-v1':
     remove=root/'remove-during-assessment'
     if remove.exists():
@@ -1331,19 +1331,30 @@ fn a_subject_removed_during_its_whole_assessment_ends_the_batch_without_a_pause(
         !fixture.root().join("remove-during-assessment").exists(),
         "the assessment ran: {report}"
     );
-    assert_eq!(report["runs"][0]["halted"], true, "{report}");
-    assert_eq!(report["runs"][0]["halt_kind"], "inputs-changed", "{report}");
-    assert_eq!(report["stop_reason"], "inputs-changed", "{report}");
+    let batch = &report["runs"][0];
+    assert_eq!(batch["halted"], false, "{report}");
+    assert_eq!(batch["audit_deferred_count"], 1, "{report}");
     assert!(
         usage(&fixture)["paused"].as_object().unwrap().is_empty(),
         "{report}"
     );
-    let repeated = run(&fixture, "knowledge", false);
-    assert_eq!(repeated["runs"][0]["halted"], false, "{repeated}");
-    let assessed: Vec<String> =
-        serde_json::from_slice(&std::fs::read(fixture.root().join("maintain-command")).unwrap())
-            .unwrap();
-    assert_eq!(assessed, ["wiki/concepts/kept.md"], "{repeated}");
+    let receipts: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            fixture
+                .root()
+                .join("vault/.lorekeeper/knowledge-audit.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(
+        receipts["entries"]["wiki/concepts/kept.md"].is_object(),
+        "the peer's judgment is recorded in the same call: {receipts}"
+    );
+    assert!(
+        receipts["entries"]["wiki/concepts/removed.md"].is_null(),
+        "{receipts}"
+    );
 }
 
 #[test]

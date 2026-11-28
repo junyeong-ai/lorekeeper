@@ -30,6 +30,39 @@ impl Runner<'_> {
         Ok(current)
     }
 
+    /// Resolves `originals` to their current subjects, leaving out each one a writer removed
+    /// from the vault (`AuditSubjectRemoved`), which is deferred and counted: the positions of
+    /// `originals` kept, and their current subjects in that order.
+    fn current_audit_subjects_kept(
+        &mut self,
+        originals: &[lk_graph::audit::AuditCandidate],
+    ) -> miette::Result<(Vec<usize>, Vec<lk_graph::audit::AuditCandidate>)> {
+        let mut kept = (0..originals.len()).collect::<Vec<_>>();
+        loop {
+            let batch = kept
+                .iter()
+                .map(|position| originals[*position].clone())
+                .collect::<Vec<_>>();
+            let error = match self.current_audit_subjects(&batch) {
+                Ok(current) => return Ok((kept, current)),
+                Err(error) => error,
+            };
+            let Some(lk_graph::GraphError::AuditSubjectRemoved(path)) =
+                error.downcast_ref::<lk_graph::GraphError>()
+            else {
+                return Err(error);
+            };
+            let Some(position) = kept
+                .iter()
+                .position(|position| originals[*position].path == *path)
+            else {
+                return Err(error);
+            };
+            let removed = &originals[kept.remove(position)];
+            self.defer_removed_audit_subject(&removed.path.clone(), Some(&removed.clone()));
+        }
+    }
+
     pub(super) async fn whole_audit(&mut self, batch: &[lk_graph::audit::AuditCandidate]) {
         use crate::commands::work::audit::{capture_controlled, whole_request};
         use execution::audit::Judgment;
@@ -416,21 +449,28 @@ impl Runner<'_> {
                         .map(|indices| batch[indices[0]].clone())
                         .collect::<Vec<_>>();
                     self.hold_failed_request(&mut metrics, |runner, session| {
-                        let fresh = runner.current_audit_subjects(&originals)?;
+                        // A subject removed or changed since the request holds nothing; its
+                        // peers' exact inputs are held.
+                        let (kept, fresh) = runner.current_audit_subjects_kept(&originals)?;
                         let mut plan = lk_vault::MutationPlan::default();
                         let mut held = Vec::new();
-                        for (subject, candidate) in subjects.iter().zip(fresh) {
+                        for (position, candidate) in kept.into_iter().zip(fresh) {
+                            let subject = &subjects[position];
                             // Reopened screening is changed input: it is prepared afresh.
                             if screening_reopened(&candidate) {
                                 continue;
                             }
-                            let current = capture_controlled(
+                            let current = match capture_controlled(
                                 session.root(),
                                 &runner.config,
                                 &runner.config_revision,
                                 &candidate,
                                 runner.supervisor.read_control(),
-                            )?;
+                            ) {
+                                Ok(current) => current,
+                                Err(error) if is_semantic_context_changed(&error) => continue,
+                                Err(error) => return Err(error),
+                            };
                             if subject.same_input(&current) {
                                 let binding = current.plan_failure_hold(
                                     session.root(),
@@ -477,14 +517,24 @@ impl Runner<'_> {
                 .iter()
                 .map(|indices| batch[indices[0]].clone())
                 .collect::<Vec<_>>();
-            let fresh = match self.current_audit_subjects(&originals) {
-                Ok(fresh) => fresh,
+            // A subject a writer removed while the host ran leaves the batch; its peers'
+            // judgments are checked and recorded.
+            let (kept, fresh) = match self.current_audit_subjects_kept(&originals) {
+                Ok(resolved) => resolved,
                 Err(error) => {
                     self.record_work_step(metrics);
                     self.failure("audit fresh scope", error);
                     return;
                 }
             };
+            for (position, indices) in slots.iter().enumerate() {
+                if !kept.contains(&position) {
+                    for index in indices {
+                        pending.remove(index);
+                    }
+                }
+            }
+            let mut judgments = judgments.into_iter().map(Some).collect::<Vec<_>>();
             let queue_claim = match crate::commands::queue::claim_writer(
                 &self.root.join(".lorekeeper/queue"),
                 false,
@@ -523,9 +573,11 @@ impl Runner<'_> {
             let mut completed = Vec::new();
             // Whether a judgment answered inputs that changed while its host ran.
             let mut stale = false;
-            for (((subject, indices), candidate), judgment) in
-                subjects.iter().zip(&slots).zip(fresh).zip(judgments)
-            {
+            for (position, candidate) in kept.into_iter().zip(fresh) {
+                let (subject, indices) = (&subjects[position], &slots[position]);
+                let judgment = judgments[position]
+                    .take()
+                    .expect("one judgment per subject");
                 // A candidate edited while the host ran reopens screening: the judgment then
                 // answers reads that changed, like any other changed input.
                 let fresh = if screening_reopened(&candidate) {
@@ -539,6 +591,8 @@ impl Runner<'_> {
                         self.supervisor.read_control(),
                     ) {
                         Ok(fresh) => Some(fresh),
+                        // A page its inputs read changed after resolution: the judgment is stale.
+                        Err(error) if is_semantic_context_changed(&error) => None,
                         Err(error) => {
                             self.record_work_step(metrics);
                             self.failure("audit input revalidation", error);

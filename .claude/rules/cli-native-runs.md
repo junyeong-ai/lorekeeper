@@ -377,7 +377,12 @@ paths:
   assessment metadata and records current inputs through the shared audit owner.
   Replan original slots through this workflow's guarded concept merges; documents
   retain exact addresses. A slot whose subject a writer removed outside the workflow
-  (`GraphError::AuditSubjectRemoved`, the planned path) leaves the batch, and a subject
+  (`GraphError::AuditSubjectRemoved`, the planned path) leaves the batch, also while the
+  host ran: its peers' judgments are checked and recorded, and a failed invocation holds
+  only its peers' exact inputs (`current_audit_subjects_kept`). A capture that finds a page
+  changed after resolution makes that judgment stale like any changed input. A publication
+  guard that refuses the batch's recording is input drift: the batch ends without a pause,
+  and the next run records the peers. A subject
   whose capture, current input bound or request planning drifted is deferred like any late
   drift, as is one a selected replan (`audit_plan`) deferred or removed while refreshing its
   discovery: it is never planned again in the run; their peers
