@@ -2014,6 +2014,12 @@ mod native {
             {
                 return false;
             }
+            self.lint_vault(name)
+        }
+
+        /// The lint verdict as a stage: a read error or a lint error is a fault, a violation
+        /// leaves the job incomplete.
+        fn lint_vault(&mut self, name: &str) -> bool {
             let linted = crate::commands::graph::lint_controlled(
                 &self.config,
                 &self.root,
@@ -7021,6 +7027,20 @@ mod native {
         async fn inspect_halted_state(&mut self) {
             if !self.result.is_halted() || self.result.cancelled || !self.configuration_is_current()
             {
+                return;
+            }
+            // After input drift the read-only checks still classify what they find: an
+            // unreadable page, a lint error or an invalid review is a fault, which replaces the
+            // drift as the cause a scheduled operation pauses on.
+            if self
+                .result
+                .halt
+                .0
+                .as_ref()
+                .is_some_and(|halt| halt.kind == FailureKind::InputsChanged)
+            {
+                self.lint_vault("graph lint");
+                self.inspect_review_health();
                 return;
             }
             for (name, args) in [

@@ -198,7 +198,10 @@ paths:
   `GraphError`, `VaultError::{MutationConflict, RssOriginChanged}`. Such a failure records
   its failed stage and ends the batch with unfinished work retained (`halt_kind:
   inputs-changed`, campaign stop `inputs-changed`) without pausing; the next run plans
-  from the current vault. A later fault in the same job still pauses it. Drift that recurs
+  from the current vault. A later fault in the same job still pauses it: after a drift
+  halt the final read-only checks run in process and classify what they find (lint and
+  review health as a normal run does), so an unreadable page, a lint error or an invalid
+  review replaces the drift as the pause cause. Drift that recurs
   is bounded: the ledger counts per operation consecutive scheduled runs that ended on drift
   with no semantic progress (no retained progress and no recorded assessment) in the
   defaulted `drift_runs` field, any other ending resets it, and the
