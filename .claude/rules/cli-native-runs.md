@@ -23,38 +23,11 @@ paths:
   in the run defers it. A subject removed from the vault during its own packet
   (`GraphError::AuditSubjectRemoved`) is deferred and leaves the batch, whose peers are
   planned again; an unreadable subject stays fatal. Drift never halts the loop.
-  Before screening, the run adopts candidate screening for planned subjects that are due and
-  whose discovery was recorded before screening, through lk-graph's adoption owner and its
-  guards under the run's own writer claim, and plans again, so they screen and read the
-  bounded roster in the same run. It adopts, in planned order, only as many as its remaining
-  calls could screen when it first adopted (at least one), in the whole run: a later replan
-  spends what is left of that allowance, never a fresh one. Each checkpoint adopts from one
-  shared capture of their inputs and bounded card
-  rosters (`selection::Adoptions`): each subject reads the guards of its complete legacy
-  input just before its own journal and drops them after it, so no subject's unbounded
-  context is held for another; it counts as it commits, and cancellation and the run's
-  duration stop adoption between commits. The rest keep their legacy derivation and their place for a
-  later run, so a large legacy backlog never holds the writer claim across work the run
-  cannot screen. `audit_adoption_duration_ms` measures that work after the claim is acquired.
-  A current subject is not touched, and neither is the subject of the run's released probe
-  until that exact attempt settles: adoption would change the held request before it is sent.
-  Nor is a subject whose stored Work for its present legacy inputs (the Work `expected()`
-  chooses for its preparation, `work::audit_work_in_progress_controlled`, read under the
-  adoption's writer claim) has a recorded observation: it continues that Work to its
-  assessment and spends no allowance. A subject with no stored Work, a stored Work with
-  nothing recorded, or inputs its stored Work no longer matches is adopted. A refused
-  adoption (a current processing action, an assessment recorded since planning, inputs
-  changed since planning, while its processing state and guards are read or before its
-  journal, as typed drift: `GraphError::AuditInputChanged`, `work::SourceChanged`) keeps
-  that subject's legacy derivation for
-  the rest of the run, recorded as a skipped `audit discovery adoption` stage and never
-  fatal, and the run plans again; journal and integrity failures stay fatal. Predecessor
-  Work stays as it is. The report counts adoptions (`audit_adoptions`).
   Every selected replan keeps only due subjects: an exact plan keeps current ones, but a
   subject a writer assessed since admission (a manual `wiki audit-record` during another
-  subject's call) is settled and no route sends it again. The run plans again after
-  adoption until every remaining subject has current discovery, so a recipe an edit
-  invalidated is discovered before either audit route.
+  subject's call) is settled and no route sends it again. The run plans again until every
+  remaining subject has current discovery, so a recipe an edit invalidated is discovered
+  before either audit route.
   Deferral counts track encountered subject paths independently of bounded details.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
@@ -336,9 +309,9 @@ paths:
   During automatic admission, check exact current Work holds only along the available
   planned prefix needed to fill the configured batch. Preserve held order and paid
   bytes; all-held is deferred, while corrupt or unreadable state is fatal. A subject whose
-  pages a writer edited after admission derived it is typed drift (`work::SourceChanged`,
-  also for the screening packet the check prepares) and is deferred for the run; every
-  caller of the processing-hold check maps it so (admission defers, adoption refuses). No Work-ID
+  pages a writer edited or removed after admission derived it is typed drift
+  (`work::SourceChanged`, also for the screening packet the check prepares) and is deferred
+  for the run; every caller of the processing-hold check maps it so. No Work-ID
   shortcut, persistent hold index or capture reuse across a host/wait boundary. Recheck
   readiness under those claims before recording, and verify selected receipts after
   final reconciliation even when unrelated backlog leaves the overall job incomplete.

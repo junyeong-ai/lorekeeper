@@ -813,12 +813,6 @@ mod native {
         audit_blocked_count: usize,
         audit_deferred: Vec<DeferredAudit>,
         audit_deferred_count: usize,
-        /// Due subjects whose discovery, recorded before screening, this run adopted into
-        /// candidate screening.
-        audit_adoptions: usize,
-        /// Time the adoptions spent under their writer claim: scanning, capturing and
-        /// journaling, after the claim was acquired (`mutation_access` measures acquisition).
-        audit_adoption_duration_ms: u64,
         review_health: Option<lk_vault::ReviewHealth>,
         stages: Vec<StageResult>,
     }
@@ -865,8 +859,6 @@ mod native {
                 audit_blocked_count: 0,
                 audit_deferred: Vec::new(),
                 audit_deferred_count: 0,
-                audit_adoptions: 0,
-                audit_adoption_duration_ms: 0,
                 review_health: None,
                 stages: Vec::new(),
             }
@@ -990,14 +982,6 @@ mod native {
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
-        /// Legacy subjects this run keeps on their derivation until it ends, so a later replan
-        /// does not adopt them: those whose adoption was refused, and those continuing a stored
-        /// Work with recorded observations.
-        legacy_kept: std::collections::BTreeSet<String>,
-        /// The discovery adoptions left to this run: as many as its remaining calls could
-        /// screen when it first adopted (at least one), whatever replans follow; `None` until
-        /// then.
-        adoption_allowance: Option<usize>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
         /// The audit subject selected for a single bounded step and the keys it was ordered
@@ -7601,7 +7585,7 @@ mod native {
 
         /// The selected subjects ready for an audit route: planned again (`audit_plan`, which
         /// keeps only due subjects) until each has current discovery, so a recipe an edit
-        /// invalidated, before or after adoption, is discovered again before either route.
+        /// invalidated is discovered again before either route.
         async fn replan_audit(&mut self, paths: &[String]) -> Option<lk_graph::audit::AuditPlan> {
             let mut plan = match self.audit_plan(paths) {
                 Ok(plan) => plan,
@@ -7617,249 +7601,21 @@ mod native {
                     .filter(|candidate| candidate.discovery.is_none())
                     .map(|candidate| candidate.path.clone())
                     .collect::<Vec<_>>();
-                let stage = if !missing.is_empty() {
-                    if !self.discover_audit(&missing).await {
-                        return None;
-                    }
-                    "audit discovery replanning"
-                } else if self.adopt_legacy_screening(&plan).await? {
-                    "audit adoption replanning"
-                } else {
+                if missing.is_empty() {
                     break;
-                };
+                }
+                if !self.discover_audit(&missing).await {
+                    return None;
+                }
                 plan = match self.audit_plan(paths) {
                     Ok(plan) => plan,
                     Err(error) => {
-                        self.failure(stage, error);
+                        self.failure("audit discovery replanning", error);
                         return None;
                     }
                 };
             }
             self.screen_audit_inputs(paths, plan).await
-        }
-
-        /// Adopts candidate screening, through the explicit adoption owner and its guards,
-        /// for planned subjects that are due and whose discovery was recorded before
-        /// screening, so they read the bounded roster this run instead of every match. Only
-        /// as many as the run's remaining calls could screen when it first adopted (at least
-        /// one) are adopted in the whole run, whatever replans follow, in planned order, from
-        /// one shared capture under one writer claim; cancellation and the
-        /// run's duration stop it between commits, and each commit counts as it lands. The
-        /// rest keep their legacy derivation and their place for a later run. A current
-        /// subject keeps its legacy derivation, which its receipt's currency still verifies.
-        /// A subject whose stored Work for its present legacy inputs has recorded observations
-        /// continues that Work to its assessment instead, spending no allowance: adoption would
-        /// change those inputs and discard paid progress. A subject whose adoption is refused
-        /// (a current processing action, an assessment that became current, or inputs that
-        /// changed since planning) keeps its derivation for the rest of this run, as a stage
-        /// record names, and the run's released probe keeps it until its attempt settles. Its
-        /// predecessor Work stays as it is. Whether the plan must be read again (a subject
-        /// was adopted or kept), or `None` after a failure the run recorded.
-        async fn adopt_legacy_screening(
-            &mut self,
-            plan: &lk_graph::audit::AuditPlan,
-        ) -> Option<bool> {
-            let budget = match self.config.execution.effective_work() {
-                Ok(budget) => budget,
-                Err(error) => {
-                    self.failure("semantic work budget", error);
-                    return None;
-                }
-            };
-            // The run's released probe is the exact request its hold was prepared from; adopting
-            // its subject would change that request before it is sent, so the subject waits
-            // until the attempt settles.
-            let probe = if self.retire_settled_probe(crate::commands::work::host::ProbeScope::Audit)
-            {
-                self.host_probes
-                    .scope(crate::commands::work::host::ProbeScope::Audit)
-                    .as_ref()
-                    .and_then(|probe| probe.target.clone())
-            } else {
-                None
-            };
-            if self.result.is_halted() {
-                return None;
-            }
-            let first = self.remaining_calls(budget).max(1);
-            let allowance = *self.adoption_allowance.get_or_insert(first);
-            let legacy = plan
-                .candidates
-                .iter()
-                .filter(|candidate| {
-                    candidate.reason != lk_graph::audit::AuditReason::Current
-                        && candidate
-                            .discovery
-                            .as_ref()
-                            .is_some_and(|discovery| discovery.selection.is_none())
-                        && !self.legacy_kept.contains(&candidate.path)
-                        && probe.as_ref() != Some(&candidate.path)
-                })
-                .collect::<Vec<_>>();
-            if legacy.is_empty() || allowance == 0 {
-                return Some(false);
-            }
-            let (session, _) = self.mutation_session("audit discovery adoption").await?;
-            let started_at = Instant::now();
-            let outcome = self.adopt_screening(&session, &legacy, allowance);
-            drop(session);
-            self.result.audit_adoption_duration_ms += started_at.elapsed().as_millis() as u64;
-            let (adopted, kept) = match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    self.failure("audit discovery adoption", error);
-                    return None;
-                }
-            };
-            if adopted > 0 {
-                self.record(
-                    "audit discovery adoption",
-                    StageState::Completed,
-                    Some(format!("{adopted} subject(s) now screen a bounded roster")),
-                );
-            }
-            if !kept.is_empty() {
-                self.record(
-                    "audit discovery adoption",
-                    StageState::Skipped,
-                    Some(format!(
-                        "kept their legacy discovery for this run: {}",
-                        kept.join("; ")
-                    )),
-                );
-            }
-            Some(adopted > 0 || !kept.is_empty())
-        }
-
-        /// Adopts up to `allowance` of the `legacy` subjects in order under `session`
-        /// (`adopt_legacy_screening`), passing over those continuing a stored Work with
-        /// recorded observations: how many were adopted, and the kept subjects with why.
-        fn adopt_screening(
-            &mut self,
-            session: &lk_vault::MutationSession,
-            legacy: &[&lk_graph::audit::AuditCandidate],
-            allowance: usize,
-        ) -> Result<(usize, Vec<String>), String> {
-            let read = self.supervisor.read_control().clone();
-            let mut kept = Vec::new();
-            let mut requests = Vec::new();
-            for candidate in legacy {
-                if requests.len() == allowance {
-                    break;
-                }
-                // The same Work choice its preparation makes, under this writer claim.
-                match crate::commands::work::audit_work_in_progress_controlled(
-                    session.root(),
-                    &self.config,
-                    &self.config_revision,
-                    candidate,
-                    &read,
-                ) {
-                    Ok(false) => requests.push(lk_graph::audit::selection::AdoptionRequest {
-                        path: candidate.path.clone(),
-                        file_revision: candidate.file_revision.clone(),
-                        input_revision: candidate.input_revision.clone(),
-                    }),
-                    Ok(true) => {
-                        kept.push(format!(
-                            "{}: it continues its stored Work, which has recorded observations",
-                            candidate.path
-                        ));
-                        self.legacy_kept.insert(candidate.path.clone());
-                    }
-                    Err(error)
-                        if error
-                            .downcast_ref::<crate::commands::work::SourceChanged>()
-                            .is_some() =>
-                    {
-                        kept.push(format!(
-                            "{}: its inputs changed since planning",
-                            candidate.path
-                        ));
-                        self.legacy_kept.insert(candidate.path.clone());
-                    }
-                    Err(error) => return Err(error.to_string()),
-                }
-            }
-            if requests.is_empty() {
-                return Ok((0, kept));
-            }
-            let pages = lk_graph::scan::scan_vault_controlled(
-                session.root(),
-                self.config.graph.scope.follow_links,
-                &read,
-            )
-            .map_err(|error| error.to_string())?;
-            let mut adoptions = lk_graph::audit::selection::Adoptions::capture(
-                session.root(),
-                &self.config.vault.dirs,
-                &pages,
-                &requests,
-                &read,
-            )
-            .map_err(|error| error.to_string())?;
-            let mut adopted = 0;
-            loop {
-                if self.supervisor.is_cancelled()
-                    || self
-                        .automation
-                        .as_mut()
-                        .is_some_and(|control| !control.check_duration())
-                {
-                    break;
-                }
-                let mut held = None;
-                let Some((path, result)) = adoptions.adopt_next(session, |current| {
-                    match crate::commands::work::audit_processing_hold_controlled(
-                        session.root(),
-                        &self.config,
-                        &self.config_revision,
-                        current,
-                        &read,
-                    ) {
-                        Ok(Some(crate::commands::work::AuditProcessingHold::Action(reason))) => {
-                            held = Some(reason);
-                            Err(lk_graph::GraphError::Io(
-                                "a current processing action holds the subject".into(),
-                            ))
-                        }
-                        Ok(_) => Ok(()),
-                        // A page edited since the shared capture: that subject's drift.
-                        Err(error)
-                            if error
-                                .downcast_ref::<crate::commands::work::SourceChanged>()
-                                .is_some() =>
-                        {
-                            Err(lk_graph::GraphError::AuditScreeningChanged)
-                        }
-                        Err(error) => Err(lk_graph::GraphError::Io(error.to_string())),
-                    }
-                }) else {
-                    break;
-                };
-                let refusal = match result {
-                    Ok(adoption) => {
-                        if adoption.changed {
-                            adopted += 1;
-                            self.result.audit_adoptions += 1;
-                            self.adoption_allowance =
-                                self.adoption_allowance.map(|left| left.saturating_sub(1));
-                        }
-                        continue;
-                    }
-                    Err(_) if held.is_some() => held.expect("held reason"),
-                    Err(lk_graph::GraphError::AuditSubjectCurrent) => {
-                        "its assessment became current".into()
-                    }
-                    Err(lk_graph::GraphError::AuditScreeningChanged) => {
-                        "its inputs changed since planning".into()
-                    }
-                    Err(error) => return Err(error.to_string()),
-                };
-                kept.push(format!("{path}: {refusal}"));
-                self.legacy_kept.insert(path);
-            }
-            Ok((adopted, kept))
         }
 
         async fn admit_audit(&mut self) -> miette::Result<lk_graph::audit::AuditPlan> {
@@ -8671,8 +8427,6 @@ mod native {
             recovery_turns: std::collections::BTreeSet::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
-            legacy_kept: std::collections::BTreeSet::new(),
-            adoption_allowance: None,
             audit_batch: None,
             queue_turn: None,
             audit_turn: None,

@@ -85,15 +85,10 @@ paths:
   Work and drops entries whose origin is gone. Existing Works, reductions and refined
   nodes are never seeded. The partition policy stays in the address because the inspect
   input names it (`input.policy`): the same range under two policies is a different
-  request, so plans under different policies share no observation. An audit Work 0.163
-  planned under byte-filled parts continues under its stored plan while its reads are
-  unchanged (`tests/fixtures/audit-work-0.163.1`); once they change it replans as
-  `semantic-ranges-v3` and pays its inspections again. The upgrade itself changes them for
-  a screened subject that selected more than `AUDIT_CONTEXT_PAGES` owners (0.163 read all
-  of them) and for a legacy recipe a run adopts into screening: such Work replans once,
-  by design, rather than reconstructing the earlier scope. A run never adopts a subject
-  whose stored Work for its present legacy inputs has recorded observations: that Work
-  continues to its assessment, as any current explicit plan resumes.
+  request, so plans under different policies share no observation. A Work planned under
+  byte-filled parts (`semantic-ranges-v2`) continues under its stored plan while its reads
+  are unchanged (`tests/fixtures/audit-work-0.163.1`); once they change it replans as
+  `semantic-ranges-v3` and pays its inspections again.
 - `work source` pages one planned resource from the Work's stored plan: `--resource`
   selects it by roster index, and its default is the unique retained task input. Only that
   resource is read, from its current bytes (the task's retained input, or the page read

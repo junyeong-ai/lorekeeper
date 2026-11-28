@@ -153,8 +153,7 @@ struct Receipts {
     last_merges: Option<WorkflowMerges>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     selection_assessments: BTreeMap<String, selection::StateReference>,
-    /// The scope each recorded assessment checked (`AuditScope`), by subject address. A
-    /// receipt recorded before scopes were kept has none.
+    /// The scope each recorded assessment checked (`AuditScope`), by subject address.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     scopes: BTreeMap<String, AuditScope>,
     /// The currency key each recorded assessment was due under, by subject address. A
@@ -169,8 +168,9 @@ struct Receipts {
 struct DiscoveryPlan {
     subject_revision: String,
     queries: Vec<lk_vault::DiscoveryQuery>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    selection: Option<selection::SelectionPlan>,
+    /// The recipe's screening; one that has decided no candidate yet is the default plan.
+    #[serde(default)]
+    selection: selection::SelectionPlan,
 }
 
 #[derive(Deserialize)]
@@ -199,28 +199,11 @@ pub fn record_discovery(
     pages: &[ScannedPage],
     request: AuditDiscoveryRequest,
 ) -> Result<(), GraphError> {
-    record_discovery_with_policy(
-        session,
-        dirs,
-        pages,
-        request,
-        Some(selection::SelectionPlan::default()),
-    )
-}
-
-fn record_discovery_with_policy(
-    session: &MutationSession,
-    dirs: &VaultDirs,
-    pages: &[ScannedPage],
-    request: AuditDiscoveryRequest,
-    policy: Option<selection::SelectionPlan>,
-) -> Result<(), GraphError> {
     record_discovery_guarded(
         session,
         dirs,
         pages,
         request,
-        policy,
         DiscoveryWrite::Replace,
         |_| Ok(()),
         &lk_vault::ReadControl::default(),
@@ -249,25 +232,14 @@ pub fn record_discovery_with_guard_controlled(
     guard: impl FnOnce(&mut MutationPlan) -> Result<(), GraphError>,
     read: &lk_vault::ReadControl,
 ) -> Result<bool, GraphError> {
-    record_discovery_guarded(
-        session,
-        dirs,
-        pages,
-        request,
-        Some(selection::SelectionPlan::default()),
-        write,
-        guard,
-        read,
-    )
+    record_discovery_guarded(session, dirs, pages, request, write, guard, read)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn record_discovery_guarded(
     session: &MutationSession,
     dirs: &VaultDirs,
     pages: &[ScannedPage],
     request: AuditDiscoveryRequest,
-    policy: Option<selection::SelectionPlan>,
     mode: DiscoveryWrite,
     guard: impl FnOnce(&mut MutationPlan) -> Result<(), GraphError>,
     read: &lk_vault::ReadControl,
@@ -319,17 +291,13 @@ fn record_discovery_guarded(
         return Ok(false);
     }
     // Decisions bind the subject revision and each candidate's own matched queries, so a
-    // screened recipe keeps its state when only the query list changes. An identical
-    // recipe is unchanged, including a legacy one.
-    let selection = match receipts
+    // recipe keeps its screening state when only the query list changes.
+    let selection = receipts
         .discovery
         .get(&request.path)
         .filter(|plan| plan.subject_revision == revision)
-    {
-        Some(plan) if plan.queries == queries => plan.selection.clone(),
-        Some(plan) => policy.map(|policy| plan.selection.clone().unwrap_or(policy)),
-        None => policy,
-    };
+        .map(|plan| plan.selection.clone())
+        .unwrap_or_default();
     receipts.discovery.insert(
         request.path.clone(),
         DiscoveryPlan {
@@ -809,12 +777,11 @@ pub struct AuditScope {
     pub linked_pages: usize,
     pub context_pages: usize,
     pub context_cards: usize,
-    /// The bounds screened discovery read under. Discovery recorded before screening reads
-    /// every match as context and a subject without discovery reads none, so neither has one.
+    /// The bounds the subject's discovery screened under; a subject without discovery has none.
     pub screening: Option<AuditScreeningScope>,
 }
 
-/// Screened discovery: `candidates` screened under `candidates_per_query`, of which the first
+/// Discovery screening: `candidates` screened under `candidates_per_query`, of which the first
 /// `context_page_limit` selected owners are read in full.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -2440,29 +2407,14 @@ fn inputs_from_evidence(
             .get(&page_address(&page.path))
             .filter(|plan| plan.subject_revision == revision)
         {
-            let selection_plan = match input_use {
-                InputUse::Audit => plan.selection.as_ref(),
-                InputUse::Synthesis => None,
-            };
             let subject_owner = lk_vault::resolve_page_owner(root, &page.path).map_err(error)?;
             let ranked = discovered
                 .ranked
                 .as_ref()
                 .expect("ranked discovery was requested");
-            let complete = || {
-                let mut matches = plan
-                    .queries
-                    .iter()
-                    .flat_map(|query| discovered.matches[query].clone())
-                    .filter(|citation| citation.path != page_address(&page.path))
-                    .collect::<Vec<_>>();
-                matches.sort();
-                matches.dedup();
-                matches
-            };
-            let (matches, ranked, roster) = match (input_use, selection_plan) {
+            let (matches, ranked, selection) = match input_use {
                 // A synthesis reads the complete matches through its ranked roster.
-                (InputUse::Synthesis, _) => {
+                InputUse::Synthesis => {
                     let roster = ranked_roster(
                         root,
                         &subject_owner,
@@ -2473,13 +2425,19 @@ fn inputs_from_evidence(
                         &mut owners,
                         read,
                     )?;
-                    (complete(), Some(roster.ranked()), None)
+                    let mut matches = plan
+                        .queries
+                        .iter()
+                        .flat_map(|query| discovered.matches[query].clone())
+                        .filter(|citation| citation.path != page_address(&page.path))
+                        .collect::<Vec<_>>();
+                    matches.sort();
+                    matches.dedup();
+                    (matches, Some(roster.ranked()), None)
                 }
-                // Discovery recorded before screening keeps its exact full-context derivation.
-                (InputUse::Audit, None) => (complete(), None, None),
-                // A screened audit screens only its bounded roster, which already excludes the
+                // An audit screens only its bounded roster, which already excludes the
                 // subject's owner, in roster order.
-                (InputUse::Audit, Some(_)) => {
+                InputUse::Audit => {
                     let roster = ranked_roster(
                         root,
                         &subject_owner,
@@ -2493,75 +2451,62 @@ fn inputs_from_evidence(
                     let mut matches = roster.ordered();
                     matches.sort();
                     screened = Some(matches.len());
-                    (matches, None, Some(roster))
-                }
-            };
-            let selection = selection_plan
-                .map(|selection| {
-                    selection::project(
+                    let progress = selection::project(
                         root,
                         selection::SelectionInputs {
                             subject: &page_address(&page.path),
                             subject_revision: &revision,
-                            roster: roster.as_ref().expect("screened discovery has its roster"),
+                            roster: &roster,
                         },
-                        selection,
+                        &plan.selection,
                         &discovered,
                         &mut review_index,
                         read,
-                    )
-                })
-                .transpose()?;
-            if input_use == InputUse::Audit
-                && let Some(progress) = &selection
-            {
-                // Selected owners in roster order that the audit does not already read as a
-                // citation or direct link: the first `AUDIT_CONTEXT_PAGES` are read in full,
-                // the rest are cards.
-                let selected = progress.selected_owners()?;
-                let mut owner_of = |path: &str| -> Result<PathBuf, GraphError> {
-                    if let Some(owner) = owners.get(path) {
-                        return Ok(owner.clone());
+                    )?;
+                    // Selected owners in roster order that the audit does not already read as
+                    // a citation or direct link: the first `AUDIT_CONTEXT_PAGES` are read in
+                    // full, the rest are cards.
+                    let selected = progress.selected_owners()?;
+                    let mut owner_of = |path: &str| -> Result<PathBuf, GraphError> {
+                        if let Some(owner) = owners.get(path) {
+                            return Ok(owner.clone());
+                        }
+                        let owner =
+                            lk_vault::resolve_page_owner(root, Path::new(path)).map_err(error)?;
+                        owners.insert(path.to_owned(), owner.clone());
+                        Ok(owner)
+                    };
+                    let read_in_full = citations
+                        .iter()
+                        .chain(&related_pages)
+                        .map(|citation| owner_of(&citation.path))
+                        .collect::<Result<BTreeSet<_>, _>>()?;
+                    let mut chosen = Vec::new();
+                    for citation in &roster.ordered() {
+                        let owner = owner_of(&citation.path)?;
+                        if !read_in_full.contains(&owner)
+                            && selected.contains(&page_address(&owner))
+                        {
+                            chosen.push(citation.clone());
+                        }
                     }
-                    let owner =
-                        lk_vault::resolve_page_owner(root, Path::new(path)).map_err(error)?;
-                    owners.insert(path.to_owned(), owner.clone());
-                    Ok(owner)
-                };
-                let read_in_full = citations
-                    .iter()
-                    .chain(&related_pages)
-                    .map(|citation| owner_of(&citation.path))
-                    .collect::<Result<BTreeSet<_>, _>>()?;
-                let mut chosen = Vec::new();
-                let ordered = roster
-                    .as_ref()
-                    .expect("screened discovery has its roster")
-                    .ordered();
-                for citation in &ordered {
-                    let owner = owner_of(&citation.path)?;
-                    if !read_in_full.contains(&owner) && selected.contains(&page_address(&owner)) {
-                        chosen.push(citation.clone());
-                    }
-                }
-                let cards = chosen.split_off(chosen.len().min(AUDIT_CONTEXT_PAGES));
-                related_pages.extend(chosen);
-                context_cards = cards
-                    .into_iter()
-                    .map(|citation| {
-                        let page = by_path.get(Path::new(&citation.path)).ok_or_else(|| {
-                            error("audit discovery matched a page its scan did not read")
-                        })?;
-                        Ok(AuditContextCard {
-                            title: page.title.clone(),
-                            path: citation.path,
+                    let cards = chosen.split_off(chosen.len().min(AUDIT_CONTEXT_PAGES));
+                    related_pages.extend(chosen);
+                    context_cards = cards
+                        .into_iter()
+                        .map(|citation| {
+                            let page = by_path.get(Path::new(&citation.path)).ok_or_else(|| {
+                                error("audit discovery matched a page its scan did not read")
+                            })?;
+                            Ok(AuditContextCard {
+                                title: page.title.clone(),
+                                path: citation.path,
+                            })
                         })
-                    })
-                    .collect::<Result<_, GraphError>>()?;
-            } else if input_use == InputUse::Audit {
-                // Every match of discovery recorded before screening is context.
-                related_pages.extend(matches.clone());
-            }
+                        .collect::<Result<_, GraphError>>()?;
+                    (matches, None, Some(progress))
+                }
+            };
             related_pages.sort();
             related_pages.dedup();
             Some(AuditDiscovery {
@@ -2623,9 +2568,7 @@ fn inputs_from_evidence(
                 &revision,
                 &citations,
                 linked_owners,
-                discovery
-                    .as_ref()
-                    .map(|discovery| (&discovery.queries, discovery.selection.is_some())),
+                discovery.as_ref().map(|discovery| &discovery.queries),
                 &review_identity,
                 (AUDIT_CANDIDATES_PER_QUERY, AUDIT_CONTEXT_PAGES),
             ))
@@ -2855,7 +2798,7 @@ fn load_synthesis_receipts(
                         DiscoveryPlan {
                             subject_revision: recipe.subject_revision,
                             queries: recipe.queries,
-                            selection: None,
+                            selection: selection::SelectionPlan::default(),
                         },
                     );
                 }
@@ -3841,15 +3784,6 @@ mod tests {
             min_sources: 0,
         });
 
-    fn record_legacy_discovery(
-        session: &MutationSession,
-        dirs: &VaultDirs,
-        pages: &[ScannedPage],
-        request: AuditDiscoveryRequest,
-    ) -> Result<(), GraphError> {
-        record_discovery_with_policy(session, dirs, pages, request, None)
-    }
-
     fn write(root: &Path, path: &str, body: &str) {
         let destination = root.join(path);
         std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -4184,7 +4118,7 @@ mod tests {
             .unwrap()
             .candidates
             .remove(0);
-        record_legacy_discovery(
+        record_discovery(
             &session,
             &dirs,
             &pages,
@@ -4226,7 +4160,7 @@ mod tests {
                     .clone()
                     .unwrap(),
                 queries: Vec::new(),
-                selection: None,
+                selection: selection::SelectionPlan::default(),
             },
         );
         write(
@@ -4640,7 +4574,7 @@ mod tests {
         let files = scan(root.path());
         let initial =
             plan_selected(root.path(), &dirs, *ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
-        record_legacy_discovery(
+        record_discovery(
             &session,
             &dirs,
             &files,
@@ -4671,7 +4605,7 @@ mod tests {
                     phrase: false,
                     spacing: false,
                 }],
-                selection: None,
+                selection: selection::SelectionPlan::default(),
             },
         );
         write(
@@ -4679,6 +4613,33 @@ mod tests {
             STATE,
             &serde_json::to_string(&receipts).unwrap(),
         );
+        // A roster with no candidate seals its screening state without a decision.
+        let limits = selection::ScreeningLimits {
+            max_input_bytes: 65536,
+            max_result_bytes: 32768,
+            max_candidates: 20,
+            max_batches: None,
+        };
+        let packet = selection::candidates(
+            root.path(),
+            &dirs,
+            &files,
+            a,
+            limits,
+            false,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
+        assert!(packet.request.is_none());
+        selection::record(
+            &session,
+            &dirs,
+            &files,
+            packet.refresh.expect("an empty roster's state to seal"),
+            limits,
+            &lk_vault::ReadControl::default(),
+        )
+        .unwrap();
         let selected =
             plan_selected(root.path(), &dirs, *ALL, &files, 1, &[a.into()], u64::MAX).unwrap();
         assert_eq!(selected.coverage_scope, AuditCoverageScope::Selection);
@@ -4851,142 +4812,6 @@ mod tests {
                 &lk_vault::ReadControl::default(),
             )
             .unwrap()
-        );
-    }
-
-    #[test]
-    fn discovery_matches_are_read_as_context_and_leave_a_receipt_current() {
-        let root = tempfile::tempdir().unwrap();
-        let dirs = VaultDirs::default();
-        let subject = "wiki/documents/a.md";
-        write(
-            root.path(),
-            subject,
-            "---\ntype: document\ntitle: Retention A\n---\nProduction order retention is exactly 30 days.\n",
-        );
-        write(
-            root.path(),
-            "wiki/documents/b.md",
-            "---\ntype: document\ntitle: Retention B\n---\nProduction order retention is exactly 7 days.\n",
-        );
-        let selected = || {
-            plan_selected_partitioned(
-                root.path(),
-                &dirs,
-                *ALL,
-                &scan(root.path()),
-                1,
-                &[subject.into()],
-                u64::MAX,
-            )
-            .unwrap()
-            .candidates
-            .remove(0)
-        };
-        let initial = selected();
-        assert!(initial.related_pages.is_empty());
-        assert!(initial.discovery.is_none());
-        let session = MutationSession::acquire(root.path()).unwrap();
-        record_legacy_discovery(
-            &session,
-            &dirs,
-            &scan(root.path()),
-            AuditDiscoveryRequest {
-                path: subject.into(),
-                file_revision: initial.file_revision.clone(),
-                queries: vec![lk_vault::DiscoveryQuery {
-                    query: "production order retention".into(),
-                    phrase: false,
-                    spacing: false,
-                }],
-            },
-        )
-        .unwrap();
-        let discovered = selected();
-        assert!(discovered.evidence.is_empty());
-        assert_eq!(
-            discovered
-                .related_pages
-                .iter()
-                .map(|c| c.path.as_str())
-                .collect::<Vec<_>>(),
-            ["wiki/documents/b.md"]
-        );
-        assert_eq!(
-            discovered.discovery.as_ref().unwrap().matches,
-            discovered.related_pages
-        );
-        record(
-            &session,
-            &dirs,
-            *ALL,
-            &scan(root.path()),
-            AuditResults {
-                assessments: vec![assessment(&discovered)],
-            },
-            u64::MAX,
-        )
-        .unwrap();
-        write(
-            root.path(),
-            "wiki/documents/unrelated.md",
-            "---\ntype: document\n---\nUnrelated material.\n",
-        );
-        assert_eq!(selected().input_revision, discovered.input_revision);
-        write(
-            root.path(),
-            "wiki/documents/new.md",
-            "---\ntype: document\n---\nProduction order retention has another applicable claim.\n",
-        );
-        let matched = selected();
-        assert_eq!(matched.currency_revision, discovered.currency_revision);
-        assert_eq!(matched.reason, AuditReason::Current);
-        assert!(
-            matched
-                .related_pages
-                .iter()
-                .any(|page| page.path == "wiki/documents/new.md"),
-            "a new match is read as context the next time the subject is audited"
-        );
-        assert_ne!(matched.input_revision, discovered.input_revision);
-        let before = std::fs::read(root.path().join(STATE)).unwrap();
-        assert!(
-            record(
-                &session,
-                &dirs,
-                *ALL,
-                &scan(root.path()),
-                AuditResults {
-                    assessments: vec![assessment(&discovered)]
-                },
-                u64::MAX
-            )
-            .is_err(),
-            "an assessment that did not read the new match does not record"
-        );
-        assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
-        write(
-            root.path(),
-            subject,
-            "---\ntype: document\n---\nThe subject scope changed.\n",
-        );
-        assert!(selected().discovery.is_none());
-        assert!(
-            record_legacy_discovery(
-                &session,
-                &dirs,
-                &scan(root.path()),
-                AuditDiscoveryRequest {
-                    path: subject.into(),
-                    file_revision: initial.file_revision,
-                    queries: vec![lk_vault::DiscoveryQuery {
-                        query: "retention".into(),
-                        phrase: false,
-                        spacing: false
-                    }],
-                }
-            )
-            .is_err()
         );
     }
 

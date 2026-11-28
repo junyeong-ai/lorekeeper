@@ -59,20 +59,14 @@ Stage JSON under `.lorekeeper/drafts/`, then run `lore wiki audit-discover --fil
 ```
 
 Use 1..16 explicit nonblank queries. Discovery matches knowledge pages, including retired
-pages. A screened recipe rosters, per query, every identity match and the first 10 other
+pages. A recipe rosters, per query, every identity match and the first 10 other
 pages in search order; only those are screened, and of the selected pages the first 4
 that the subject does not already cite or link are read in full, the rest shown as
 `context_cards`. `wiki audit-plan --path SUBJECT` reports that roster and its `scope`.
-Fresh recipes require candidate screening before full audit reads. An unchanged legacy
-recipe retains its full-context contract, every match read without a cutoff; repeating
-it does not replace existing paid work or opt it into screening. A native knowledge run adopts
-screening for the due legacy subjects it admits, as many as its remaining calls can screen;
-the rest, a subject its guards refuse (a current processing action, changed inputs) and a
-subject whose stored Work already has recorded observations, which continues that Work to
-its assessment, keep their legacy recipe for that run. `wiki audit-discover --adopt-screening` adopts one
-explicitly; a current subject keeps its legacy recipe until it is due.
+Every recipe requires candidate screening before full audit reads; a recipe with no
+recorded screening state has every candidate undecided.
 Changing the stored queries reopens an assessment; pages joining, leaving or changing
-among the matches do not, because they are context the subject's next audit reads. A
+among the matches do not, because they are candidates the subject's next audit screens. A
 changed subject needs fresh query selection. Unrelated corpus changes do not alone
 invalidate an assessment. This records the searched scope, not exhaustive semantic
 consistency: differently phrased claims outside the selected queries can remain undiscovered.

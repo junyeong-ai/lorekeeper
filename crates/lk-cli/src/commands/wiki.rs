@@ -139,15 +139,9 @@ pub enum WikiCommand {
     },
     /// Record revision-guarded search queries for related-document discovery (JSON)
     AuditDiscover {
-        /// JSON path, file_revision and queries; adoption instead requires input_revision
+        /// JSON path, file_revision and queries
         #[arg(long)]
         file: PathBuf,
-        /// Explicitly adopt candidate screening for a pending discovery scope (Unix)
-        #[arg(long)]
-        adopt_screening: bool,
-        /// Validate discovery adoption without publishing or recovering journals
-        #[arg(long, requires = "adopt_screening")]
-        dry_run: bool,
     },
     /// Read one bounded audit discovery candidate packet without writing (JSON)
     AuditCandidates {
@@ -648,33 +642,10 @@ pub async fn run(opts: &super::GlobalOptions, cmd: WikiCommand) -> miette::Resul
             );
             Ok(())
         }
-        WikiCommand::AuditDiscover {
-            file,
-            adopt_screening,
-            dry_run,
-        } => {
+        WikiCommand::AuditDiscover { file } => {
             let config_path = find_config(opts)?;
             let (config, config_revision) = super::load_config_with_revision(&config_path)?;
-            let pin = super::ConfigurationPin::from_loaded(config_path, config_revision.clone());
-            if adopt_screening {
-                let bytes = std::fs::read(&file).map_err(|error| miette::miette!("{error}"))?;
-                let value = lk_core::json::decode_object(&bytes)
-                    .map_err(|error| miette::miette!("{error}"))?;
-                let request =
-                    serde_json::from_value(value).map_err(|error| miette::miette!("{error}"))?;
-                let result = super::audit::adopt_discovery(
-                    &config,
-                    &config_revision,
-                    &pin,
-                    request,
-                    dry_run,
-                )?;
-                let mut output =
-                    serde_json::to_value(result).map_err(|error| miette::miette!("{error}"))?;
-                output["dry_run"] = serde_json::json!(dry_run);
-                println!("{output}");
-                return Ok(());
-            }
+            let pin = super::ConfigurationPin::from_loaded(config_path, config_revision);
             let request = serde_json::from_slice(
                 &std::fs::read(file).map_err(|error| miette::miette!("{error}"))?,
             )

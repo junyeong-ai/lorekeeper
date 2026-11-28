@@ -67,16 +67,8 @@ and CLI discovery, not a second graph authority.
   evidence or direct links; excluded candidate bytes remain publication guards.
   Evidence-associated card reviews bind identity and input guards without becoming
   assessment subject reviews.
-  Absent selection metadata retains the exact legacy full-context derivation until the
-  subject is adopted. Discovery adoption (`selection::adopt` explicitly through
-  `wiki audit-discover --adopt-screening`; `selection::Adoptions` for the due subjects a native
-  knowledge run adopts: one shared capture of their inputs and bounded card rosters, then
-  each subject's legacy-input guards read and journaled alone, refused as typed drift when
-  a page changed after that capture; the run passes over a subject whose stored legacy Work
-  has recorded observations, which continues that Work) guards the current pending subject and complete input before enabling
-  screening; a current subject is never adopted, since its legacy derivation verifies it. It retains queries and required evidence/context;
-  unknown candidates still block assessment. Preview publishes and recovers nothing;
-  existing assessments and predecessor Work are never rewritten.
+  Every recipe screens: a recipe with no recorded screening state is the default plan,
+  whose candidates are all undecided.
   Callers guard current processing actions separately from capacity-only admission.
   Retention roots are current discovery, latest assessment and retained Work states;
   states directly retain their packet rows. Reassessment tokens guard concurrency,
@@ -97,11 +89,11 @@ and CLI discovery, not a second graph authority.
   changed, so a verdict is never stored for a scope other than the one it read. Its
   currency key (`currency_revision`, `concept-audit-currency-v1`/`document-audit-currency-v1`)
   binds what the audit owns: the subject, its citations, its scoped reviews, each direct
-  link with the verified owner it resolves to, its discovery queries and whether they are
-  screened, and the read-scope constants. The receipt store keeps the key per subject
-  (`currency`); a receipt is current while the key matches, so an edit to a linked or
-  matched page leaves it current while a retargeted alias makes it due. A receipt without
-  a recorded key (recorded before keys were kept) is current while its read identity is.
+  link with the verified owner it resolves to, its discovery queries and the read-scope
+  constants. The receipt store keeps the key per subject (`currency`); a receipt is current
+  while the key matches, so an edit to a linked or matched page leaves it current while a
+  retargeted alias makes it due. A receipt without a recorded key (recorded before keys
+  were kept) is current while its read identity is.
 - An audit's read scope is bounded by fixed policy constants, not the execution profile.
   Each query's discovery roster holds its identity matches and the first
   `AUDIT_CANDIDATES_PER_QUERY` other owners in search order (the synthesis roster's
@@ -111,9 +103,8 @@ and CLI discovery, not a second graph authority.
   capture and screening publication read the same owner rows. The subject, its citations, its direct links and the first
   `AUDIT_CONTEXT_PAGES` selected owners in roster order that are not already a citation
   or direct link are read in full; other selected owners are `context_cards` (address and
-  title), never read and never evidence. Discovery recorded before screening keeps its
-  exact unbounded full-context derivation. `AuditCandidate.scope` states these counts and,
-  for screened discovery only, its `screening` bounds; recording stores it per subject in
+  title), never read and never evidence. `AuditCandidate.scope` states these counts and,
+  for a subject with discovery, its `screening` bounds; recording stores it per subject in
   the receipt store's `scopes`. Searching
   uncited pages for contradictions or missing citations is outside this receipt.
 - `graph.audit.subjects` names the kinds automatic plans, pending order and corpus

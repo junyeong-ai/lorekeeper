@@ -321,217 +321,35 @@ fn native_audit_screening_reads_again_a_subject_whose_candidates_changed_during_
 }
 
 #[test]
-fn native_knowledge_adopts_screening_for_a_due_legacy_recipe_and_leaves_a_current_one() {
+fn native_knowledge_screens_a_recipe_stored_without_screening_state() {
     for engine in ["codex", "claude-code"] {
         let fixture = fixture(engine, 6, "inspect", false, RECORD_AUDIT);
         let config = std::fs::read_to_string(&fixture.config)
             .unwrap()
             .replace("max_calls: 1", "max_calls: 4");
         std::fs::write(&fixture.config, config).unwrap();
-        let current = "wiki/documents/legacy-current.md";
-        std::fs::write(
-            fixture.root().join("vault").join(current),
-            "---\ntype: document\ntitle: Legacy current\n---\nA settled note.\n",
-        )
-        .unwrap();
-        discover(&fixture, current, &["unrelated settled"]);
-        // Both recipes were recorded before screening existed.
         let state = fixture
             .root()
             .join("vault/.lorekeeper/knowledge-audit.json");
-        let mut receipts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-        for path in [SUBJECT, current] {
-            receipts["discovery"][path]["selection"] = serde_json::Value::Null;
-        }
+        let mut receipts = receipts_of(&state);
+        receipts["discovery"][SUBJECT]
+            .as_object_mut()
+            .unwrap()
+            .remove("selection");
         std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
-        // The second was assessed under its legacy derivation and is current.
-        let candidate =
-            json(&fixture, &["wiki", "audit-plan", "--path", current])["candidates"][0].clone();
-        let assessment = fixture.root().join("legacy-assessment.json");
-        std::fs::write(&assessment, serde_json::to_vec(&serde_json::json!({"assessments":[{
-            "path":current, "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
-            "disposition":"reviewed", "reason":"The settled note was read in full.", "reviews":[]
-        }]})).unwrap()).unwrap();
-        json(
-            &fixture,
-            &[
-                "wiki",
-                "audit-record",
-                "--file",
-                assessment.to_str().unwrap(),
-            ],
-        );
-        assert_eq!(
-            json(&fixture, &["wiki", "audit-plan"])["candidates"][0]["path"],
-            SUBJECT
-        );
 
         let (_, report) = fixture.run("knowledge");
         assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(report["audit_adoptions"], 1, "{report}");
         assert_eq!(report["audit"][0]["assessed_path"], SUBJECT, "{report}");
-        let receipts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+        let receipts = receipts_of(&state);
         assert!(
-            !receipts["discovery"][SUBJECT]["selection"].is_null(),
+            !receipts["discovery"][SUBJECT]["selection"]["state"].is_null(),
             "{receipts}"
-        );
-        assert!(
-            receipts["discovery"][current]["selection"].is_null(),
-            "a current legacy subject keeps its derivation: {receipts}"
         );
         let scope = &receipts["scopes"][SUBJECT];
         assert_eq!(scope["context_pages"], 4, "{receipts}");
         assert_eq!(scope["context_cards"], 2, "{receipts}");
     }
-}
-
-#[test]
-fn a_run_adopts_only_the_legacy_subjects_its_remaining_calls_can_screen() {
-    for engine in ["codex", "claude-code"] {
-        let fixture = fixture(engine, 3, "inspect", false, RECORD_AUDIT);
-        let config = std::fs::read_to_string(&fixture.config)
-            .unwrap()
-            .replace("batch_size: 1", "batch_size: 3");
-        std::fs::write(&fixture.config, config).unwrap();
-        let peers = ["wiki/documents/legacy-1.md", "wiki/documents/legacy-2.md"];
-        for (index, peer) in peers.iter().enumerate() {
-            std::fs::write(
-                fixture.root().join("vault").join(peer),
-                format!("---\ntype: document\ntitle: Legacy {index}\n---\nA legacy note.\n"),
-            )
-            .unwrap();
-            discover(&fixture, peer, &QUERIES);
-        }
-        // All three recipes were recorded before screening existed, and all three are due.
-        let state = fixture
-            .root()
-            .join("vault/.lorekeeper/knowledge-audit.json");
-        let mut receipts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-        for path in peers.iter().chain([&SUBJECT]) {
-            receipts["discovery"][path]["selection"] = serde_json::Value::Null;
-        }
-        std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
-        assert_eq!(
-            json(&fixture, &["wiki", "audit-plan"])["candidates"]
-                .as_array()
-                .unwrap()
-                .len(),
-            3
-        );
-
-        let (_, report) = fixture.run("knowledge");
-        assert_eq!(report["halted"], false, "{report}");
-        assert_eq!(
-            report["audit_adoptions"], 1,
-            "one remaining call screens one subject: {report}"
-        );
-        assert!(report["audit_adoption_duration_ms"].is_u64(), "{report}");
-        let receipts: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-        let legacy = peers
-            .iter()
-            .chain([&SUBJECT])
-            .filter(|path| receipts["discovery"][**path]["selection"].is_null())
-            .count();
-        assert_eq!(legacy, 2, "the rest keep their legacy recipe: {receipts}");
-    }
-}
-
-#[test]
-fn a_released_probe_is_sent_with_its_legacy_derivation_before_adoption() {
-    let host = format!("if [ -f \"$TEST_EXECUTION_ROOT/fail\" ]; then exit 7; fi\n{RECORD_AUDIT}");
-    let fixture = fixture("codex", 0, "inspect", false, &host);
-    let config = std::fs::read_to_string(&fixture.config)
-        .unwrap()
-        .replace(
-            "batch_size: 1, subjects: [concept, document]",
-            "batch_size: 2, subjects: [concept]",
-        )
-        .replace(
-            "execution:\n",
-            "execution:\n  automation: {process_schedule: '0,15,30,45 * * * *', max_calls_per_day: 20, max_run_seconds: 60}\n",
-        );
-    std::fs::write(&fixture.config, config).unwrap();
-    let held = "wiki/concepts/b-legacy.md";
-    let vault = fixture.root().join("vault");
-    std::fs::write(
-        vault.join(held),
-        "---\ntype: concept\ntitle: Legacy\n---\n## Synthesis\nA legacy claim.\n\n## Sources\n",
-    )
-    .unwrap();
-    for index in 0..3 {
-        std::fs::write(
-            vault.join(format!("wiki/documents/gate-{index}.md")),
-            format!("---\ntype: document\ntitle: Gate {index}\n---\nThe legacy-gate scope covers gate {index}.\n"),
-        )
-        .unwrap();
-    }
-    discover(&fixture, held, &["legacy-gate"]);
-    // Both recipes were recorded before screening existed.
-    let state = vault.join(".lorekeeper/knowledge-audit.json");
-    let mut receipts: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
-    for path in [SUBJECT, held] {
-        receipts["discovery"][path]["selection"] = serde_json::Value::Null;
-    }
-    std::fs::write(&state, serde_json::to_vec_pretty(&receipts).unwrap()).unwrap();
-    let plan = json(&fixture, &["wiki", "audit-plan"]);
-    assert_eq!(plan["candidates"][0]["path"], SUBJECT, "{plan}");
-    assert_eq!(plan["candidates"][1]["path"], held, "{plan}");
-    let run = || {
-        let output = fixture
-            .command()
-            .args(["run", "knowledge", "--scheduled", "--json"])
-            .output()
-            .unwrap();
-        serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)))
-    };
-
-    // A 0.163 state: the run's one call adopts the first subject, which screens nothing, and
-    // the shared assessment fails, holding the other subject's legacy request.
-    std::fs::write(fixture.root().join("fail"), "").unwrap();
-    let first = run();
-    assert_eq!(first["runs"][0]["audit_adoptions"], 1, "{first}");
-    assert!(
-        receipts_of(&state)["discovery"][held]["selection"].is_null(),
-        "{first}"
-    );
-    std::fs::remove_file(fixture.root().join("fail")).unwrap();
-    let candidate =
-        json(&fixture, &["wiki", "audit-plan", "--path", SUBJECT])["candidates"][0].clone();
-    let assessment = fixture.root().join("settled-assessment.json");
-    std::fs::write(&assessment, serde_json::to_vec(&serde_json::json!({"assessments":[{
-        "path":SUBJECT, "file_revision":candidate["file_revision"], "input_revision":candidate["input_revision"],
-        "disposition":"reviewed", "reason":"The subject was read in full.", "reviews":[]
-    }]})).unwrap()).unwrap();
-    json(
-        &fixture,
-        &[
-            "wiki",
-            "audit-record",
-            "--file",
-            assessment.to_str().unwrap(),
-        ],
-    );
-    let screened = calls(&fixture).len();
-
-    // Only the held subject is due: its hold is released as the probe and sent as it was.
-    let probed = run();
-    assert_eq!(probed["runs"][0]["halted"], false, "{probed}");
-    assert_eq!(probed["runs"][0]["audit_adoptions"], 0, "{probed}");
-    assert_eq!(
-        calls(&fixture).len(),
-        screened,
-        "the probe's turn is not spent on screening: {probed}"
-    );
-    assert_eq!(
-        probed["runs"][0]["audit"][0]["assessed_path"], held,
-        "{probed}"
-    );
 }
 
 fn receipts_of(state: &Path) -> serde_json::Value {

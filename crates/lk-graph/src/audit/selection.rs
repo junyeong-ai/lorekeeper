@@ -18,11 +18,9 @@ const PACKET_SCHEMA: &str = "audit-selection-packet-v1";
 const MAX_REASON_JSON_BYTES: usize = 256;
 const INSTRUCTIONS: &str = "Judge each candidate independently for this audit subject. Cards are bounded discovery previews, not full evidence. Inspect a potentially applicable or uncertain candidate. Use not-selected only when its declared scope is inapplicable. Defer only when an explicit unresolved prerequisite prevents deciding; later unknown candidates still require decisions. Every assigned key needs exactly one reasoned decision. Mandatory evidence and direct links remain required regardless of this selection.";
 
-mod adoption;
 mod retention;
 #[cfg(test)]
 mod tests;
-pub use adoption::{Adoption, AdoptionRequest, Adoptions, adopt, preview_adoption};
 pub use retention::{PruneReport, present, prune};
 
 fn revision(value: &impl Serialize) -> Result<String, GraphError> {
@@ -658,65 +656,38 @@ impl CardCapture {
     }
 }
 
+/// Captures `candidate`'s screened card roster through one discovery traversal and review
+/// inventory. A roster that no longer matches its recorded rows is `AuditScreeningChanged`.
 fn capture_cards(
     root: &Path,
     dirs: &lk_core::config::VaultDirs,
     candidate: &AuditCandidate,
     read: &ReadControl,
 ) -> Result<CardCapture, GraphError> {
-    capture_card_batch(root, dirs, &[candidate], read)?
-        .pop()
-        .expect("one selected audit subject")
-}
-
-/// Captures the screened card rosters of `candidates`, in order, through one discovery
-/// traversal and review inventory. A subject whose roster no longer matches its recorded rows
-/// is `AuditScreeningChanged` alone; any other failure fails the batch.
-fn capture_card_batch(
-    root: &Path,
-    dirs: &lk_core::config::VaultDirs,
-    candidates: &[&AuditCandidate],
-    read: &ReadControl,
-) -> Result<Vec<Result<CardCapture, GraphError>>, GraphError> {
-    let mut recipes = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let discovery = candidate
-            .discovery
-            .as_ref()
-            .ok_or_else(|| error("audit screening needs discovery"))?;
-        if discovery.selection.is_none() {
-            return Err(error(
-                "legacy audit discovery uses its original full context",
-            ));
-        }
-        // The audit's bounded roster (`AUDIT_CANDIDATES_PER_QUERY`), the one its rows screen.
-        recipes.push(lk_vault::DiscoveryRecipe {
-            queries: discovery.queries.clone(),
-            roster: lk_vault::DiscoveryRoster::Ranked(super::AUDIT_ROSTER),
-            subject: Some(PathBuf::from(&candidate.path)),
-        });
-    }
+    let discovery = candidate
+        .discovery
+        .as_ref()
+        .filter(|discovery| discovery.selection.is_some())
+        .ok_or_else(|| error("audit screening needs screened discovery"))?;
+    // The audit's bounded roster (`AUDIT_CANDIDATES_PER_QUERY`), the one its rows screen.
+    let recipe = lk_vault::DiscoveryRecipe {
+        queries: discovery.queries.clone(),
+        roster: lk_vault::DiscoveryRoster::Ranked(super::AUDIT_ROSTER),
+        subject: Some(PathBuf::from(&candidate.path)),
+    };
     let mut inventory =
         lk_vault::ReviewInventory::load_controlled(root, dirs, read).map_err(GraphError::from)?;
     let (captures, _) = lk_vault::capture_discovery_batch_with_inventory(
         root,
         dirs,
-        &recipes,
+        std::slice::from_ref(&recipe),
         &mut inventory,
         read,
     )
     .map_err(GraphError::from)?;
-    let mut captured = Vec::with_capacity(candidates.len());
-    for (candidate, capture) in candidates.iter().zip(&captures) {
-        let reviews = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
-        match cards_from_capture(root, candidate, capture, reviews) {
-            Err(GraphError::AuditScreeningChanged) => {
-                captured.push(Err(GraphError::AuditScreeningChanged));
-            }
-            card => captured.push(Ok(card?)),
-        }
-    }
-    Ok(captured)
+    let capture = captures.first().expect("one recipe's capture");
+    let reviews = ReviewDependencyIndex::from_inventory(root, &mut inventory, read)?;
+    cards_from_capture(root, candidate, capture, reviews)
 }
 
 fn cards_from_capture(
@@ -1321,8 +1292,6 @@ pub fn record(
         .get_mut(path)
         .ok_or_else(|| error("audit discovery disappeared"))?
         .selection
-        .as_mut()
-        .ok_or_else(|| error("audit discovery policy changed"))?
         .state = Some(StateReference {
         subject: path.clone(),
         revision: state_revision,

@@ -25,18 +25,14 @@ pub enum GraphError {
     #[error("audit screening inputs changed; reread the current subject and candidate cards")]
     AuditScreeningChanged,
     /// A page an audit derivation read (its subject, evidence, context or a scoped review) was
-    /// edited or removed after the derivation: a recording or adoption guarded by it answers
-    /// earlier inputs.
+    /// edited or removed after the derivation: a recording guarded by it answers earlier
+    /// inputs.
     #[error("audit read dependency changed: {0}")]
     AuditInputChanged(String),
     /// A screening reply's subject is no longer an audit subject of the vault: a writer
     /// removed it (or retyped it) after its packet was issued.
     #[error("audit subject left the vault after its screening packet: {0}")]
     AuditSubjectRemoved(String),
-    /// Discovery adoption found the subject's assessment current: its legacy derivation is
-    /// what its receipt verifies, so it is not adopted.
-    #[error("the audit subject's assessment is current; its discovery is not adopted")]
-    AuditSubjectCurrent,
     #[error(
         "audit screening requires {required} {boundary} bytes, above the complete configured bound {maximum}"
     )]

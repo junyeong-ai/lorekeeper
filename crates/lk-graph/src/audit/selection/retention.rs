@@ -158,11 +158,7 @@ pub(super) fn plan_prune(
     let inventory = inventory(root)?;
     let mut retained = retained_work.clone();
     for (subject, plan) in &receipts.discovery {
-        if let Some(reference) = plan
-            .selection
-            .as_ref()
-            .and_then(|selection| selection.state.as_ref())
-        {
+        if let Some(reference) = plan.selection.state.as_ref() {
             if &reference.subject != subject {
                 return Err(error("audit discovery selection root differs"));
             }
