@@ -39,7 +39,10 @@ paths:
   finds an input page removed defers only that subject. The run plans again until every
   remaining subject has current discovery, so a recipe an edit invalidated is discovered
   before either audit route.
-  Deferral counts track encountered subject paths independently of bounded details.
+  Deferral counts track encountered subject paths independently of bounded details. Every
+  deferral counts (`Runner::count_deferred_audit`): a planning skip for input drift (which
+  lk-graph returns as `AuditPlan::input_changed`), a removal, a replan allowance
+  exhausted, and a readiness hold in either audit route.
   Selected replans replace those subjects while retaining other observed holds;
   final coverage checks add current readiness observations without clearing earlier holds.
   Final completion validates canonical assessments and readiness from the same captured

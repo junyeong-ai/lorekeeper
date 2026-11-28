@@ -557,6 +557,10 @@ mod native {
     const EVIDENCE_CHANGED_AGAIN: &str =
         "evidence inputs changed again after fresh replanning; retained for a later run";
 
+    /// The reason an audit subject whose inputs changed again after its replan is deferred.
+    const AUDIT_UNSTABLE: &str =
+        "audit inputs changed again after fresh replanning; retained for a later run";
+
     #[derive(Default, PartialEq, Eq)]
     enum QueueReplan {
         #[default]
@@ -7168,6 +7172,7 @@ mod native {
                 }
             }
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
+            self.count_input_changed(&plan);
             Ok(plan.coverage())
         }
 
@@ -7278,19 +7283,19 @@ mod native {
         ) {
             self.audit_removed.insert(path.to_owned());
             self.deferred("audit subject removed", path);
-            if self.audit_deferred_paths.insert(path.to_owned())
-                && let Some(candidate) = planned
-                && self.result.audit_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS
-            {
-                self.result.audit_deferred.push(DeferredAudit {
+            match planned {
+                Some(candidate) => self.count_deferred_audit(DeferredAudit {
                     kind: candidate.kind,
                     path: candidate.path.clone(),
                     file_revision: candidate.file_revision.clone(),
                     input_revision: candidate.input_revision.clone(),
                     reasons: vec!["the subject left the vault after it was planned".into()],
-                });
+                }),
+                None => {
+                    self.audit_deferred_paths.insert(path.to_owned());
+                    self.result.audit_deferred_count = self.audit_deferred_paths.len();
+                }
             }
-            self.result.audit_deferred_count = self.audit_deferred_paths.len();
         }
 
         fn audit_screening_limits(
@@ -7359,18 +7364,40 @@ mod native {
                 "audit inputs changed",
                 format!("{}: {reason}", candidate.path),
             );
-            if self.audit_deferred_paths.insert(candidate.path.clone())
+            self.count_deferred_audit(DeferredAudit {
+                kind: candidate.kind,
+                path: candidate.path.clone(),
+                file_revision: candidate.file_revision.clone(),
+                input_revision: candidate.input_revision.clone(),
+                reasons: vec![reason],
+            });
+        }
+
+        /// Counts `deferred` with this run's deferred subjects, keeping its detail while the
+        /// report has room.
+        fn count_deferred_audit(&mut self, deferred: DeferredAudit) {
+            if self.audit_deferred_paths.insert(deferred.path.clone())
                 && self.result.audit_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS
             {
-                self.result.audit_deferred.push(DeferredAudit {
-                    kind: candidate.kind,
-                    path: candidate.path.clone(),
-                    file_revision: candidate.file_revision.clone(),
-                    input_revision: candidate.input_revision.clone(),
-                    reasons: vec![reason],
-                });
+                self.result.audit_deferred.push(deferred);
             }
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
+        }
+
+        /// Counts the subjects `plan` skipped because an input changed while it read them.
+        fn count_input_changed(&mut self, plan: &lk_graph::audit::AuditPlan) {
+            for drift in &plan.input_changed {
+                self.count_deferred_audit(DeferredAudit {
+                    kind: drift.kind,
+                    path: drift.path.clone(),
+                    file_revision: drift.file_revision.clone(),
+                    input_revision: drift.input_revision.clone(),
+                    reasons: vec![format!(
+                        "its input {} changed while it was planned",
+                        drift.input
+                    )],
+                });
+            }
         }
 
         fn defer_audit_screening(
@@ -7979,6 +8006,7 @@ mod native {
             self.audit_deferred_paths = input_deferred_paths;
             self.audit_deferred_paths.extend(processing_deferred_paths);
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
+            self.count_input_changed(&plan);
             Ok(plan)
         }
 
@@ -8398,19 +8426,21 @@ mod native {
                         }
                         WorkStep::Failed => return false,
                         WorkStep::Replan => {
+                            let mut exhausted = Vec::new();
                             originals
                                 .get_mut(&selected)
                                 .expect("selected audit has original slots")
                                 .retain(|original| {
-                                    if self.audit_replans.try_spend(&bindings[&original.path]) {
-                                        true
-                                    } else {
-                                        deferred_subjects.insert(original.path.clone());
+                                    self.audit_replans.try_spend(&bindings[&original.path]) || {
+                                        exhausted.push(original.clone());
                                         false
                                     }
                                 });
+                            for original in exhausted {
+                                deferred_subjects.insert(original.path.clone());
+                                self.defer_audit_inputs(&original, AUDIT_UNSTABLE.into());
+                            }
                             if originals[&selected].is_empty() {
-                                self.deferred("bounded audit inputs unstable", format!("{selected}: inputs changed again after fresh replanning; retained for a later run"));
                                 deferred_subjects.insert(selected.clone());
                                 jobs.remove(&selected);
                                 continue;

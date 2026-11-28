@@ -836,10 +836,24 @@ pub enum AuditCoverageScope {
     Selection,
 }
 
+/// A subject corpus planning left for a later plan because `input`, a page its inputs read,
+/// changed after the subject was derived.
+#[derive(Clone, Debug, Serialize)]
+pub struct AuditInputDrift {
+    pub kind: AuditSubjectKind,
+    pub path: String,
+    pub file_revision: String,
+    pub input_revision: String,
+    pub input: String,
+}
+
 #[derive(Serialize)]
 pub struct AuditPlan {
     pub coverage_scope: AuditCoverageScope,
     pub candidates: Vec<AuditCandidate>,
+    /// Subjects skipped because an input changed while this plan read them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub input_changed: Vec<AuditInputDrift>,
     /// Individually oversized inputs encountered while selecting this automatic batch.
     /// At most 100 details, in selection order; exact selections do not defer inputs.
     pub blocked: Vec<AuditBlockedInput>,
@@ -937,6 +951,7 @@ impl AuditPlan {
         Ok(Self {
             coverage_scope: AuditCoverageScope::Selection,
             candidates: Vec::new(),
+            input_changed: Vec::new(),
             blocked: Vec::new(),
             blocked_count: 0,
             total: 0,
@@ -3452,6 +3467,14 @@ fn plan_selected_inner(
     };
     let mut blocked = Vec::new();
     let mut blocked_count = 0;
+    let mut input_changed = Vec::new();
+    let drifted = |candidate: &AuditCandidate, input: String| AuditInputDrift {
+        kind: candidate.kind,
+        path: candidate.path.clone(),
+        file_revision: candidate.file_revision.clone(),
+        input_revision: candidate.input_revision.clone(),
+        input,
+    };
     let mut next_class = receipts.next_class;
     while selection.is_empty() && candidates.len() < limit {
         read.check().map_err(GraphError::from)?;
@@ -3489,7 +3512,10 @@ fn plan_selected_inner(
         match prospective.include_candidate(root, &candidate) {
             Ok(()) => {}
             // A page its inputs read changed after it was derived: a later plan reads it again.
-            Err(GraphError::AuditInputChanged(_)) => continue,
+            Err(GraphError::AuditInputChanged(input)) => {
+                input_changed.push(drifted(&candidate, input));
+                continue;
+            }
             Err(failure) => return Err(failure),
         }
         let combined = prospective.bound(max_input_bytes)?;
@@ -3514,7 +3540,10 @@ fn plan_selected_inner(
                 read,
             ) {
                 Ok(individual) => individual,
-                Err(GraphError::AuditInputChanged(_)) => continue,
+                Err(GraphError::AuditInputChanged(input)) => {
+                    input_changed.push(drifted(&candidate, input));
+                    continue;
+                }
                 Err(failure) => return Err(failure),
             }
         };
@@ -3539,6 +3568,7 @@ fn plan_selected_inner(
         plan: AuditPlan {
             coverage_scope: scope.coverage_scope(),
             candidates,
+            input_changed,
             blocked,
             blocked_count,
             total,
@@ -6814,6 +6844,38 @@ mod tests {
         drifted(root.path());
         std::fs::remove_file(root.path().join("daily/report.md")).unwrap();
         drifted(root.path());
+    }
+
+    #[test]
+    fn a_corpus_plan_returns_the_subjects_it_skipped_for_input_drift() {
+        let root = tempfile::tempdir().unwrap();
+        rss_cited_concept(root.path());
+        let pages = scan(root.path());
+        let plan = plan_available_partitioned(
+            root.path(),
+            &VaultDirs::default(),
+            *ALL,
+            &pages,
+            1,
+            u64::MAX,
+            &mut |_| {
+                write(
+                    root.path(),
+                    "wiki/concepts/a.md",
+                    "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn edited claim.\n",
+                );
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert!(plan.candidates.is_empty());
+        let [drift] = plan.input_changed.as_slice() else {
+            panic!("one skipped subject: {:?}", plan.input_changed);
+        };
+        assert_eq!(
+            (drift.path.as_str(), drift.input.as_str()),
+            ("wiki/concepts/a.md", "wiki/concepts/a.md")
+        );
     }
 
     #[test]

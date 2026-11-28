@@ -98,6 +98,9 @@ impl Runner<'_> {
                     Ok(true) => {}
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
+                        if let Some(deferred) = readiness.deferred().last().cloned() {
+                            self.count_deferred_audit(deferred);
+                        }
                         pending.remove(&index);
                         continue;
                     }
@@ -319,7 +322,7 @@ impl Runner<'_> {
                     WorkStep::Replan => {
                         for index in &slots[0] {
                             if !self.audit_replans.try_spend(&bindings[*index]) {
-                                self.deferred("audit inputs unstable", &batch[*index].path);
+                                self.defer_audit_inputs(&batch[*index], AUDIT_UNSTABLE.into());
                                 pending.remove(index);
                             }
                         }
@@ -547,7 +550,7 @@ impl Runner<'_> {
                     stale = true;
                     for index in indices {
                         if !self.audit_replans.try_spend(&bindings[*index]) {
-                            self.deferred("audit inputs unstable", &batch[*index].path);
+                            self.defer_audit_inputs(&batch[*index], AUDIT_UNSTABLE.into());
                             pending.remove(index);
                         }
                     }
@@ -558,6 +561,9 @@ impl Runner<'_> {
                     Ok(true) => {}
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
+                        if let Some(deferred) = readiness.deferred().last().cloned() {
+                            self.count_deferred_audit(deferred);
+                        }
                         for index in indices {
                             pending.remove(index);
                         }
