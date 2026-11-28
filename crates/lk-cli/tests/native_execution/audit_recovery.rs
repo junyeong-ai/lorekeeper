@@ -544,13 +544,16 @@ fn audit_repeated_context_changes_defer_without_unbounded_retries_on_both_hosts(
         );
         assert!(report["semantic_calls"].as_u64().unwrap() < 64);
         assert!(
-            report["stages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|stage| stage["name"] == "bounded audit inputs unstable"
-                    && stage["state"] == "failed")
+            report["stages"].as_array().unwrap().iter().any(|stage| {
+                stage["name"] == "audit inputs changed"
+                    && stage["state"] == "failed"
+                    && stage["detail"].as_str().is_some_and(|detail| {
+                        detail.contains("changed again after fresh replanning")
+                    })
+            }),
+            "{report}"
         );
+        assert_eq!(report["audit_deferred_count"], 1, "{report}");
         let receipts: serde_json::Value = serde_json::from_slice(
             &std::fs::read(
                 fixture
