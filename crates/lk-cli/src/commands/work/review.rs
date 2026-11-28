@@ -551,7 +551,7 @@ pub(in crate::commands::work) fn record(
     }
     prepared.guard_pages(&mut plan);
     plan.extend(review.curation);
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(review.path)
 }
 

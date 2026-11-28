@@ -1305,6 +1305,6 @@ pub fn record(
         )
         .map_err(error)?;
     read.check().map_err(GraphError::from)?;
-    session.apply(mutation).map_err(error)?;
+    session.apply(mutation)?;
     Ok(true)
 }

@@ -239,7 +239,7 @@ pub(in crate::commands::work) fn record(
         }
     };
     let plan = plan_record(root, binding, recovery, reason, plan)?;
-    session.apply(plan).into_diagnostic()
+    session.apply(plan).map_err(crate::commands::typed_error)
 }
 
 #[cfg(unix)]

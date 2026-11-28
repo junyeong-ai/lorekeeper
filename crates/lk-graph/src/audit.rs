@@ -285,7 +285,7 @@ fn record_discovery_guarded(
         guard(&mut plan)?;
         if plan.has_changes() {
             read.check().map_err(GraphError::from)?;
-            session.apply(plan).map_err(error)?;
+            session.apply(plan)?;
         }
         return Ok(false);
     }
@@ -316,7 +316,7 @@ fn record_discovery_guarded(
     .map_err(error)?;
     guard(&mut plan)?;
     read.check().map_err(GraphError::from)?;
-    session.apply(plan).map_err(error)?;
+    session.apply(plan)?;
     Ok(true)
 }
 
@@ -3353,7 +3353,7 @@ pub fn admit_available_partitioned_controlled(
             .map_err(error)?;
     }
     read.check().map_err(GraphError::from)?;
-    session.apply(mutation).map_err(error)?;
+    session.apply(mutation)?;
     Ok(prepared.plan)
 }
 
@@ -3867,13 +3867,14 @@ pub fn record_with_guard_controlled(
             let candidate = candidates
                 .get(&assessment.path)
                 .ok_or_else(|| error("audit target is not an exact concept or document address"))?;
+            // The subject or an input it reads changed since it was assessed: an input change.
             if candidate.file_revision != assessment.file_revision
                 || candidate.input_revision != assessment.input_revision
             {
-                return Err(error(format!(
-                    "audit inputs changed: {}; reread before recording",
-                    assessment.path
-                )));
+                return Err(GraphError::AuditSubjectInputChanged {
+                    subject: assessment.path.clone(),
+                    input: assessment.path.clone(),
+                });
             }
             Ok(candidate)
         })
@@ -3944,7 +3945,7 @@ pub fn record_with_guard_controlled(
     plan.publish_expected(root, STATE, before, after)
         .map_err(error)?;
     read.check().map_err(GraphError::from)?;
-    session.apply(plan).map_err(error)?;
+    session.apply(plan)?;
     Ok(recorded.into_iter().collect())
 }
 
@@ -5252,7 +5253,10 @@ mod tests {
                 u64::MAX,
             )
             .unwrap_err();
-            assert!(rejected.to_string().contains("audit inputs changed"));
+            assert!(
+                matches!(rejected, GraphError::AuditSubjectInputChanged { .. }),
+                "a retargeted subject is an input change: {rejected}"
+            );
             assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
         }
     }
@@ -6870,6 +6874,46 @@ mod tests {
     }
 
     #[test]
+    fn a_publication_conflict_at_recording_keeps_its_vault_type() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "wiki/concepts/a.md";
+        write(
+            root.path(),
+            concept,
+            "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claim.\n",
+        );
+        let guarded = "notes/guarded.md";
+        write(root.path(), guarded, "Bytes a writer replaced.\n");
+        let pages = scan(root.path());
+        let planned = plan(root.path(), &dirs, *ALL, &pages, 1, u64::MAX).unwrap();
+        let session = MutationSession::acquire(root.path()).unwrap();
+        let refused = record_with_guard(
+            &session,
+            &dirs,
+            *ALL,
+            &pages,
+            AuditResults {
+                assessments: vec![assessment(&planned.candidates[0])],
+            },
+            u64::MAX,
+            |_, mutation| {
+                mutation.require_unchanged(guarded, "Bytes the guard read.\n".into());
+                Ok(AuditReadCoverage::WholeInput)
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                GraphError::Vault(lk_vault::VaultError::MutationConflict(path))
+                    if path == Path::new(guarded)
+            ),
+            "a guard conflict stays the vault's typed conflict: {refused}"
+        );
+    }
+
+    #[test]
     fn a_corpus_plan_returns_the_subjects_it_skipped_for_input_drift() {
         let root = tempfile::tempdir().unwrap();
         rss_cited_concept(root.path());
@@ -7174,8 +7218,11 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            refused.to_string().contains("audit inputs changed"),
-            "{refused}"
+            matches!(
+                &refused,
+                GraphError::AuditSubjectInputChanged { subject, .. } if subject == "wiki/concepts/a.md"
+            ),
+            "an assessment of earlier reads is an input change: {refused}"
         );
         assert_eq!(std::fs::read(root.path().join(STATE)).unwrap(), before);
     }

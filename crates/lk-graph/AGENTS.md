@@ -151,6 +151,9 @@ and CLI discovery, not a second graph authority.
   it (`AuditSubjectInputChanged`) so its caller defers only that subject. An immutable
   capture a scoped review cites (a Markdown archive or a retained RSS payload) that is
   missing or differs is an integrity error in measurement and in guards, never drift.
+  Recording, admission, discovery and screening publish with `?`, so a guard conflict stays
+  `GraphError::Vault(MutationConflict)`, and an assessment whose subject or inputs changed
+  since it was read is `AuditSubjectInputChanged`.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them in planned order and preserves the measured oversized status. Recording requires exact

@@ -276,15 +276,27 @@ impl InputReadiness {
             let relative = owner
                 .strip_prefix(&root)
                 .map_err(|error| miette::miette!("{error}"))?;
-            let raw = self
-                .read
-                .read_to_string(&lk_vault::page_path(&root, relative).into_diagnostic()?)
-                .into_diagnostic()?;
-            if lk_core::concept::file_revision(&raw) != approved.revision {
-                return Err(miette::miette!(
+            // An approved input a writer edited or removed since it was approved is drift.
+            let changed = || {
+                miette::Report::new(crate::commands::work::SourceChanged::new(format!(
                     "audit readiness input changed: {}; reread before assessing",
                     relative.display()
-                ));
+                )))
+            };
+            let raw = match self
+                .read
+                .read_to_string(&lk_vault::page_path(&root, relative).into_diagnostic()?)
+            {
+                Ok(raw) => raw,
+                Err(lk_vault::VaultError::Io(error))
+                    if error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    return Err(changed());
+                }
+                Err(error) => return Err(error).into_diagnostic(),
+            };
+            if lk_core::concept::file_revision(&raw) != approved.revision {
+                return Err(changed());
             }
             plan.require_unchanged(relative, raw);
         }

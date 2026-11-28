@@ -135,7 +135,7 @@ pub(in crate::commands) fn recover_sections_controlled(
     let _queue = super::super::claim_writer(&root.join(".lorekeeper/queue"), false)?;
     let (recovered, plan) = plan_recovery_controlled(root, config, config_revision, read)?;
     if recovered != 0 {
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     }
     Ok(recovered)
 }

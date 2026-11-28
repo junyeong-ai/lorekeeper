@@ -130,7 +130,7 @@ fn prune(
     let mut plan = lk_vault::MutationPlan::default();
     let removed = plan_prune(session.root(), pending, &mut plan)?;
     if removed != 0 {
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     }
     Ok(removed)
 }
@@ -259,7 +259,7 @@ fn record_selected(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => plan.create(path, after),
         Err(error) => return Err(miette::miette!("read extraction discovery: {error}")),
     }
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(true)
 }
 

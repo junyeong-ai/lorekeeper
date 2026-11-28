@@ -200,7 +200,7 @@ pub(in crate::commands) fn hold(
     };
     crate::commands::queue::guard_current_task(session.root(), &task, &mut plan)?;
     read.check().into_diagnostic()?;
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     current
         .binding
         .held(session.root())?
@@ -230,9 +230,9 @@ pub(in crate::commands) fn finish(
         ));
     };
     if current.request != section.request {
-        return Err(miette::miette!(
-            "section inputs changed; retained work must be reread"
-        ));
+        return Err(miette::Report::new(super::SourceChanged::new(
+            "section inputs changed; retained work must be reread",
+        )));
     }
     let path = action_path(&section.result.task_id, &section.result.cache_hash);
     let before =
@@ -259,7 +259,7 @@ pub(in crate::commands) fn finish(
             )
             .into_diagnostic()?;
             read.check().into_diagnostic()?;
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(Some(reason))
         }
         crate::commands::execution::finalization::SectionResponse::Complete(body) => {
@@ -295,7 +295,7 @@ pub(in crate::commands) fn finish(
                 plan.remove(path, before);
             }
             read.check().into_diagnostic()?;
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(None)
         }
     }

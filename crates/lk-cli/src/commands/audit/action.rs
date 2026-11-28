@@ -252,7 +252,9 @@ pub(in crate::commands) fn prune(
         removed += 1;
     }
     if let Some(session) = session {
-        session.apply(mutation).into_diagnostic()?;
+        session
+            .apply(mutation)
+            .map_err(crate::commands::typed_error)?;
     }
     Ok(removed)
 }

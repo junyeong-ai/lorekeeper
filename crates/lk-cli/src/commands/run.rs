@@ -7911,6 +7911,7 @@ mod native {
             let mut processing_deferred = Vec::new();
             let mut input_deferred_paths = std::collections::BTreeSet::new();
             let mut processing_deferred_paths = std::collections::BTreeSet::new();
+            let carried = std::cell::RefCell::new(crate::commands::audit::CarriedError::default());
             let plan = lk_graph::audit::admit_available_partitioned_controlled(
                 &session,
                 &self.config.vault.dirs,
@@ -7966,7 +7967,7 @@ mod native {
                         {
                             Some(format!("its inputs changed during admission: {error}"))
                         }
-                        Err(error) => return Err(lk_graph::GraphError::Io(error.to_string())),
+                        Err(error) => return Err(carried.borrow_mut().carry(error)),
                     };
                     self.supervisor
                         .read_control()
@@ -7992,19 +7993,19 @@ mod native {
                         &self.root,
                         self.supervisor.read_control(),
                     )
-                    .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                    .map_err(|error| carried.borrow_mut().carry(error))?;
                     for candidate in candidates {
                         selected
                             .require_ready(candidate)
-                            .map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+                            .map_err(|error| carried.borrow_mut().carry(error))?;
                     }
                     selected
                         .guard(mutation)
-                        .map_err(|error| lk_graph::GraphError::Io(error.to_string()))
+                        .map_err(|error| carried.borrow_mut().carry(error))
                 },
                 self.supervisor.read_control(),
             )
-            .map_err(typed_error)?;
+            .map_err(|error| carried.into_inner().restore(error))?;
             self.result.audit_deferred = readiness.deferred().to_vec();
             self.result.audit_deferred.extend(processing_deferred);
             self.result

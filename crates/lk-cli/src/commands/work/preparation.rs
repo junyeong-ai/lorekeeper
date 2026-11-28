@@ -560,7 +560,7 @@ pub(in crate::commands) fn prune_absent_audits(
     if let Some(session) = session
         && removed > 0
     {
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     }
     Ok(removed)
 }

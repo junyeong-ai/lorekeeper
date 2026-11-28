@@ -606,7 +606,7 @@ pub(in crate::commands) fn hold_selected_controlled(
         rejection::Cause::invocation(failure),
         &mut plan,
     )?;
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(Some(format!("{}: {reason}", task.task_id)))
 }
 
@@ -737,7 +737,7 @@ pub(in crate::commands) fn finish_selected_controlled(
                     rejection::Cause::proposal(reply, rejection)?,
                     &mut plan,
                 )?;
-                session.apply(plan).into_diagnostic()?;
+                session.apply(plan).map_err(crate::commands::typed_error)?;
                 return Ok(SelectedFinish::Rejected(reason));
             }
             plan.extend(guards);
@@ -761,7 +761,7 @@ pub(in crate::commands) fn finish_selected_controlled(
             SelectedFinish::Staged(refused_review)
         }
     };
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(reason)
 }
 

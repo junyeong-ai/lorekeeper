@@ -379,7 +379,7 @@ pub(super) fn record(
     }
     plan.publish_expected(root, &path, before, after)
         .into_diagnostic()?;
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok((path.to_string_lossy().into_owned(), scope))
 }
 
@@ -483,7 +483,7 @@ fn prune(root: &Path, session: Option<&lk_vault::MutationSession>) -> miette::Re
     if removed != 0
         && let Some(session) = session
     {
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     }
     Ok(removed)
 }

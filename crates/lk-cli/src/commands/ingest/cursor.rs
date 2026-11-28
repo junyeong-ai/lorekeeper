@@ -87,7 +87,9 @@ pub(super) async fn reserve_start(
                 serde_json::to_string(&Cursor { next_source }).into_diagnostic()?,
             )
             .into_diagnostic()?;
-        session.apply(mutation).into_diagnostic()?;
+        session
+            .apply(mutation)
+            .map_err(crate::commands::typed_error)?;
     }
     Ok(Some(selected))
 }

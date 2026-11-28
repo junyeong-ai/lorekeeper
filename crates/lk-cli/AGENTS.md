@@ -5,7 +5,9 @@ AGENTS.md for shared architecture, output, locks, and mutation rules. Delegate
 meaning to the owning crate; do not recreate its parser/status model in a command.
 A library error whose variant decides handling (input drift in `GraphError` or
 `VaultError`) converts with `commands::typed_error`; `into_diagnostic`, `Report::from_err`
-and `miette!` keep only its message, so a later `downcast_ref` finds nothing.
+and `miette!` keep only its message, so a later `downcast_ref` finds nothing. Every
+`MutationSession::apply` error converts this way. A callback a graph call takes can return
+only `GraphError`, so it carries any other typed error through `audit::CarriedError`.
 
 Build the Clap command tree before inspecting all arguments or nested commands;
 deferred subcommands expose their names eagerly for name-only discovery.

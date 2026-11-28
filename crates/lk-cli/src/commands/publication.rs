@@ -166,7 +166,7 @@ impl<'a> Publication<'a> {
                 lk_queue::serialize_tasks(&tasks).into_diagnostic()?,
             );
         }
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
         for path in targets {
             self.requests.remove(&path);
         }

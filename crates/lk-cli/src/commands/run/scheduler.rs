@@ -227,7 +227,9 @@ pub(super) fn reserve_in_session(
             serde_json::to_string(&cursor).into_diagnostic()?,
         )
         .into_diagnostic()?;
-    session.apply(mutation).into_diagnostic()
+    session
+        .apply(mutation)
+        .map_err(crate::commands::typed_error)
 }
 
 /// Reserve one round-robin turn before starting its external worker. A cancelled

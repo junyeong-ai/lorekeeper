@@ -1611,20 +1611,20 @@ pub(super) fn record_screenings(
                             &request,
                             serde_json::from_value(output).into_diagnostic()?,
                         )?;
-                        session.apply(plan).into_diagnostic()?;
+                        session.apply(plan).map_err(crate::commands::typed_error)?;
                         Ok(ScreeningRecordOutcome::Recorded(request.candidates()))
                     }
                     ScreeningResponse::InvocationFailed { request, failure } => {
                         let reason = failure.to_string();
                         let plan =
                             selection::plan_failed_attempt(root, &issued(&request)?, failure)?;
-                        session.apply(plan).into_diagnostic()?;
+                        session.apply(plan).map_err(crate::commands::typed_error)?;
                         Ok(ScreeningRecordOutcome::InvocationFailed(reason))
                     }
                     ScreeningResponse::Rejected { request, rejection } => {
                         let reason = rejection.to_string();
                         let plan = selection::plan_rejection(root, &issued(&request)?, rejection)?;
-                        session.apply(plan).into_diagnostic()?;
+                        session.apply(plan).map_err(crate::commands::typed_error)?;
                         Ok(ScreeningRecordOutcome::Rejected(reason))
                     }
                 }
@@ -1806,7 +1806,7 @@ fn seal_roster(
         let session = super::publication::acquire_mutation_now(root, pin)?;
         let mut plan = lk_vault::MutationPlan::default();
         seal.plan(session.root(), &mut plan)?;
-        session.apply(plan).into_diagnostic()?;
+        session.apply(plan).map_err(crate::commands::typed_error)?;
     }
     selection.binding()
 }
@@ -2253,7 +2253,9 @@ fn finish_with_preparation(
             validate_native_finalization(session.root(), config, work, prepared, request)?;
         let (path, mutation) =
             plan_finish_expected(session, work, prepared, result, Some(&completed))?;
-        session.apply(mutation).into_diagnostic()?;
+        session
+            .apply(mutation)
+            .map_err(crate::commands::typed_error)?;
         Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
     } else {
         finish(session, work, prepared, result)
@@ -3151,7 +3153,9 @@ fn record_prepared_inspections(
                         )? {
                             state::ObservationRecordPlan::Accepted(mut mutation) => {
                                 prepared.guard_pages(&mut mutation);
-                                session.apply(mutation).into_diagnostic()?;
+                                session
+                                    .apply(mutation)
+                                    .map_err(crate::commands::typed_error)?;
                                 work.progress(root, &prepared.resources)
                                     .map(InspectionRecordOutcome::Recorded)
                             }
@@ -3161,7 +3165,9 @@ fn record_prepared_inspections(
                             } => {
                                 let reason = format!("{violation}; no observation was recorded");
                                 prepared.guard_pages(&mut mutation);
-                                session.apply(mutation).into_diagnostic()?;
+                                session
+                                    .apply(mutation)
+                                    .map_err(crate::commands::typed_error)?;
                                 Ok(match violation {
                                     state::ObservationViolation::Text(_) => {
                                         InspectionRecordOutcome::InvalidText(reason)
@@ -3249,7 +3255,7 @@ fn record_prepared_inspections(
                             InspectionResponse::Complete(_) => unreachable!(),
                         };
                         prepared.guard_pages(&mut plan);
-                        session.apply(plan).into_diagnostic()?;
+                        session.apply(plan).map_err(crate::commands::typed_error)?;
                         Ok(outcome)
                     }
                 }
@@ -3867,7 +3873,7 @@ pub(super) fn finish_result(
                 generation::rejection::Cause::proposal(reply, reason)?,
                 &mut plan,
             )?;
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(ResultFinish::Rejected(reason))
         }
         generation::Outcome::NeedsDiscovery(recovery, reason) => {
@@ -3932,7 +3938,7 @@ pub(super) fn finish_result(
                 result.kind,
             )?;
             prepared.guard_pages(&mut plan);
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(ResultFinish::NeedsAction(reason))
         }
         generation::Outcome::Complete(value) => {
@@ -3944,7 +3950,7 @@ pub(super) fn finish_result(
                 Some(&completed),
                 result.kind,
             )?;
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(ResultFinish::Staged(refused_review))
         }
     }
@@ -3972,7 +3978,7 @@ pub(super) fn record_finalization_action(
     )?;
     prepared.guard_pages(&mut plan);
     section.scope.guard_pages(&mut plan);
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(())
 }
 
@@ -4008,7 +4014,9 @@ pub(super) fn finish_section(
         Some(&prepared_section.completed),
     )?;
     prepared_section.scope.guard_pages(&mut mutation);
-    session.apply(mutation).into_diagnostic()?;
+    session
+        .apply(mutation)
+        .map_err(crate::commands::typed_error)?;
     Ok(())
 }
 
@@ -4104,7 +4112,7 @@ pub(super) fn hold_result(
                 generation::rejection::Cause::invocation(failure),
                 &mut plan,
             )?;
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             Ok(Some(format!("{}: {reason}", task.task_id)))
         }
         Subject::Audit { path, .. } => {
@@ -4116,7 +4124,7 @@ pub(super) fn hold_result(
             plan.extend(
                 binding.plan_record(root, preparation::Disposition::invocation_failed(failure))?,
             );
-            session.apply(plan).into_diagnostic()?;
+            session.apply(plan).map_err(crate::commands::typed_error)?;
             let reason = binding
                 .held(root)?
                 .ok_or_else(|| miette::miette!("audit assessment hold changed after recording"))?;
@@ -4175,7 +4183,7 @@ pub(super) fn hold_section(
         generation::rejection::Cause::invocation(failure),
         &mut plan,
     )?;
-    session.apply(plan).into_diagnostic()?;
+    session.apply(plan).map_err(crate::commands::typed_error)?;
     Ok(Some(format!("{}: {reason}", task.task_id)))
 }
 
@@ -4395,7 +4403,9 @@ pub(super) fn restage_finished(
             serde_json::to_string(&result).into_diagnostic()?,
         )
         .into_diagnostic()?;
-    session.apply(mutation).into_diagnostic()
+    session
+        .apply(mutation)
+        .map_err(crate::commands::typed_error)
 }
 
 fn progress(
@@ -4779,7 +4789,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             } else {
                 let session = super::publication::acquire_mutation_now(&root, &pin)?;
                 let (mutation, preview) = prepare(session.root())?;
-                session.apply(mutation).into_diagnostic()?;
+                session
+                    .apply(mutation)
+                    .map_err(crate::commands::typed_error)?;
                 preview
             };
             let mut value = serde_json::to_value(preview).into_diagnostic()?;
@@ -4855,7 +4867,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let (work, prepared) = load(&root, &config, &config_revision, &output.work_id)?;
             let mut mutation = work.plan_observation(&session, output, &prepared.resources)?;
             prepared.guard_pages(&mut mutation);
-            session.apply(mutation).into_diagnostic()?;
+            session
+                .apply(mutation)
+                .map_err(crate::commands::typed_error)?;
             let status = work.progress(&root, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
         }
@@ -4871,7 +4885,9 @@ pub async fn run(opts: &GlobalOptions, command: WorkCommand) -> miette::Result<(
             let mut mutation =
                 work.plan_reuse(&session, &prior, &from_node, &node_id, &prepared.resources)?;
             prepared.guard_pages(&mut mutation);
-            session.apply(mutation).into_diagnostic()?;
+            session
+                .apply(mutation)
+                .map_err(crate::commands::typed_error)?;
             let status = work.progress(&root, &prepared.resources)?;
             progress_value(&work, &prepared, status, 20, 0)
         }
@@ -4950,7 +4966,9 @@ fn finish(
     result: Value,
 ) -> miette::Result<Value> {
     let (path, mutation) = plan_finish(session, work, prepared, result)?;
-    session.apply(mutation).into_diagnostic()?;
+    session
+        .apply(mutation)
+        .map_err(crate::commands::typed_error)?;
     Ok(json!({"work_id":work.plan.id,"staged_result":path,"canonical_published":false}))
 }
 
@@ -5225,7 +5243,9 @@ mod tests {
         let (work, prepared) = load_controlled(root, config, config_revision, id, read)?;
         let mut mutation = work.plan_observation(session, output, &prepared.resources)?;
         prepared.guard_pages(&mut mutation);
-        session.apply(mutation).into_diagnostic()?;
+        session
+            .apply(mutation)
+            .map_err(crate::commands::typed_error)?;
         work.progress(root, &prepared.resources)
     }
 

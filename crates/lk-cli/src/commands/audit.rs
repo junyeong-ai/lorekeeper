@@ -23,6 +23,35 @@ pub(super) fn assessment_blocker(error: &miette::Report) -> Option<String> {
     }
 }
 
+/// Carries a caller's typed error through a graph callback whose signature allows only
+/// `GraphError`. A `GraphError` passes as itself; any other error (`SourceChanged`, a
+/// publication rejection) is kept here while the callback returns a placeholder naming it,
+/// and `restore` reports the kept error when the graph call fails with that placeholder.
+#[derive(Default)]
+pub(super) struct CarriedError(Option<miette::Report>);
+
+impl CarriedError {
+    pub(super) fn carry(&mut self, error: miette::Report) -> lk_graph::GraphError {
+        match error.downcast::<lk_graph::GraphError>() {
+            Ok(error) => error,
+            Err(error) => {
+                let placeholder = lk_graph::GraphError::Io(error.to_string());
+                self.0.get_or_insert(error);
+                placeholder
+            }
+        }
+    }
+
+    pub(super) fn restore(self, error: lk_graph::GraphError) -> miette::Report {
+        match (self.0, &error) {
+            (Some(carried), lk_graph::GraphError::Io(detail)) if *detail == carried.to_string() => {
+                carried
+            }
+            _ => super::typed_error(error),
+        }
+    }
+}
+
 fn into_graph_error(error: miette::Report) -> lk_graph::GraphError {
     match error.downcast::<lk_graph::GraphError>() {
         Ok(error) => error,
@@ -65,10 +94,10 @@ pub(super) fn record_controlled(
     ) -> miette::Result<()>,
     read: &lk_vault::ReadControl,
 ) -> miette::Result<Vec<String>> {
-    read.check().map_err(|error| miette::miette!("{error}"))?;
+    read.check().map_err(super::typed_error)?;
     let root = session.root();
     let pages = lk_graph::scan::scan_vault_controlled(root, config.graph.scope.follow_links, read)
-        .map_err(|error| miette::miette!("{error}"))?;
+        .map_err(super::typed_error)?;
     let selection = results
         .assessments
         .iter()
@@ -84,7 +113,7 @@ pub(super) fn record_controlled(
         config.graph.audit.max_input_bytes,
         read,
     )
-    .map_err(|error| miette::miette!("{error}"))?;
+    .map_err(super::typed_error)?;
     if selected
         .candidates
         .iter()
@@ -100,7 +129,8 @@ pub(super) fn record_controlled(
         readiness.require_ready(root, candidate)?;
     }
     let mut readiness = Some(readiness);
-    lk_graph::audit::record_with_guard_controlled(
+    let mut carried = CarriedError::default();
+    let recorded = lk_graph::audit::record_with_guard_controlled(
         session,
         &config.vault.dirs,
         lk_graph::audit::AuditCorpus::from(&config.graph.audit),
@@ -111,9 +141,9 @@ pub(super) fn record_controlled(
             if let Some(readiness) = readiness.take() {
                 let guarded = readiness.guard(root, mutation);
                 read.check().map_err(lk_graph::GraphError::from)?;
-                guarded.map_err(into_graph_error)?;
+                guarded.map_err(|error| carried.carry(error))?;
             }
-            guard(assessment, mutation).map_err(into_graph_error)?;
+            guard(assessment, mutation).map_err(|error| carried.carry(error))?;
             #[cfg(unix)]
             super::work::preparation::plan_retire(
                 root,
@@ -122,8 +152,9 @@ pub(super) fn record_controlled(
                 },
                 mutation,
             )
-            .map_err(into_graph_error)?;
-            action::guard_completed(root, &assessment.path, mutation).map_err(into_graph_error)?;
+            .map_err(|error| carried.carry(error))?;
+            action::guard_completed(root, &assessment.path, mutation)
+                .map_err(|error| carried.carry(error))?;
             super::work::guard_audit_controlled(
                 root,
                 config,
@@ -139,11 +170,11 @@ pub(super) fn record_controlled(
                     lk_graph::audit::AuditReadCoverage::WholeInput
                 }
             })
-            .map_err(into_graph_error)
+            .map_err(|error| carried.carry(error))
         },
         read,
-    )
-    .map_err(miette::Report::msg)
+    );
+    recorded.map_err(|error| carried.restore(error))
 }
 
 /// Records an audit discovery recipe through the shared audit owner and retires the subject's
@@ -377,4 +408,35 @@ pub(super) fn plan_ready(
             deferred_count: availability.deferred_count(),
         },
     })
+}
+
+#[cfg(test)]
+mod carried_error_tests {
+    use super::CarriedError;
+
+    #[test]
+    fn a_callback_error_keeps_its_type_through_a_graph_call() {
+        let mut carried = CarriedError::default();
+        let placeholder = carried.carry(miette::Report::new(
+            crate::commands::work::SourceChanged::new("wiki/concepts/a.md was removed"),
+        ));
+        let restored = carried.restore(placeholder);
+        assert!(
+            restored
+                .downcast_ref::<crate::commands::work::SourceChanged>()
+                .is_some()
+        );
+        let mut carried = CarriedError::default();
+        let graph = carried.carry(crate::commands::typed_error(
+            lk_graph::GraphError::AuditSubjectRemoved("wiki/concepts/a.md".into()),
+        ));
+        assert!(matches!(
+            graph,
+            lk_graph::GraphError::AuditSubjectRemoved(_)
+        ));
+        let mut carried = CarriedError::default();
+        carried.carry(miette::miette!("first"));
+        let unrelated = carried.restore(lk_graph::GraphError::Io("another failure".into()));
+        assert_eq!(unrelated.to_string(), "I/O error: another failure");
+    }
 }
