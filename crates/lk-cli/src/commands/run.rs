@@ -7213,10 +7213,13 @@ mod native {
                         };
                         continue;
                     }
-                    // A writer changed this subject's candidates after it was read, as while
-                    // another subject's packet ran: read it again once, and defer it when they
-                    // change again.
-                    Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                    // A writer changed this subject's candidates or inputs after it was read, as
+                    // while another subject's packet ran: read it again once, and defer it when
+                    // they change again.
+                    Err(
+                        lk_graph::GraphError::AuditScreeningChanged
+                        | lk_graph::GraphError::AuditInputChanged(_),
+                    ) => {
                         if !drifted.insert(candidate.path.clone()) {
                             self.defer_audit_screening(
                                 &candidate,
@@ -7324,7 +7327,10 @@ mod native {
                     })();
                     let screened = match result {
                         Ok(pages) => Some(pages),
-                        Err(lk_graph::GraphError::AuditScreeningChanged) => {
+                        Err(
+                            lk_graph::GraphError::AuditScreeningChanged
+                            | lk_graph::GraphError::AuditInputChanged(_),
+                        ) => {
                             if !drifted.insert(candidate.path.clone()) {
                                 self.defer_audit_screening(
                                     &candidate,
@@ -7516,6 +7522,14 @@ mod native {
                         self.defer_audit_screening(
                             &candidate,
                             "assigned candidate inputs changed; discard the old judgment".into(),
+                        );
+                        None
+                    }
+                    Err(lk_graph::GraphError::AuditInputChanged(path)) => {
+                        metrics.outcome = WorkOutcome::InputsChanged;
+                        self.defer_audit_screening(
+                            &candidate,
+                            format!("its input {path} changed during its packet; discard the old judgment"),
                         );
                         None
                     }

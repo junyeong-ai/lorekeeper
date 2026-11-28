@@ -1005,11 +1005,23 @@ impl InputResources {
     ) -> Result<(), GraphError> {
         self.read.check().map_err(GraphError::from)?;
         let absolute = lk_vault::page_path(root, Path::new(path)).map_err(error)?;
-        let canonical = absolute.canonicalize().map_err(error)?;
-        let raw = self
-            .read
-            .read_to_string(&absolute)
-            .map_err(GraphError::from)?;
+        let changed = || GraphError::AuditInputChanged(path.to_owned());
+        let canonical = match absolute.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => {
+                return Err(changed());
+            }
+            Err(failure) => return Err(error(failure)),
+        };
+        let raw = match self.read.read_to_string(&absolute) {
+            Ok(raw) => raw,
+            Err(lk_vault::VaultError::Io(failure))
+                if failure.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Err(changed());
+            }
+            Err(failure) => return Err(GraphError::from(failure)),
+        };
         let revision = file_revision(&raw);
         let source_matches = match expected_source {
             Some(expected) => {
@@ -1024,9 +1036,7 @@ impl InputResources {
                 .get(&canonical)
                 .is_some_and(|(prior, _)| prior != &revision)
         {
-            return Err(error(format!(
-                "audit dependency changed during input measurement: {path}"
-            )));
+            return Err(changed());
         }
         self.pages.insert(canonical, (revision, raw.len() as u64));
         Ok(())
@@ -1049,7 +1059,7 @@ impl InputResources {
             .as_mut()
             .expect("RSS capture initialized")
             .load_citation(Path::new(concept), citation)
-            .map_err(GraphError::from)?;
+            .map_err(|failure| rss_citation_failure(failure, citation))?;
         let owner = root
             .canonicalize()
             .map_err(error)?
@@ -1060,7 +1070,7 @@ impl InputResources {
             .get(&owner)
             .is_some_and(|(prior, _)| prior != &revision)
         {
-            return Err(error("RSS origin changed during audit input measurement"));
+            return Err(GraphError::AuditInputChanged(citation.path.clone()));
         }
         self.pages
             .insert(owner, (revision, input.origin.len() as u64));
@@ -1130,10 +1140,9 @@ impl InputResources {
                     && load_page_input_controlled(root, &evidence.recorded.path, &self.read)?
                         .is_some()
                 {
-                    return Err(error(format!(
-                        "audit review evidence appeared during input measurement: {}",
-                        evidence.recorded.path
-                    )));
+                    return Err(GraphError::AuditInputChanged(
+                        evidence.recorded.path.clone(),
+                    ));
                 }
             }
             for evidence in &review.evidence {
@@ -3399,7 +3408,12 @@ fn plan_selected_inner(
             }
         }
         let mut prospective = resources.clone();
-        prospective.include_candidate(root, &candidate)?;
+        match prospective.include_candidate(root, &candidate) {
+            Ok(()) => {}
+            // A page its inputs read changed after it was derived: a later plan reads it again.
+            Err(GraphError::AuditInputChanged(_)) => continue,
+            Err(failure) => return Err(failure),
+        }
         let combined = prospective.bound(max_input_bytes)?;
         if !matches!(planning, Planning::WholeInput) || combined.status == AuditInputStatus::Ready {
             next_class = if candidate.reason == AuditReason::Changed {
@@ -3525,6 +3539,17 @@ fn guard_review_dependency_controlled(
     Ok(())
 }
 
+/// An RSS citation's capture failure as the audit reads it: an origin page a writer removed
+/// after the citation was derived is that input's drift; anything else stays a failure.
+fn rss_citation_failure(failure: lk_vault::VaultError, citation: &Citation) -> GraphError {
+    match failure {
+        lk_vault::VaultError::PageRemoved(_) => {
+            GraphError::AuditInputChanged(citation.path.clone())
+        }
+        failure => GraphError::from(failure),
+    }
+}
+
 #[cfg(test)]
 fn guard_candidate(
     plan: &mut MutationPlan,
@@ -3574,12 +3599,7 @@ fn guard_candidate_controlled(
             rss.as_mut()
                 .expect("RSS capture initialized")
                 .load_citation(Path::new(&candidate.path), citation)
-                .map_err(|failure| match failure {
-                    lk_vault::VaultError::PageRemoved(_) => {
-                        GraphError::AuditInputChanged(citation.path.clone())
-                    }
-                    failure => GraphError::from(failure),
-                })?;
+                .map_err(|failure| rss_citation_failure(failure, citation))?;
             read.check().map_err(GraphError::from)?;
         } else {
             let raw = match read.read_to_string(
@@ -6587,6 +6607,73 @@ mod tests {
         std::fs::write(payload_path, "corrupt").unwrap();
         assert!(measure_inputs(root.path(), &input.candidates, u64::MAX).is_err());
         assert!(!root.path().join(STATE).exists());
+    }
+
+    /// One concept citing an RSS event its daily origin binds, planned through the graph.
+    fn rss_cited_concept(root: &Path) -> (AuditCandidate, String) {
+        let dirs = VaultDirs::default();
+        let event: lk_core::event::Event = serde_json::from_value(json!({
+            "id":"rss:2026-10-18:0000000000000001", "source_id":"rss", "source_type":"rss",
+            "timestamp":"2026-10-18T00:00:00Z", "date":"2026-10-18", "title":"Report", "body":"Complete original report.",
+            "url":"https://example.test/report", "author":null, "labels":[], "category":null,
+            "performance_category":null, "is_self":false, "is_personal":false, "metadata":{}
+        })).unwrap();
+        let capture = lk_core::rss_original::RssOriginalCapture::from_events(&[&event]).unwrap();
+        let session = MutationSession::acquire(root).unwrap();
+        let reference = lk_vault::publish_rss_original(&session, &capture).unwrap();
+        let selected = &capture.manifest.events[0];
+        let binding = json!([{
+            "schema":lk_core::rss_evidence::RSS_EVIDENCE_SCHEMA,
+            "concept":"wiki/concepts/a.md", "manifest":reference,
+            "events":[{"event_id":selected.event_id, "revision":selected.revision}]
+        }]);
+        let source = format!(
+            "---\ntype: daily\ntitle: Report\nsource: rss\ncreated: 2026-10-18\nsource_record: {}\nconcept_evidence: {}\n---\n## Related Concepts\n- [A](../wiki/concepts/a.md)\n",
+            json!({"rss_original":reference}),
+            binding
+        );
+        write(root, "daily/report.md", &source);
+        write(
+            root,
+            "wiki/concepts/a.md",
+            "---\ntype: concept\ntitle: A\n---\n## Synthesis\nScoped claim.\n",
+        );
+        let candidate = plan(root, &dirs, *ALL, &scan(root), 1, u64::MAX)
+            .unwrap()
+            .candidates
+            .remove(0);
+        assert!(candidate.evidence[0].rss_event.is_some());
+        (candidate, source)
+    }
+
+    #[test]
+    fn a_removed_rss_origin_is_input_drift_while_measuring_and_guarding() {
+        let root = tempfile::tempdir().unwrap();
+        let (candidate, _) = rss_cited_concept(root.path());
+        std::fs::remove_file(root.path().join("daily/report.md")).unwrap();
+        assert!(matches!(
+            measure_inputs(root.path(), std::slice::from_ref(&candidate), u64::MAX),
+            Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
+        ));
+        assert!(matches!(
+            guard_candidate(&mut MutationPlan::default(), root.path(), &candidate),
+            Err(GraphError::AuditInputChanged(path)) if path == "daily/report.md"
+        ));
+    }
+
+    #[test]
+    fn a_page_edited_after_derivation_is_input_drift_while_measuring() {
+        let root = tempfile::tempdir().unwrap();
+        let (candidate, _) = rss_cited_concept(root.path());
+        write(
+            root.path(),
+            "wiki/concepts/a.md",
+            "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn edited claim.\n",
+        );
+        assert!(matches!(
+            measure_inputs(root.path(), std::slice::from_ref(&candidate), u64::MAX),
+            Err(GraphError::AuditInputChanged(path)) if path == "wiki/concepts/a.md"
+        ));
     }
 
     #[test]

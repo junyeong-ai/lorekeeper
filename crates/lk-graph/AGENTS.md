@@ -145,6 +145,9 @@ and CLI discovery, not a second graph authority.
   turn or create a receipt merely because a subject is deferred.
   Evaluate admission readiness only along the planned prefix needed to fill
   the batch. Read-only availability plans retain their complete checked scope.
+  Input measurement reads each dependency again: one a writer edited or removed since
+  derivation, an RSS origin included, is `AuditInputChanged`, and admission leaves that
+  subject for a later plan; a retained RSS payload that differs stays an integrity error.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them in planned order and preserves the measured oversized status. Recording requires exact

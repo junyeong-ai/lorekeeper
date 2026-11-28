@@ -20,9 +20,11 @@ paths:
   subject again from the scan the recording checked against; a deferral changes the batch
   and plans it again, and before admission the loop plans once more if it refreshed only
   screened subjects since its last plan, since the others were read before its calls. A
-  subject whose candidates changed after it was read (a writer during another subject's
-  packet) is read again once from a fresh scan when its packet is prepared; a second change
-  in the run defers it. A subject removed from the vault during its own packet
+  subject whose candidates or inputs changed after it was read (a writer during another
+  subject's packet; `AuditScreeningChanged`, `AuditInputChanged`) is read again once from a
+  fresh scan when its packet is prepared; a second change in the run defers it, as does a
+  change found while its packet's decisions are recorded. A subject removed from the vault
+  during its own packet
   (`GraphError::AuditSubjectRemoved`) is deferred and leaves the batch, whose peers are
   planned again; an unreadable subject stays fatal. Drift never halts the loop.
   Every selected replan keeps only due subjects: an exact plan keeps current ones, but a
