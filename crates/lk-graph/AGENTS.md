@@ -148,8 +148,9 @@ and CLI discovery, not a second graph authority.
   Input measurement reads each dependency again: one a writer edited or removed since
   derivation, an RSS origin included, is `AuditInputChanged`, and admission leaves that
   subject for a later plan. An exact selection's measurement names the subject that read
-  it (`AuditSubjectInputChanged`) so its caller defers only that subject; a retained RSS
-  payload that differs stays an integrity error.
+  it (`AuditSubjectInputChanged`) so its caller defers only that subject. An immutable
+  capture a scoped review cites (a Markdown archive or a retained RSS payload) that is
+  missing or differs is an integrity error in measurement and in guards, never drift.
   Whole-input library planning defers individually oversized inputs without consuming
   a class turn, allowing later fitting work. Partitioned CLI/native planning admits
   them in planned order and preserves the measured oversized status. Recording requires exact

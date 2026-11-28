@@ -464,6 +464,16 @@ impl SourceChanged {
 impl std::error::Error for SourceChanged {}
 impl miette::Diagnostic for SourceChanged {}
 
+/// A capture read that differs from the bytes its inputs pinned: an editable page's drift
+/// (`SourceChanged`), or an integrity failure for an immutable capture.
+fn changed(authority: SemanticAuthority, detail: String) -> miette::Report {
+    if authority.is_editable() {
+        miette::Report::new(SourceChanged(detail))
+    } else {
+        miette::miette!("immutable {authority:?} capture differs from its pinned bytes; {detail}")
+    }
+}
+
 impl<'a> Capture<'a> {
     fn new(root: &'a Path, read: &lk_vault::ReadControl) -> Self {
         Self {
@@ -523,14 +533,7 @@ impl<'a> Capture<'a> {
         authority: SemanticAuthority,
     ) -> miette::Result<String> {
         self.read.check().into_diagnostic()?;
-        let removal_is_drift = expected_present
-            && matches!(
-                authority,
-                SemanticAuthority::Subject
-                    | SemanticAuthority::Context
-                    | SemanticAuthority::Page
-                    | SemanticAuthority::Review
-            );
+        let removal_is_drift = expected_present && authority.is_editable();
         let removed =
             || miette::Report::new(SourceChanged(format!("semantic source removed: {path}")));
         let absolute = lk_vault::page_path(self.root, Path::new(path)).into_diagnostic()?;
@@ -556,16 +559,18 @@ impl<'a> Capture<'a> {
         };
         let exact = file_revision(&raw);
         if expected_file.is_some_and(|expected| expected != exact) {
-            return Err(miette::Report::new(SourceChanged(format!(
-                "semantic source changed: {path}"
-            ))));
+            return Err(changed(
+                authority,
+                format!("semantic source changed: {path}"),
+            ));
         }
         if let Some(expected) = expected_authored {
             let parsed = lk_vault::parse_page(&raw).map_err(|e| miette::miette!("{path}: {e}"))?;
             if source_revision(&parsed) != expected {
-                return Err(miette::Report::new(SourceChanged(format!(
-                    "semantic authored source changed: {path}"
-                ))));
+                return Err(changed(
+                    authority,
+                    format!("semantic authored source changed: {path}"),
+                ));
             }
         }
         self.insert_page(relative, raw.clone(), authority)?;
@@ -579,10 +584,13 @@ impl<'a> Capture<'a> {
         authority: SemanticAuthority,
     ) -> miette::Result<()> {
         if self.pages.get(&relative).is_some_and(|prior| prior != &raw) {
-            return Err(miette::Report::new(SourceChanged(format!(
-                "semantic source changed during capture: {}",
-                relative.display()
-            ))));
+            return Err(changed(
+                authority,
+                format!(
+                    "semantic source changed during capture: {}",
+                    relative.display()
+                ),
+            ));
         }
         let address = lk_core::vault_path::address(&relative);
         if authority != SemanticAuthority::Context {
@@ -2631,6 +2639,28 @@ mod tests {
             error.downcast_ref::<SourceChanged>().is_none(),
             "a retained capture that disappears is lost evidence, not drift: {error}"
         );
+        write(&root, &candidate.path, &raw);
+        let stale = "0".repeat(candidate.file_revision.len());
+        for authority in [
+            SemanticAuthority::Subject,
+            SemanticAuthority::Context,
+            SemanticAuthority::RetainedInput,
+            SemanticAuthority::Page,
+            SemanticAuthority::RssEvent,
+            SemanticAuthority::Review,
+            SemanticAuthority::Archive,
+        ] {
+            let Err(error) =
+                Capture::new(&root, &read).page(&candidate.path, Some(&stale), None, authority)
+            else {
+                panic!("bytes other than the pinned ones capture nothing");
+            };
+            assert_eq!(
+                error.downcast_ref::<SourceChanged>().is_some(),
+                authority.is_editable(),
+                "{authority:?}: only an editable page that changed is drift: {error}"
+            );
+        }
     }
 
     #[test]

@@ -31,6 +31,18 @@ pub enum SemanticAuthority {
     Archive,
 }
 
+impl SemanticAuthority {
+    /// Whether a writer may edit or remove a page of this authority. Retained inputs, RSS event
+    /// payloads and evidence archives are immutable captures: one missing or changed is an
+    /// integrity failure, never input drift.
+    pub fn is_editable(self) -> bool {
+        match self {
+            Self::Subject | Self::Context | Self::Page | Self::Review => true,
+            Self::RetainedInput | Self::RssEvent | Self::Archive => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticResource {

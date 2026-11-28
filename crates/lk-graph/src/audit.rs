@@ -1185,12 +1185,14 @@ impl InputResources {
                     Some(selector) => {
                         self.retained_payload(root, selector, &evidence.recorded, archived)?
                     }
-                    None => self.page(
-                        root,
-                        &archived.path,
-                        Some(&archived.file_revision),
-                        archived.source_revision.as_deref(),
-                    )?,
+                    None => self
+                        .page(
+                            root,
+                            &archived.path,
+                            Some(&archived.file_revision),
+                            archived.source_revision.as_deref(),
+                        )
+                        .map_err(immutable_capture_failure)?,
                 }
             }
         }
@@ -3618,10 +3620,23 @@ fn guard_review_dependency_controlled(
             plan.require_absent(&evidence.recorded.path);
         }
         if let Some(archived) = &evidence.archived {
-            guard_page_input_controlled(plan, root, archived, read)?;
+            guard_page_input_controlled(plan, root, archived, read)
+                .map_err(immutable_capture_failure)?;
         }
     }
     Ok(())
+}
+
+/// A failure reading an immutable capture a scoped review cites (a Markdown archive or a
+/// retained RSS payload). A capture is never rewritten, so one missing or changed is an
+/// integrity failure to repair, never the input drift an edited page is.
+fn immutable_capture_failure(failure: GraphError) -> GraphError {
+    match failure {
+        GraphError::AuditInputChanged(path) => error(format!(
+            "immutable evidence capture is missing or changed: {path}"
+        )),
+        failure => failure,
+    }
 }
 
 /// An RSS citation's capture failure as the audit reads it: an origin page a writer removed,
@@ -6260,7 +6275,17 @@ mod tests {
                 &format!("{before}External edit.\n"),
             );
             assert!(session.apply(guarded).is_err());
-            assert!(measure_inputs(root.path(), &ready.candidates, u64::MAX).is_err());
+            let archived = input.path == dep.evidence[0].archived.as_ref().unwrap().path;
+            let measured = measure_inputs(root.path(), &ready.candidates, u64::MAX);
+            let guarded = guard_review_dependency(&mut MutationPlan::default(), root.path(), dep);
+            for refused in [measured.map(|_| ()), guarded] {
+                assert_eq!(
+                    matches!(refused, Err(GraphError::AuditInputChanged(_))),
+                    !archived,
+                    "an edited page is drift, a changed archive an integrity failure: {}",
+                    input.path
+                );
+            }
             write(root.path(), &input.path, &before);
         }
     }

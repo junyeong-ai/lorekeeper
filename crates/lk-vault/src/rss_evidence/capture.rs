@@ -85,6 +85,35 @@ impl Originals {
         Ok(Arc::clone(&manifest.value))
     }
 
+    /// Verifies the retained payload `selection` names against its own revision. The payload
+    /// is an immutable capture: one that is missing or changed is an integrity failure, whatever
+    /// its origin page declares now.
+    pub(super) fn verify_selected_payload(
+        &mut self,
+        selection: &RssEventSelection,
+    ) -> Result<(), VaultError> {
+        self.read.check()?;
+        if self.payloads.contains_key(&selection.revision) {
+            return Ok(());
+        }
+        let relative = format!("{RSS_ORIGINAL_STORE}/events/{}.json", selection.revision);
+        let path = crate::original_io::store_path(
+            &self.root,
+            Path::new(&relative),
+            RSS_ORIGINAL_STORE,
+            false,
+        )?;
+        let bytes =
+            crate::original_io::read_bytes_controlled(&path, MAX_RSS_EVENT_BYTES, &self.read)?;
+        lk_core::rss_original::verify_event_payload(
+            &bytes,
+            &selection.revision,
+            &selection.event_id,
+        )
+        .map_err(err)?;
+        self.read.check()
+    }
+
     pub(super) fn entry(
         &mut self,
         reference: &RssOriginalReference,
@@ -139,6 +168,17 @@ impl Originals {
         self.read.check()?;
         Ok(Arc::clone(&payload.raw))
     }
+}
+
+/// The original manifest an origin page's `source_record` declares, if it declares one.
+fn declared_manifest(page: &crate::VaultPage) -> Result<Option<RssOriginalReference>, VaultError> {
+    page.frontmatter
+        .get("source_record")
+        .and_then(|record| record.get(RSS_ORIGINAL_FIELD))
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(err)
 }
 
 #[derive(Clone)]
@@ -275,7 +315,21 @@ impl RssEvidenceCapture {
             .as_ref()
             .ok_or_else(|| err("expected RSS citation"))?;
         selector.validate(&citation.revision).map_err(err)?;
-        self.origin(&citation.path, None)?;
+        let selection = RssEventSelection {
+            event_id: selector.event_id.clone(),
+            revision: citation.revision.clone(),
+        };
+        // Before a removed or unbound origin is reported as drift, the immutable captures the
+        // citation names are verified, so drift never masks a lost payload or manifest. A
+        // declaration that does not parse names no capture; the binding checks judge it.
+        match self.origin(&citation.path, None) {
+            Ok(()) => {}
+            Err(VaultError::RssOriginChanged(path)) => {
+                self.originals.verify_selected_payload(&selection)?;
+                return Err(VaultError::RssOriginChanged(path));
+            }
+            Err(error) => return Err(error),
+        }
         let origin = &self.origins[&citation.path];
         let mut entries = crate::ExistingEntryResolver::new(&self.originals.root);
         if !has_selected_membership(
@@ -285,13 +339,13 @@ impl RssEvidenceCapture {
             citation,
             &self.originals.read,
         )? {
+            self.originals.verify_selected_payload(&selection)?;
+            if let Ok(Some(reference)) = declared_manifest(&origin.page) {
+                self.originals.manifest(&reference)?;
+            }
             self.originals.read.check()?;
             return Ok(false);
         }
-        let selection = RssEventSelection {
-            event_id: selector.event_id.clone(),
-            revision: citation.revision.clone(),
-        };
         let binding = find_binding(
             &mut entries,
             &origin.page,
@@ -335,16 +389,8 @@ impl RssEvidenceCapture {
             &selection,
             &self.originals.read,
         )?;
-        let current: RssOriginalReference = serde_json::from_value(
-            origin
-                .page
-                .frontmatter
-                .get("source_record")
-                .and_then(|record| record.get(RSS_ORIGINAL_FIELD))
-                .cloned()
-                .ok_or_else(|| err("missing current manifest"))?,
-        )
-        .map_err(err)?;
+        let current =
+            declared_manifest(&origin.page)?.ok_or_else(|| err("missing current manifest"))?;
         for reference in [&current, &binding.manifest] {
             self.originals.manifest(reference)?;
             self.dependencies.insert(
@@ -634,7 +680,7 @@ mod tests {
 
     #[test]
     fn a_removed_or_unbound_origin_is_a_changed_origin_and_a_missing_payload_is_not() {
-        let (root, _, citations, _) = fixture();
+        let (root, _, citations, reference) = fixture();
         let concept = Path::new("wiki/concepts/topic.md");
         let read = crate::ReadControl::default();
         let load = || {
@@ -655,7 +701,7 @@ mod tests {
             lost.is_err() && !matches!(lost, Err(VaultError::RssOriginChanged(_))),
             "a missing immutable payload is lost evidence: {lost:?}"
         );
-        std::fs::write(&payload, bytes).unwrap();
+        std::fs::write(&payload, &bytes).unwrap();
         let origin = root.path().join(&citations[0].path);
         let raw = std::fs::read_to_string(&origin).unwrap();
         std::fs::write(&origin, write_bindings(&raw, &[]).unwrap()).unwrap();
@@ -663,11 +709,31 @@ mod tests {
             load(),
             Err(VaultError::RssOriginChanged(path)) if path == citations[0].path
         ));
+        let manifest = root.path().join(&reference.manifest_path);
+        let manifest_bytes = std::fs::read(&manifest).unwrap();
+        for lost in [&payload, &manifest] {
+            let kept = std::fs::read(lost).unwrap();
+            std::fs::remove_file(lost).unwrap();
+            let unbound = load();
+            assert!(
+                unbound.is_err() && !matches!(unbound, Err(VaultError::RssOriginChanged(_))),
+                "an unbound origin does not mask a lost capture: {unbound:?}"
+            );
+            std::fs::write(lost, kept).unwrap();
+        }
         std::fs::remove_file(&origin).unwrap();
         assert!(matches!(
             load(),
             Err(VaultError::RssOriginChanged(path)) if path == citations[0].path
         ));
+        std::fs::remove_file(&payload).unwrap();
+        let removed = load();
+        assert!(
+            removed.is_err() && !matches!(removed, Err(VaultError::RssOriginChanged(_))),
+            "a removed origin does not mask a lost payload: {removed:?}"
+        );
+        std::fs::write(&payload, bytes).unwrap();
+        assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
     }
 
     #[cfg(unix)]

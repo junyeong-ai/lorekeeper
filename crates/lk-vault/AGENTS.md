@@ -114,7 +114,9 @@ canonical; SQLite navigation is derived.
   payload stands in only for a pin the review already recorded, because the payload proves
   the event, not its binding. Loading a citation whose origin page is gone or no longer
   binds the concept to that event is `VaultError::RssOriginChanged`, an edit of an editable
-  page; a missing manifest or payload stays an I/O failure. A retained payload counts only
+  page; a missing manifest or payload stays an I/O failure. The citation's payload (by its
+  revision) and the origin's declared manifest are verified before its bindings, so an
+  unbound or removed origin never masks a lost capture. A retained payload counts only
   as the selected event's canonical bytes. Evidence identity is the path with its selected event; one
   review cites an origin either as a page or by its events, never both, because review
   reports name evidence by path. Audit supplies the payload as the review's archived input.
