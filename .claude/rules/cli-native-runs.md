@@ -100,6 +100,10 @@ paths:
   inherited budget groups never resolve subjects or authorize captured-input reuse.
   Subjects the invocation deferred or found removed survive checkpoints as well
   (`AuditDeferrals`): admission and every selected plan of a later batch keep them out.
+  Every counted deferral is also retained there (`Runner::retain_deferral`: planning drift
+  skips, readiness holds, a second screening reopening), and an exact replan leaves a
+  retained subject out of its selection before deriving it, so a further change to that
+  subject cannot stop its peers' plan.
 - A newly retained semantic audit action or other verified progress can advance the
   next knowledge batch while the overall result stays incomplete. Operational
   rejections and cached refusals earn no progress and cannot sustain continuation.

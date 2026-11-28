@@ -132,6 +132,7 @@ impl Runner<'_> {
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
                         if let Some(deferred) = readiness.deferred().last().cloned() {
+                            self.retain_deferral(&deferred);
                             self.count_deferred_audit(deferred);
                         }
                         pending.remove(&index);
@@ -146,7 +147,10 @@ impl Runner<'_> {
                 // (discovery, screening) before the subject is captured.
                 if candidate.discovery.is_none() || screening_reopened(&candidate) {
                     if candidate.discovery.is_some() && !rescreened.insert(index) {
-                        self.deferred("audit inputs unstable", &candidate.path);
+                        self.defer_audit_inputs(
+                            &candidate,
+                            "screening reopened again after its rescreen".into(),
+                        );
                         pending.remove(&index);
                         continue;
                     }
@@ -616,6 +620,7 @@ impl Runner<'_> {
                     Ok(false) => {
                         self.deferred("audit input dependencies", &candidate.path);
                         if let Some(deferred) = readiness.deferred().last().cloned() {
+                            self.retain_deferral(&deferred);
                             self.count_deferred_audit(deferred);
                         }
                         for index in indices {

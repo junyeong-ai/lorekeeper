@@ -7178,9 +7178,14 @@ mod native {
         /// their peers are planned again.
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
             let (plan, readiness, checked_paths, deferred_paths) = loop {
+                // A subject the invocation deferred or found removed is not derived again, so a
+                // further change to it cannot stop its peers' plan.
                 let selection = paths
                     .iter()
-                    .filter(|path| !self.audit_deferrals.removed.contains(*path))
+                    .filter(|path| {
+                        !self.audit_deferrals.removed.contains(*path)
+                            && !self.audit_deferrals.deferred.contains_key(*path)
+                    })
                     .cloned()
                     .collect::<Vec<_>>();
                 if selection.is_empty() {
@@ -7213,13 +7218,7 @@ mod native {
                     self.config.graph.audit.max_input_bytes,
                     &mut |candidate| {
                         checked_paths.insert(candidate.path.clone());
-                        let available = if let Some(reason) =
-                            self.audit_deferrals.deferred.get(&candidate.path)
-                        {
-                            readiness.defer(candidate, vec![reason.clone()])
-                        } else {
-                            readiness.check(candidate)?
-                        };
+                        let available = readiness.check(candidate)?;
                         if !available {
                             deferred_paths.insert(candidate.path.clone());
                         }
@@ -7227,16 +7226,20 @@ mod native {
                     },
                     self.supervisor.read_control(),
                 );
-                // Each retry defers or removes another selected subject: a deferred one is not
-                // measured and a removed one leaves the selection.
+                // Each retry defers or removes another selected subject, which then leaves the
+                // selection.
                 match planned {
                     Ok(plan) => break (plan, readiness, checked_paths, deferred_paths),
                     Err(lk_graph::GraphError::AuditSubjectInputChanged { subject, input })
-                        if !self.audit_deferrals.deferred.contains_key(&subject) =>
+                        if selection.contains(&subject) =>
                     {
                         let reason = format!("its input {input} changed while it was planned");
                         self.deferred("audit inputs changed", format!("{subject}: {reason}"));
-                        self.audit_deferrals.deferred.insert(subject, reason);
+                        self.audit_deferrals
+                            .deferred
+                            .insert(subject.clone(), reason);
+                        self.audit_deferred_paths.insert(subject);
+                        self.result.audit_deferred_count = self.audit_deferred_paths.len();
                     }
                     Err(lk_graph::GraphError::AuditSubjectRemoved(path))
                         if selection.contains(&path) =>
@@ -7377,10 +7380,11 @@ mod native {
             self.result.audit_deferred_count = self.audit_deferred_paths.len();
         }
 
-        /// Counts the subjects `plan` skipped because an input changed while it read them.
+        /// Counts the subjects `plan` skipped because an input changed while it read them, and
+        /// keeps them out of later plans of the invocation.
         fn count_input_changed(&mut self, plan: &lk_graph::audit::AuditPlan) {
             for drift in &plan.input_changed {
-                self.count_deferred_audit(DeferredAudit {
+                let deferred = DeferredAudit {
                     kind: drift.kind,
                     path: drift.path.clone(),
                     file_revision: drift.file_revision.clone(),
@@ -7389,8 +7393,19 @@ mod native {
                         "its input {} changed while it was planned",
                         drift.input
                     )],
-                });
+                };
+                self.retain_deferral(&deferred);
+                self.count_deferred_audit(deferred);
             }
+        }
+
+        /// Keeps `deferred`'s subject out of every later plan and admission of the invocation
+        /// (`AuditDeferrals`), with its first reason.
+        fn retain_deferral(&mut self, deferred: &DeferredAudit) {
+            self.audit_deferrals
+                .deferred
+                .entry(deferred.path.clone())
+                .or_insert_with(|| deferred.reasons.join("; "));
         }
 
         fn defer_audit_screening(
