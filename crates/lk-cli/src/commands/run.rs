@@ -1815,11 +1815,19 @@ mod native {
                 Ok(result) if result.success => {
                     self.record(name, StageState::Completed, result.detail)
                 }
+                // The stage keeps the error the child reported, which decided its kind, ahead of
+                // its process status.
                 Ok(result) if self.lease.is_some() => {
-                    let kind = report
-                        .and_then(crate::commands::drift::load_child_failure)
-                        .map_or(FailureKind::Fault, |failure| failure.kind);
-                    self.halt_as(name, kind, result.detail)
+                    match report.and_then(crate::commands::drift::load_child_failure) {
+                        Some(failure) => {
+                            let detail = match result.detail {
+                                Some(status) => format!("{}; {status}", failure.detail),
+                                None => failure.detail,
+                            };
+                            self.halt_as(name, failure.kind, Some(detail))
+                        }
+                        None => self.halt_as(name, FailureKind::Fault, result.detail),
+                    }
                 }
                 Ok(result) => self.record(name, StageState::Failed, result.detail),
                 Err(error) => self.failure(name, error),

@@ -22,8 +22,12 @@ are not token counts or billed cost, and unobserved or inapplicable measurements
 `ok` is false for a halted controller and for known incomplete states; `halted`
 distinguishes the two. A halted job's `halt_kind` is `fault` or `inputs-changed`: a fault
 pauses a scheduled operation, while `inputs-changed` means a writer edited or removed
-inputs while the job read them, so the batch ended with its work retained, nothing
-paused, and the next run plans again. A halted controller starts no further semantic or mutating
+inputs while the job read them, so the batch ended with its work retained and the next
+run plans again. Such a halt pauses nothing unless it is the third scheduled run of the
+operation in a row that drift ended before any progress: that job reports `halt_kind:
+inputs-changed` together with `automation.stop: paused`, and `lore status` names the
+pause stage `repeated input drift`. A failed child stage's `detail` is the error that
+child reported, which decided its kind. A halted controller starts no further semantic or mutating
 stage; read-only final checks still report preserved state when configuration is
 current. An incomplete job can still publish independent work and verify selected
 audits; neither field implies full-corpus semantic coverage. A recorded observation or
