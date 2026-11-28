@@ -220,7 +220,15 @@ impl InputAvailability {
             .read_control()
             .check()
             .map_err(lk_graph::GraphError::from)?;
-        let mut reasons = captured.map_err(|error| lk_graph::GraphError::Io(error.to_string()))?;
+        let mut reasons = match captured {
+            Ok(reasons) => reasons,
+            // A page its inputs read was removed after it was derived: this subject waits for a
+            // later plan, and its peers stay available.
+            Err(error) if error.downcast_ref::<super::work::SourceChanged>().is_some() => {
+                vec![error.to_string()]
+            }
+            Err(error) => return Err(lk_graph::GraphError::Io(error.to_string())),
+        };
         if let Some(progress) = candidate
             .discovery
             .as_ref()

@@ -1253,6 +1253,53 @@ fn a_subject_settled_during_another_subjects_discovery_is_not_assessed_again() {
 }
 
 #[test]
+fn a_subject_removed_during_another_subjects_discovery_leaves_the_batch() {
+    let remove = r#"if request.get('kind')=='audit-discovery':
+    remove=root/'remove-during-discovery'
+    if remove.exists():
+        (root/'vault'/remove.read_text()).unlink()
+        remove.unlink()
+"#;
+    let host = RECORD_AUDIT.replacen(
+        "if request.get('kind')=='audit-discovery':\n",
+        &format!("{remove}if request.get('kind')=='audit-discovery':\n"),
+        1,
+    );
+    assert_ne!(host, RECORD_AUDIT);
+    let fixture = Fixture::new("codex", 30, &host);
+    let config = std::fs::read_to_string(&fixture.config).unwrap()
+        + "graph:\n  audit:\n    batch_size: 2\n    subjects: [concept, document]\n";
+    std::fs::write(&fixture.config, config).unwrap();
+    write_audit_concept(&fixture, "removed");
+    let concepts = fixture.root().join("vault/wiki/concepts");
+    std::fs::write(
+        concepts.join("undiscovered.md"),
+        include_str!("../behaviour/corpus/small/vault/wiki/concepts/unlinked-note.md")
+            .replace("Unlinked note", "undiscovered")
+            .replace("unlinked-note", "undiscovered"),
+    )
+    .unwrap();
+    let removed = "wiki/concepts/removed.md";
+    std::fs::write(fixture.root().join("remove-during-discovery"), removed).unwrap();
+
+    let (_, report) = fixture.run("knowledge");
+    assert!(
+        !fixture.root().join("remove-during-discovery").exists(),
+        "the discovery ran: {report}"
+    );
+    assert_eq!(report["halted"], false, "{report}");
+    let assessed: Vec<String> =
+        serde_json::from_slice(&std::fs::read(fixture.root().join("maintain-command")).unwrap())
+            .unwrap();
+    assert_eq!(
+        assessed,
+        ["wiki/concepts/undiscovered.md"],
+        "the removed subject leaves the batch and its peer is assessed: {report}"
+    );
+    assert_eq!(report["audit_deferred_count"], 1, "{report}");
+}
+
+#[test]
 fn a_subject_removed_during_its_whole_assessment_ends_the_batch_without_a_pause() {
     let remove = r#"if request.get('schema')=='native-audit-results-v1':
     remove=root/'remove-during-assessment'

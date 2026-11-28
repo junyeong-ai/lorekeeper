@@ -33,10 +33,11 @@ pub enum GraphError {
     /// edited or removed after the subject was derived: that subject's planning drift.
     #[error("audit subject {subject} changed while it was planned: {input}")]
     AuditSubjectInputChanged { subject: String, input: String },
-    /// An audit subject a writer removed from the vault after it was planned: a screening
-    /// reply's subject (removed or retyped after its packet was issued) or a batch slot whose
-    /// page is gone. The path is the subject as it was planned.
-    #[error("audit subject left the vault after it was planned: {0}")]
+    /// An audit subject no page of the vault holds: a writer removed it after it was planned
+    /// (a screening reply's subject removed or retyped after its packet was issued, a batch
+    /// slot or an exact selection whose page is gone), or an explicit selection names no page.
+    /// The path is the subject as it was selected.
+    #[error("audit subject is not in the vault: {0}")]
     AuditSubjectRemoved(String),
     #[error(
         "audit screening requires {required} {boundary} bytes, above the complete configured bound {maximum}"

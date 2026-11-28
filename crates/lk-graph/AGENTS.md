@@ -158,7 +158,11 @@ and CLI discovery, not a second graph authority.
   canonical assessments against current semantic dependencies, independent of disposable
   Work or current admission limits. Changed assessments remain pending while current peers
   retain completion; unreadable or invalid state remains an error.
-  Exact selections retain their complete requested scope.
+  Exact selections retain their complete requested scope. A selected address no scanned
+  page holds is `AuditSubjectRemoved`, and a selected subject whose reread differs from
+  the scan is `AuditSubjectInputChanged`; a page that is not an audit subject stays an
+  invalid selection. An empty selection names the corpus, so a caller whose selection
+  emptied plans `AuditPlan::empty_selection`.
   Selected readiness planning preserves that coverage accounting while measuring only
   ready candidates; it never persists a subset-local pending order or expands the batch.
 - Scope reviews by their declared subjects, the subject's `knowledge_review` pointer,

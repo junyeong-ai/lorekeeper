@@ -931,6 +931,28 @@ impl AuditCoverage {
 }
 
 impl AuditPlan {
+    /// The plan of an exact selection none of whose subjects remain: it plans nothing, where
+    /// an empty selection passed to the planners would name the corpus.
+    pub fn empty_selection(limit: usize, max_input_bytes: u64) -> Result<Self, GraphError> {
+        Ok(Self {
+            coverage_scope: AuditCoverageScope::Selection,
+            candidates: Vec::new(),
+            blocked: Vec::new(),
+            blocked_count: 0,
+            total: 0,
+            reviewed_current: 0,
+            follow_up_current: 0,
+            unreviewed: 0,
+            changed: 0,
+            counts_by_kind: BTreeMap::new(),
+            excluded_by_kind: BTreeMap::new(),
+            min_sources: 0,
+            below_min_sources: AuditCounts::default(),
+            limit,
+            input: InputResources::default().bound(max_input_bytes)?,
+        })
+    }
+
     pub fn coverage(&self) -> AuditCoverage {
         AuditCoverage::build(
             self.counts_by_kind.clone(),
@@ -1839,9 +1861,7 @@ fn capture_review_dependency(
         .map_err(error)?
         != Some(serde_json::to_value(metadata).map_err(error)?)
     {
-        return Err(error(format!(
-            "review changed during audit planning: {path}"
-        )));
+        return Err(GraphError::AuditInputChanged(path.to_owned()));
     }
     for citation in &metadata.evidence {
         read.check().map_err(GraphError::from)?;
@@ -2395,13 +2415,26 @@ fn inputs_from_evidence(
     for page in pages.iter().filter(|page| selected(&page.path)) {
         let kind = kinds[&page.path];
         read.check().map_err(GraphError::from)?;
-        let raw = read
-            .read_to_string(&lk_vault::page_path(root, &page.path).map_err(error)?)
-            .map_err(GraphError::from)?;
+        let subject = page.path.to_string_lossy().into_owned();
+        let raw = match lk_vault::page_path(root, &page.path)
+            .map_err(lk_vault::VaultError::Io)
+            .and_then(|path| read.read_to_string(&path))
+        {
+            Ok(raw) => raw,
+            Err(lk_vault::VaultError::Io(failure))
+                if failure.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Err(GraphError::AuditSubjectRemoved(subject));
+            }
+            Err(failure) => return Err(failure.into()),
+        };
         let parsed = lk_vault::parse_page(&raw).map_err(error)?;
         let revision = source_revision(&parsed);
         if page.revision.as_deref() != Some(&revision) {
-            return Err(error("subject changed during audit planning"));
+            return Err(GraphError::AuditSubjectInputChanged {
+                input: subject.clone(),
+                subject,
+            });
         }
         let mut related_pages = Vec::new();
         for related in page
@@ -2884,10 +2917,14 @@ fn load_inputs(
         &Scope::Selection(unique),
         read,
     )?;
-    select_candidates(&candidates, selection)
+    select_candidates(pages, &candidates, selection)
 }
 
+/// The candidates of an exact `selection`, in its order. A selected address no scanned page
+/// holds is `GraphError::AuditSubjectRemoved`; one held by a page that is not an audit subject
+/// is an invalid selection.
 fn select_candidates(
+    pages: &[ScannedPage],
     candidates: &[AuditCandidate],
     selection: &[String],
 ) -> Result<Vec<AuditCandidate>, GraphError> {
@@ -2901,11 +2938,16 @@ fn select_candidates(
     selection
         .iter()
         .map(|path| {
-            by_path
-                .get(path.as_str())
-                .copied()
-                .cloned()
-                .ok_or_else(|| error("audit selection is not an exact concept or document address"))
+            if let Some(candidate) = by_path.get(path.as_str()) {
+                return Ok((*candidate).clone());
+            }
+            if pages.iter().any(|page| page.path == Path::new(path)) {
+                Err(error(
+                    "audit selection is not an exact concept or document address",
+                ))
+            } else {
+                Err(GraphError::AuditSubjectRemoved(path.clone()))
+            }
         })
         .collect()
 }
@@ -3360,7 +3402,7 @@ fn plan_selected_inner(
     }
     let below_min_sources = scope.below_min_sources(&candidates);
     let total = candidates.len() - below_min_sources.total;
-    let selected = select_candidates(&candidates, selection)?;
+    let selected = select_candidates(pages, &candidates, selection)?;
     let counts_by_kind = scope.counts(&candidates);
     let excluded_by_kind = scope.excluded(&subject_kinds(pages, dirs));
     let pending = pending(candidates, &receipts);
@@ -6747,6 +6789,48 @@ mod tests {
         drifted(root.path());
         std::fs::remove_file(root.path().join("daily/report.md")).unwrap();
         drifted(root.path());
+    }
+
+    #[test]
+    fn a_selected_subject_removed_or_edited_after_the_scan_is_that_subjects_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = VaultDirs::default();
+        let concept = "---\ntype: concept\ntitle: A\n---\n## Synthesis\nA claim.\n";
+        write(root.path(), "wiki/concepts/a.md", concept);
+        write(root.path(), "notes/plain.md", "A plain note.\n");
+        let selection = ["wiki/concepts/a.md".to_owned()];
+        let pages = scan(root.path());
+        write(
+            root.path(),
+            "wiki/concepts/a.md",
+            "---\ntype: concept\ntitle: A\n---\n## Synthesis\nAn edited claim.\n",
+        );
+        assert!(matches!(
+            plan_selected(root.path(), &dirs, *ALL, &pages, 1, &selection, u64::MAX),
+            Err(GraphError::AuditSubjectInputChanged { subject, input })
+                if subject == selection[0] && input == selection[0]
+        ));
+        std::fs::remove_file(root.path().join(&selection[0])).unwrap();
+        let pages = scan(root.path());
+        assert!(matches!(
+            plan_selected(root.path(), &dirs, *ALL, &pages, 1, &selection, u64::MAX),
+            Err(GraphError::AuditSubjectRemoved(path)) if path == selection[0]
+        ));
+        assert!(matches!(
+            plan_selected(
+                root.path(),
+                &dirs,
+                *ALL,
+                &pages,
+                1,
+                &["notes/plain.md".into()],
+                u64::MAX
+            ),
+            Err(GraphError::Io(_))
+        ));
+        let empty = AuditPlan::empty_selection(3, u64::MAX).unwrap();
+        assert!(empty.candidates.is_empty());
+        assert_eq!(empty.coverage_scope, AuditCoverageScope::Selection);
     }
 
     #[test]

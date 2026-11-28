@@ -55,7 +55,8 @@ impl Runner<'_> {
                     // peers are resolved again without it.
                     Some(lk_graph::GraphError::AuditSubjectRemoved(path)) => {
                         let path = path.clone();
-                        self.deferred("audit subject removed", &path);
+                        let planned = originals.iter().find(|original| original.path == path);
+                        self.defer_removed_audit_subject(&path, planned);
                         pending.retain(|index| batch[*index].path != path);
                         continue;
                     }

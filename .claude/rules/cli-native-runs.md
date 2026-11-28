@@ -33,7 +33,10 @@ paths:
   subject a writer assessed since admission (a manual `wiki audit-record` during another
   subject's call) is settled and no route sends it again; one whose input changed while
   the selection was measured (`AuditSubjectInputChanged`) is deferred for the run and its
-  peers are planned again. The run plans again until every
+  peers are planned again. A selected subject a writer removed (`AuditSubjectRemoved`,
+  from planning, an inventory refresh or a recording) leaves the run's selection and counts
+  as deferred; a selection that empties plans nothing, never the corpus. Readiness that
+  finds an input page removed defers only that subject. The run plans again until every
   remaining subject has current discovery, so a recipe an edit invalidated is discovered
   before either audit route.
   Deferral counts track encountered subject paths independently of bounded details.

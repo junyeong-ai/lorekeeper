@@ -1080,6 +1080,9 @@ mod native {
         /// The drains whose first turn this run already decided (`take_recovery_turn`).
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_screening_deferred: std::collections::BTreeMap<String, String>,
+        /// Selected audit subjects this run found removed from the vault; no later plan of
+        /// the run selects them.
+        audit_removed: std::collections::BTreeSet<String>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
         queue_turn: Option<QueueTurn>,
@@ -7168,13 +7171,28 @@ mod native {
             Ok(plan.coverage())
         }
 
-        /// The plan of the selected `paths` that are still due. An exact plan keeps current
-        /// subjects, but one a writer assessed since admission (a manual `wiki audit-record`
-        /// during another subject's call) is settled: no audit route sends it again. A selected
-        /// subject whose input a writer changed while the selection was measured stays deferred
-        /// for the run, and its peers are planned again.
+        /// The plan of the exact selection `paths` that is still due. Subjects this run found
+        /// removed from the vault leave the selection, and an emptied selection plans nothing,
+        /// never the corpus an empty selection names to the planners. An exact plan keeps
+        /// current subjects, but one a writer assessed since admission (a manual
+        /// `wiki audit-record` during another subject's call) is settled: no audit route sends
+        /// it again. A selected subject whose input a writer changed while the selection was
+        /// measured stays deferred for the run, one a writer removed leaves the selection, and
+        /// their peers are planned again.
         fn audit_plan(&mut self, paths: &[String]) -> miette::Result<lk_graph::audit::AuditPlan> {
             let (plan, readiness, checked_paths, deferred_paths) = loop {
+                let selection = paths
+                    .iter()
+                    .filter(|path| !self.audit_removed.contains(*path))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selection.is_empty() {
+                    return lk_graph::audit::AuditPlan::empty_selection(
+                        self.config.graph.audit.batch_size,
+                        self.config.graph.audit.max_input_bytes,
+                    )
+                    .map_err(typed_error);
+                }
                 let pages = lk_graph::scan::scan_vault_controlled(
                     &self.root,
                     self.config.graph.scope.follow_links,
@@ -7183,7 +7201,7 @@ mod native {
                 .map_err(typed_error)?;
                 let mut readiness =
                     InputAvailability::load_controlled(&self.root, self.supervisor.read_control())?;
-                let mut checked_paths = paths
+                let mut checked_paths = selection
                     .iter()
                     .cloned()
                     .collect::<std::collections::BTreeSet<_>>();
@@ -7194,7 +7212,7 @@ mod native {
                     lk_graph::audit::AuditCorpus::from(&self.config.graph.audit),
                     &pages,
                     self.config.graph.audit.batch_size,
-                    paths,
+                    &selection,
                     self.config.graph.audit.max_input_bytes,
                     &mut |candidate| {
                         checked_paths.insert(candidate.path.clone());
@@ -7212,10 +7230,10 @@ mod native {
                     },
                     self.supervisor.read_control(),
                 );
+                // Each retry defers or removes another selected subject: a deferred one is not
+                // measured and a removed one leaves the selection.
                 match planned {
                     Ok(plan) => break (plan, readiness, checked_paths, deferred_paths),
-                    // A subject the run already defers is not measured, so each retry defers
-                    // another selected subject.
                     Err(lk_graph::GraphError::AuditSubjectInputChanged { subject, input })
                         if !self.audit_screening_deferred.contains_key(&subject) =>
                     {
@@ -7223,19 +7241,19 @@ mod native {
                         self.deferred("audit inputs changed", format!("{subject}: {reason}"));
                         self.audit_screening_deferred.insert(subject, reason);
                     }
+                    Err(lk_graph::GraphError::AuditSubjectRemoved(path))
+                        if selection.contains(&path) =>
+                    {
+                        self.defer_removed_audit_subject(&path, None);
+                    }
                     Err(e) => return Err(typed_error(e)),
                 }
             };
-            if paths.is_empty() {
-                self.audit_deferred_paths.clear();
-                self.result.audit_deferred.clear();
-            } else {
-                self.audit_deferred_paths
-                    .retain(|path| !checked_paths.contains(path));
-                self.result
-                    .audit_deferred
-                    .retain(|item| !checked_paths.contains(&item.path));
-            }
+            self.audit_deferred_paths
+                .retain(|path| !checked_paths.contains(path));
+            self.result
+                .audit_deferred
+                .retain(|item| !checked_paths.contains(&item.path));
             self.audit_deferred_paths.extend(deferred_paths);
             self.result
                 .audit_deferred
@@ -7248,6 +7266,31 @@ mod native {
             plan.candidates
                 .retain(|candidate| candidate.reason != lk_graph::audit::AuditReason::Current);
             Ok(plan)
+        }
+
+        /// Records that `path`, a selected audit subject, left the vault after it was planned:
+        /// no later plan of this run selects it, and the report counts it with the deferred
+        /// subjects, with its `planned` identity when the caller holds one.
+        fn defer_removed_audit_subject(
+            &mut self,
+            path: &str,
+            planned: Option<&lk_graph::audit::AuditCandidate>,
+        ) {
+            self.audit_removed.insert(path.to_owned());
+            self.deferred("audit subject removed", path);
+            if self.audit_deferred_paths.insert(path.to_owned())
+                && let Some(candidate) = planned
+                && self.result.audit_deferred.len() < super::super::audit::MAX_DEFERRED_DETAILS
+            {
+                self.result.audit_deferred.push(DeferredAudit {
+                    kind: candidate.kind,
+                    path: candidate.path.clone(),
+                    file_revision: candidate.file_revision.clone(),
+                    input_revision: candidate.input_revision.clone(),
+                    reasons: vec!["the subject left the vault after it was planned".into()],
+                });
+            }
+            self.result.audit_deferred_count = self.audit_deferred_paths.len();
         }
 
         fn audit_screening_limits(
@@ -7348,9 +7391,7 @@ mod native {
             paths: &[String],
             mut plan: lk_graph::audit::AuditPlan,
         ) -> Option<lk_graph::audit::AuditPlan> {
-            // The selection this loop plans: a subject removed from the vault leaves it.
-            let mut selection = paths.to_vec();
-            let paths = &mut selection;
+            // A subject removed from the vault leaves the selection (`audit_plan`).
             let limits = match self.audit_screening_limits() {
                 Ok(limits) => limits,
                 Err(error) => {
@@ -7521,6 +7562,10 @@ mod native {
                     })();
                     let screened = match result {
                         Ok(pages) => Some(pages),
+                        Err(lk_graph::GraphError::AuditSubjectRemoved(_)) => {
+                            self.defer_removed_audit_subject(&candidate.path, Some(&candidate));
+                            None
+                        }
                         Err(
                             lk_graph::GraphError::AuditScreeningChanged
                             | lk_graph::GraphError::AuditInputChanged(_),
@@ -7729,11 +7774,7 @@ mod native {
                     }
                     Err(lk_graph::GraphError::AuditSubjectRemoved(_)) => {
                         metrics.outcome = WorkOutcome::InputsChanged;
-                        self.defer_audit_screening(
-                            &candidate,
-                            "the subject left the vault during its packet".into(),
-                        );
-                        paths.retain(|path| *path != candidate.path);
+                        self.defer_removed_audit_subject(&candidate.path, Some(&candidate));
                         None
                     }
                     Err(error) => {
@@ -8689,6 +8730,7 @@ mod native {
             host_probes: HostProbes::default(),
             recovery_turns: std::collections::BTreeSet::new(),
             audit_screening_deferred: std::collections::BTreeMap::new(),
+            audit_removed: std::collections::BTreeSet::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
             queue_turn: None,

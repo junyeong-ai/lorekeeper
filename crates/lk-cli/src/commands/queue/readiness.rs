@@ -177,14 +177,31 @@ impl InputReadiness {
         self.read.check().into_diagnostic()?;
         let full = lk_vault::page_path(root, Path::new(path))
             .map_err(|error| miette::miette!("{error}"))?;
-        let owner = full
-            .canonicalize()
-            .map_err(|error| miette::miette!("{path}: {error}"))?;
+        // The page was derived as an input of the subject being checked; its absence now is
+        // that subject's drift (`work::SourceChanged`), never a fault of the vault.
+        let removed = || {
+            miette::Report::new(crate::commands::work::SourceChanged::new(format!(
+                "{path} was removed after the inputs naming it were derived"
+            )))
+        };
+        let owner = match full.canonicalize() {
+            Ok(owner) => owner,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(removed()),
+            Err(error) => return Err(miette::miette!("{path}: {error}")),
+        };
         self.read.check().into_diagnostic()?;
         if let Some(page) = self.pages.get(&owner) {
             return Ok(page.reasons.clone());
         }
-        let raw = read_page(&full, &self.read).into_diagnostic()?;
+        let raw = match read_page(&full, &self.read) {
+            Ok(raw) => raw,
+            Err(lk_vault::VaultError::Io(error))
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return Err(removed());
+            }
+            Err(error) => return Err(error).into_diagnostic(),
+        };
         let page =
             lk_vault::parse_page(&raw).map_err(|error| miette::miette!("{path}: {error}"))?;
         let mut reasons = BTreeSet::new();
