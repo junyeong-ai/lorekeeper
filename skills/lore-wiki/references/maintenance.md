@@ -153,7 +153,11 @@ The final audit reads every admitted body; screening creates no citation or comp
    `readiness.ready` identifies ready subjects. Deferred details include exact input
    revisions and reasons, at most 100 entries with an exact `deferred_count` for the
    checked scope. `scope: encountered` describes automatic selection, not the whole
-   corpus; `scope: selection` describes explicit subjects. This read-only preview
+   corpus; `scope: selection` describes explicit subjects. An automatic plan that skipped a
+   subject because a page its inputs read changed while the plan read it lists it in
+   `input_changed`, which is omitted when empty. Each entry names the subject's `kind`,
+   `path`, `file_revision` and `input_revision` as planned, and the changed `input` page.
+   Such a subject is not part of this batch; a later plan reads it again. This read-only preview
    does not reserve turns, acquire a workflow, authenticate, run structural preflight
    or certify discovery/evidence reading; publication rechecks readiness. Omit `--ready` when only the original assessment-coverage plan is needed.
    Check `input.status` before reading: `oversized` retains the exact candidates
