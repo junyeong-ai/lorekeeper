@@ -358,6 +358,8 @@ mod native {
     struct ObservationTurn {
         /// The queue target this Work answers; audit Work replans through subject allowances.
         target: Option<String>,
+        /// The bounded audit subject (its job key) this Work answers, replanned by its route.
+        audit_subject: Option<String>,
         work_id: String,
         node_id: String,
         completed: usize,
@@ -1087,6 +1089,9 @@ mod native {
         recovery_turns: std::collections::BTreeSet<crate::commands::work::host::ProbeScope>,
         audit_deferred_paths: std::collections::BTreeSet<String>,
         audit_batch: Option<Vec<lk_graph::audit::AuditCandidate>>,
+        /// Bounded audit subjects whose wave replies found their Work's inputs changed; the
+        /// bounded route replans each as that subject's own step would.
+        audit_wave_replans: std::collections::BTreeSet<String>,
         queue_turn: Option<QueueTurn>,
         /// The audit subject selected for a single bounded step and the keys it was ordered
         /// among; its cursor turn is reserved with its call (`reserve_turn`).
@@ -3393,6 +3398,7 @@ mod native {
                 );
                 turns.push(ObservationTurn {
                     target: None,
+                    audit_subject: Some(target.clone()),
                     work_id: id.clone(),
                     node_id,
                     completed: work.completed,
@@ -3729,6 +3735,8 @@ mod native {
             let mut usable = false;
             let mut failed = false;
             let mut replanned = false;
+            // Replies to one Work share its fresh validation, which is charged once.
+            let mut charged = std::collections::BTreeSet::new();
             if !returned.is_empty() {
                 match recorded {
                     Some((Ok(recorded), shared_ms)) => {
@@ -3750,12 +3758,17 @@ mod native {
                                     StageState::Skipped,
                                     Some(error.to_string()),
                                 );
-                                if let Some(target) = &turn.target
-                                    && !self
-                                        .finalization_replans
-                                        .try_spend(target, FINALIZATION_CHANGED_AGAIN)
-                                {
-                                    self.deferred("finalization inputs unstable", target);
+                                if charged.insert(turn.work_id.clone()) {
+                                    if let Some(target) = &turn.target
+                                        && !self
+                                            .finalization_replans
+                                            .try_spend(target, FINALIZATION_CHANGED_AGAIN)
+                                    {
+                                        self.deferred("finalization inputs unstable", target);
+                                    }
+                                    if let Some(subject) = &turn.audit_subject {
+                                        self.audit_wave_replans.insert(subject.clone());
+                                    }
                                 }
                                 self.queue_replan = QueueReplan::Invalidate;
                                 self.queue_admitted.clear();
@@ -5428,6 +5441,7 @@ mod native {
                         metrics.preparation_duration_ms = preparation_duration_ms.take();
                         QueueReadTurn::Evidence(ObservationTurn {
                             target: Some(target.clone()),
+                            audit_subject: None,
                             work_id: id.clone(),
                             node_id,
                             completed: work.completed,
@@ -8436,28 +8450,44 @@ mod native {
                     };
                     // The turn is chosen without writing the cursor; it is reserved only once
                     // its calls are prepared and admitted.
-                    let selected =
-                        match scheduler::order(&self.root, scheduler::Stage::Audit, &keys) {
-                            Ok(order) => match order.into_iter().next() {
-                                Some(selected) => selected,
-                                None => break,
-                            },
-                            Err(error) => {
-                                self.failure("audit scheduling", error);
+                    // A wave reply that found a subject's Work inputs changed replans that
+                    // subject, spending its allowance once, as its own step would.
+                    let wave_replan = loop {
+                        match self.audit_wave_replans.pop_first() {
+                            Some(subject) if jobs.contains_key(&subject) => break Some(subject),
+                            Some(_) => continue,
+                            None => break None,
+                        }
+                    };
+                    let (selected, step) = if let Some(subject) = wave_replan {
+                        (subject, WorkStep::Replan)
+                    } else {
+                        let selected =
+                            match scheduler::order(&self.root, scheduler::Stage::Audit, &keys) {
+                                Ok(order) => match order.into_iter().next() {
+                                    Some(selected) => selected,
+                                    None => break,
+                                },
+                                Err(error) => {
+                                    self.failure("audit scheduling", error);
+                                    return false;
+                                }
+                            };
+                        if let Some(completed) =
+                            self.bounded_audit_wave(&selected, &jobs, &keys).await
+                        {
+                            if !completed {
                                 return false;
                             }
-                        };
-                    let work = &jobs[&selected];
-                    if let Some(completed) = self.bounded_audit_wave(&selected, &jobs, &keys).await
-                    {
-                        if !completed {
-                            return false;
+                            continue;
                         }
-                        continue;
-                    }
-                    self.audit_turn = Some((keys.clone(), selected.clone()));
-                    let step = self.bounded_step(work, ExecutionStage::Audit).await;
-                    self.audit_turn = None;
+                        self.audit_turn = Some((keys.clone(), selected.clone()));
+                        let step = self
+                            .bounded_step(&jobs[&selected], ExecutionStage::Audit)
+                            .await;
+                        self.audit_turn = None;
+                        (selected, step)
+                    };
                     match step {
                         WorkStep::Pending => continue,
                         WorkStep::Deferred(reason) => {
@@ -8555,7 +8585,7 @@ mod native {
                     let assessment = self
                         .root
                         .join(".lorekeeper/work")
-                        .join(work)
+                        .join(&jobs[&selected])
                         .join("assessment.json");
                     let assessment = match assessment.to_str() {
                         Some(path) => path.to_owned(),
@@ -8807,6 +8837,7 @@ mod native {
             recovery_turns: std::collections::BTreeSet::new(),
             audit_deferred_paths: std::collections::BTreeSet::new(),
             audit_batch: None,
+            audit_wave_replans: std::collections::BTreeSet::new(),
             queue_turn: None,
             audit_turn: None,
             reserved_targets: Vec::new(),
