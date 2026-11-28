@@ -446,7 +446,7 @@ struct Capture<'a> {
 /// no longer exists: a writer edited or removed it after the inputs naming it were derived. The capture describes nothing current; callers that can wait treat it as drift,
 /// never as a fault of the vault. A retained capture (an RSS payload, an archive, a retained
 /// input) that disappears, and any other failure to read a page, are not drift.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::commands) struct SourceChanged(String);
 
 impl std::fmt::Display for SourceChanged {

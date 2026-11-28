@@ -3031,6 +3031,9 @@ fn fresh_validation_failure(error: &miette::Report) -> miette::Report {
     if let Some(held) = error.downcast_ref::<super::queue::SynthesisHeld>() {
         return miette::Report::new(held.clone());
     }
+    if let Some(changed) = error.downcast_ref::<SourceChanged>() {
+        return miette::Report::new(changed.clone());
+    }
     miette::miette!("fresh work validation failed: {error:#}")
 }
 
@@ -6137,6 +6140,21 @@ mod tests {
             "the cards are shown within their byte allowance: {shown} of {cards}"
         );
         assert_eq!(disclosed["omitted"], cards - shown);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fresh_validation_keeps_a_changed_source_typed_as_drift() {
+        let failure = fresh_validation_failure(&miette::Report::new(SourceChanged::new(
+            "semantic source removed: wiki/concepts/a.md",
+        )));
+        assert!(
+            failure.downcast_ref::<SourceChanged>().is_some(),
+            "{failure}"
+        );
+        assert!(crate::commands::queue::application::is_work_input_changed(
+            &failure
+        ));
     }
 
     #[cfg(unix)]
