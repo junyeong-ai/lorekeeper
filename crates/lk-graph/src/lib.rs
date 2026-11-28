@@ -74,6 +74,10 @@ pub enum GraphError {
     },
     #[error(transparent)]
     Unresynthesizable(#[from] backlinks::Unresynthesizable),
+    /// A callback its caller supplied failed with an error the caller keeps; `token`, which
+    /// the caller chose, tells it which. `detail` is that error's message.
+    #[error("{detail}")]
+    CallbackFailed { token: u64, detail: String },
     /// A vault read or publication failure, kept typed so its caller can tell a guard that
     /// found a page changed (`VaultError::MutationConflict`) from a fault.
     #[error(transparent)]

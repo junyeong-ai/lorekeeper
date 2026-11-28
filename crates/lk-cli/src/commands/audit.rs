@@ -25,26 +25,44 @@ pub(super) fn assessment_blocker(error: &miette::Report) -> Option<String> {
 
 /// Carries a caller's typed error through a graph callback whose signature allows only
 /// `GraphError`. A `GraphError` passes as itself; any other error (`SourceChanged`, a
-/// publication rejection) is kept here while the callback returns a placeholder naming it,
-/// and `restore` reports the kept error when the graph call fails with that placeholder.
-#[derive(Default)]
-pub(super) struct CarriedError(Option<miette::Report>);
+/// publication rejection) is kept here while the callback returns
+/// `GraphError::CallbackFailed` with this carrier's token, and `restore` reports the kept
+/// error when the graph call fails with that token.
+pub(super) struct CarriedError {
+    token: u64,
+    carried: Option<miette::Report>,
+}
+
+impl Default for CarriedError {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self {
+            token: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            carried: None,
+        }
+    }
+}
 
 impl CarriedError {
     pub(super) fn carry(&mut self, error: miette::Report) -> lk_graph::GraphError {
         match error.downcast::<lk_graph::GraphError>() {
             Ok(error) => error,
             Err(error) => {
-                let placeholder = lk_graph::GraphError::Io(error.to_string());
-                self.0.get_or_insert(error);
+                let placeholder = lk_graph::GraphError::CallbackFailed {
+                    token: self.token,
+                    detail: error.to_string(),
+                };
+                self.carried.get_or_insert(error);
                 placeholder
             }
         }
     }
 
     pub(super) fn restore(self, error: lk_graph::GraphError) -> miette::Report {
-        match (self.0, &error) {
-            (Some(carried), lk_graph::GraphError::Io(detail)) if *detail == carried.to_string() => {
+        match (self.carried, &error) {
+            (Some(carried), lk_graph::GraphError::CallbackFailed { token, .. })
+                if *token == self.token =>
+            {
                 carried
             }
             _ => super::typed_error(error),
@@ -436,7 +454,26 @@ mod carried_error_tests {
         ));
         let mut carried = CarriedError::default();
         carried.carry(miette::miette!("first"));
-        let unrelated = carried.restore(lk_graph::GraphError::Io("another failure".into()));
-        assert_eq!(unrelated.to_string(), "I/O error: another failure");
+        let unrelated = carried.restore(lk_graph::GraphError::Io("first".into()));
+        assert_eq!(
+            unrelated.to_string(),
+            "I/O error: first",
+            "an error that only reads like the carried one is not it"
+        );
+        let mut first = CarriedError::default();
+        let mut second = CarriedError::default();
+        let foreign = second.carry(miette::Report::new(
+            crate::commands::work::SourceChanged::new("wiki/concepts/b.md was removed"),
+        ));
+        first.carry(miette::Report::new(
+            crate::commands::work::SourceChanged::new("wiki/concepts/b.md was removed"),
+        ));
+        assert!(
+            first
+                .restore(foreign)
+                .downcast_ref::<lk_graph::GraphError>()
+                .is_some(),
+            "another carrier's placeholder is not this carrier's error"
+        );
     }
 }
